@@ -21,8 +21,41 @@
 #include "cli/serial_cli.h"
 #include "proxy/http_proxy.h"
 #include "tools/tool_registry.h"
+#include "display/display.h"
 
 static const char *TAG = "mimi";
+
+static esp_err_t init_display(void)
+{
+#if MIMI_DISPLAY_ENABLED
+    display_config_t config = {
+        .type = MIMI_DISPLAY_TYPE,
+        .width = MIMI_DISPLAY_WIDTH,
+        .height = MIMI_DISPLAY_HEIGHT,
+        .i2c_port = MIMI_DISPLAY_I2C_PORT,
+        .sda_pin = MIMI_DISPLAY_SDA_PIN,
+        .scl_pin = MIMI_DISPLAY_SCL_PIN,
+        .i2c_addr = MIMI_DISPLAY_I2C_ADDR,
+        .spi_host = MIMI_DISPLAY_SPI_HOST,
+        .mosi_pin = MIMI_DISPLAY_MOSI_PIN,
+        .sclk_pin = MIMI_DISPLAY_SCLK_PIN,
+        .cs_pin = MIMI_DISPLAY_CS_PIN,
+        .dc_pin = MIMI_DISPLAY_DC_PIN,
+        .rst_pin = MIMI_DISPLAY_RST_PIN,
+        .backlight_pin = MIMI_DISPLAY_BL_PIN,
+    };
+
+    esp_err_t ret = display_init(&config);
+    if (ret == ESP_OK) {
+        display_set_status("Initializing...");
+        display_set_display_status(DISPLAY_STATUS_IDLE);
+    }
+    return ret;
+#else
+    ESP_LOGI(TAG, "Display disabled");
+    return ESP_OK;
+#endif
+}
 
 static esp_err_t init_nvs(void)
 {
@@ -100,6 +133,9 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     ESP_ERROR_CHECK(init_spiffs());
 
+    /* Initialize display early */
+    init_display();
+
     /* Initialize subsystems */
     ESP_ERROR_CHECK(message_bus_init());
     ESP_ERROR_CHECK(memory_store_init());
@@ -115,11 +151,18 @@ void app_main(void)
     ESP_ERROR_CHECK(serial_cli_init());
 
     /* Start WiFi */
+    display_set_status("Connecting WiFi...");
+    display_set_display_status(DISPLAY_STATUS_CONNECTING);
+
     esp_err_t wifi_err = wifi_manager_start();
     if (wifi_err == ESP_OK) {
         ESP_LOGI(TAG, "Waiting for WiFi connection...");
         if (wifi_manager_wait_connected(30000) == ESP_OK) {
             ESP_LOGI(TAG, "WiFi connected: %s", wifi_manager_get_ip());
+
+            display_set_status("WiFi Connected");
+            display_set_display_status(DISPLAY_STATUS_CONNECTED);
+            vTaskDelay(pdMS_TO_TICKS(1000));
 
             /* Start network-dependent services */
             ESP_ERROR_CHECK(telegram_bot_start());
@@ -132,12 +175,19 @@ void app_main(void)
                 MIMI_OUTBOUND_STACK, NULL,
                 MIMI_OUTBOUND_PRIO, NULL, MIMI_OUTBOUND_CORE);
 
+            display_set_status("MimiClaw Ready");
+            display_set_display_status(DISPLAY_STATUS_IDLE);
+
             ESP_LOGI(TAG, "All services started!");
         } else {
             ESP_LOGW(TAG, "WiFi connection timeout. Check MIMI_SECRET_WIFI_SSID in mimi_secrets.h");
+            display_set_status("WiFi Timeout");
+            display_set_display_status(DISPLAY_STATUS_ERROR);
         }
     } else {
         ESP_LOGW(TAG, "No WiFi credentials. Set MIMI_SECRET_WIFI_SSID in mimi_secrets.h");
+        display_set_status("No WiFi Config");
+        display_set_display_status(DISPLAY_STATUS_ERROR);
     }
 
     ESP_LOGI(TAG, "MimiClaw ready. Type 'help' for CLI commands.");

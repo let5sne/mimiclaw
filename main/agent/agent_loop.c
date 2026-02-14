@@ -5,6 +5,7 @@
 #include "llm/llm_proxy.h"
 #include "memory/session_mgr.h"
 #include "tools/tool_registry.h"
+#include "display/display.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -101,6 +102,10 @@ static void agent_loop_task(void *arg)
 
         ESP_LOGI(TAG, "Processing message from %s:%s", msg.channel, msg.chat_id);
 
+        /* Update display with user message */
+        display_show_message("user", msg.content);
+        display_set_display_status(DISPLAY_STATUS_THINKING);
+
         /* 1. Build system prompt */
         context_build_system_prompt(system_prompt, MIMI_CONTEXT_BUF_SIZE);
 
@@ -139,11 +144,14 @@ static void agent_loop_task(void *arg)
                 if (status.content) message_bus_push_outbound(&status);
             }
 
+            display_set_display_status(DISPLAY_STATUS_THINKING);
+
             llm_response_t resp;
             err = llm_chat_tools(system_prompt, messages, tools_json, &resp);
 
             if (err != ESP_OK) {
                 ESP_LOGE(TAG, "LLM call failed: %s", esp_err_to_name(err));
+                display_set_display_status(DISPLAY_STATUS_ERROR);
                 break;
             }
 
@@ -151,6 +159,8 @@ static void agent_loop_task(void *arg)
                 /* Normal completion — save final text and break */
                 if (resp.text && resp.text_len > 0) {
                     final_text = strdup(resp.text);
+                    display_show_message("assistant", resp.text);
+                    display_set_display_status(DISPLAY_STATUS_SPEAKING);
                 }
                 llm_response_free(&resp);
                 break;
@@ -199,10 +209,14 @@ static void agent_loop_task(void *arg)
             if (out.content) {
                 message_bus_push_outbound(&out);
             }
+            display_set_display_status(DISPLAY_STATUS_ERROR);
         }
 
         /* Free inbound message content */
         free(msg.content);
+
+        /* Reset display to idle after processing */
+        display_set_display_status(DISPLAY_STATUS_IDLE);
 
         /* Log memory status */
         ESP_LOGI(TAG, "Free PSRAM: %d bytes",

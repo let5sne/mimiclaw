@@ -13,6 +13,8 @@ idf_component_register(
         "cli/serial_cli.c"
         "ota/ota_manager.c"
         "proxy/http_proxy.c"
+        "display/display.c"
+        "display/ssd1306.c"
         "tools/tool_registry.c"
         "tools/tool_web_search.c"
         "tools/tool_get_time.c"
@@ -21,5 +23,5 @@ idf_component_register(
         "."
     REQUIRES
         nvs_flash esp_wifi esp_netif esp_http_client esp_http_server
-        esp_https_ota esp_event json spiffs console vfs app_update esp-tls
+        esp_https_ota esp_event json spiffs console vfs app_update esp-tls driver
 )
