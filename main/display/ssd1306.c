@@ -167,9 +167,14 @@ esp_err_t ssd1306_init(const display_config_t *config)
 
     ret = i2c_driver_install(s_i2c_port, I2C_MODE_MASTER, 0, 0, 0);
     if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to install I2C driver: %s", esp_err_to_name(ret));
         free(s_buffer);
         return ret;
     }
+
+    /* Probe I2C device */
+    ESP_LOGI(TAG, "Probing I2C addr 0x%02X on SDA=%d SCL=%d",
+             s_i2c_addr, config->sda_pin, config->scl_pin);
 
     /* Initialize display */
     vTaskDelay(pdMS_TO_TICKS(100));
@@ -196,12 +201,22 @@ esp_err_t ssd1306_init(const display_config_t *config)
     i2c_write_cmd(0xF1);
     i2c_write_cmd(SSD1306_CMD_SET_VCOM_DETECT);
     i2c_write_cmd(0x40);
-    i2c_write_cmd(SSD1306_CMD_DISPLAY_ALL_ON);
+    i2c_write_cmd(0xA4);  /* Resume to RAM content display (not all-on) */
     i2c_write_cmd(SSD1306_CMD_DISPLAY_NORMAL);
     i2c_write_cmd(SSD1306_CMD_DEACTIVATE_SCROLL);
     i2c_write_cmd(SSD1306_CMD_DISPLAY_ON);
 
     ESP_LOGI(TAG, "SSD1306 initialized: %dx%d", s_width, s_height);
+
+    /* Draw a test pattern to verify display works */
+    memset(s_buffer, 0, (s_width * s_height) / 8);
+
+    /* Draw "MimiClaw" text */
+    ssd1306_draw_text(16, 4, "MimiClaw", 2);
+
+    /* Flush to screen */
+    ssd1306_update();
+
     return ESP_OK;
 }
 

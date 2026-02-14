@@ -22,6 +22,7 @@
 #include "proxy/http_proxy.h"
 #include "tools/tool_registry.h"
 #include "display/display.h"
+#include "audio/audio.h"
 
 static const char *TAG = "mimi";
 

@@ -221,15 +221,15 @@ static void render_screen(void)
 
     switch (s_config.type) {
         case DISPLAY_TYPE_SSD1306: {
-            /* Status bar (top) */
-            const char *status_icon = "●";
+            /* Status bar (top) - use ASCII-only icons */
+            const char *status_icon = "*";
             switch (s_status) {
-                case DISPLAY_STATUS_CONNECTING: status_icon = "○"; break;
-                case DISPLAY_STATUS_CONNECTED:  status_icon = "●"; break;
-                case DISPLAY_STATUS_THINKING:   status_icon = "◐"; break;
-                case DISPLAY_STATUS_SPEAKING:   status_icon = "◑"; break;
-                case DISPLAY_STATUS_ERROR:      status_icon = "✕"; break;
-                default: status_icon = "●"; break;
+                case DISPLAY_STATUS_CONNECTING: status_icon = "~"; break;
+                case DISPLAY_STATUS_CONNECTED:  status_icon = "*"; break;
+                case DISPLAY_STATUS_THINKING:   status_icon = "?"; break;
+                case DISPLAY_STATUS_SPEAKING:   status_icon = ">"; break;
+                case DISPLAY_STATUS_ERROR:      status_icon = "!"; break;
+                default: status_icon = "*"; break;
             }
 
             char status_line[80];  /* Increased buffer size to prevent truncation */

@@ -24,7 +24,7 @@ static TaskHandle_t s_record_task = NULL;
 
 /* Forward declarations */
 static void listen_task(void *arg);
-static void record_task(void *arg);
+static void record_task(void *arg) __attribute__((unused));
 
 esp_err_t audio_init(const audio_config_t *config)
 {
@@ -303,6 +303,7 @@ static void listen_task(void *arg)
 
 static void record_task(void *arg)
 {
-    /* TODO: Implement recording task */
+    /* TODO: Implement recording task with VAD */
+    (void)arg;
     vTaskDelete(NULL);
 }
