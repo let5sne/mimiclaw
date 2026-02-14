@@ -176,6 +176,36 @@ esp_err_t ssd1306_init(const display_config_t *config)
     ESP_LOGI(TAG, "Probing I2C addr 0x%02X on SDA=%d SCL=%d",
              s_i2c_addr, config->sda_pin, config->scl_pin);
 
+    /* Scan I2C bus to find connected devices */
+    ESP_LOGI(TAG, "Scanning I2C bus...");
+    bool found = false;
+    for (uint8_t addr = 0x03; addr < 0x78; addr++) {
+        i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+        i2c_master_start(cmd);
+        i2c_master_write_byte(cmd, (addr << 1) | I2C_MASTER_WRITE, true);
+        i2c_master_stop(cmd);
+        esp_err_t probe_ret = i2c_master_cmd_begin(s_i2c_port, cmd, pdMS_TO_TICKS(50));
+        i2c_cmd_link_delete(cmd);
+        if (probe_ret == ESP_OK) {
+            ESP_LOGI(TAG, "I2C device found at addr 0x%02X", addr);
+            if (!found) {
+                s_i2c_addr = addr;  /* Use first found device */
+                found = true;
+            }
+        }
+    }
+
+    if (!found) {
+        ESP_LOGE(TAG, "No I2C device found! Check wiring: SDA=%d SCL=%d",
+                 config->sda_pin, config->scl_pin);
+        ESP_LOGE(TAG, "Try swapping SDA and SCL pins");
+        free(s_buffer);
+        i2c_driver_delete(s_i2c_port);
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    ESP_LOGI(TAG, "Using I2C addr 0x%02X", s_i2c_addr);
+
     /* Initialize display */
     vTaskDelay(pdMS_TO_TICKS(100));
 
