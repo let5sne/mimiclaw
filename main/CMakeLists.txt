@@ -15,6 +15,7 @@ idf_component_register(
         "proxy/http_proxy.c"
         "display/display.c"
         "display/ssd1306.c"
+        "audio/audio.c"
         "tools/tool_registry.c"
         "tools/tool_web_search.c"
         "tools/tool_get_time.c"

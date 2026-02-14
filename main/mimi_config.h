@@ -170,3 +170,66 @@
 #define MIMI_DISPLAY_BL_PIN          4
 #endif
 
+/* Audio Configuration */
+#ifndef MIMI_AUDIO_ENABLED
+#define MIMI_AUDIO_ENABLED           0  /* Set to 1 to enable audio */
+#endif
+
+/* I2S Microphone Configuration */
+#ifndef MIMI_AUDIO_MIC_I2S_PORT
+#define MIMI_AUDIO_MIC_I2S_PORT      0
+#endif
+
+#ifndef MIMI_AUDIO_MIC_WS_PIN
+#define MIMI_AUDIO_MIC_WS_PIN        42  /* Word Select / LRCK */
+#endif
+
+#ifndef MIMI_AUDIO_MIC_SCK_PIN
+#define MIMI_AUDIO_MIC_SCK_PIN       41  /* Serial Clock / BCLK */
+#endif
+
+#ifndef MIMI_AUDIO_MIC_SD_PIN
+#define MIMI_AUDIO_MIC_SD_PIN        2   /* Serial Data / DIN */
+#endif
+
+#ifndef MIMI_AUDIO_MIC_SAMPLE_RATE
+#define MIMI_AUDIO_MIC_SAMPLE_RATE   16000
+#endif
+
+#ifndef MIMI_AUDIO_MIC_BITS
+#define MIMI_AUDIO_MIC_BITS          16
+#endif
+
+/* I2S Speaker Configuration */
+#ifndef MIMI_AUDIO_SPK_I2S_PORT
+#define MIMI_AUDIO_SPK_I2S_PORT      1
+#endif
+
+#ifndef MIMI_AUDIO_SPK_WS_PIN
+#define MIMI_AUDIO_SPK_WS_PIN        15
+#endif
+
+#ifndef MIMI_AUDIO_SPK_SCK_PIN
+#define MIMI_AUDIO_SPK_SCK_PIN       16
+#endif
+
+#ifndef MIMI_AUDIO_SPK_SD_PIN
+#define MIMI_AUDIO_SPK_SD_PIN        17
+#endif
+
+#ifndef MIMI_AUDIO_SPK_SAMPLE_RATE
+#define MIMI_AUDIO_SPK_SAMPLE_RATE   16000
+#endif
+
+#ifndef MIMI_AUDIO_SPK_BITS
+#define MIMI_AUDIO_SPK_BITS          16
+#endif
+
+/* Wake Word Configuration */
+#ifndef MIMI_AUDIO_WAKE_WORD
+#define MIMI_AUDIO_WAKE_WORD         "Hi Mimi"
+#endif
+
+#ifndef MIMI_AUDIO_WAKE_THRESHOLD
+#define MIMI_AUDIO_WAKE_THRESHOLD    0.5f
+#endif
