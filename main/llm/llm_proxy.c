@@ -15,6 +15,7 @@ static const char *TAG = "llm";
 
 static char s_api_key[128] = {0};
 static char s_model[64] = MIMI_LLM_DEFAULT_MODEL;
+static char s_api_endpoint[256] = {0};
 
 /* ── Response buffer ──────────────────────────────────────────── */
 
@@ -74,9 +75,18 @@ esp_err_t llm_proxy_init(void)
     /* Start with build-time defaults */
     if (MIMI_SECRET_API_KEY[0] != '\0') {
         strncpy(s_api_key, MIMI_SECRET_API_KEY, sizeof(s_api_key) - 1);
+        s_api_key[sizeof(s_api_key) - 1] = '\0';
     }
     if (MIMI_SECRET_MODEL[0] != '\0') {
         strncpy(s_model, MIMI_SECRET_MODEL, sizeof(s_model) - 1);
+        s_model[sizeof(s_model) - 1] = '\0';
+    }
+    if (MIMI_SECRET_API_ENDPOINT[0] != '\0') {
+        strncpy(s_api_endpoint, MIMI_SECRET_API_ENDPOINT, sizeof(s_api_endpoint) - 1);
+        s_api_endpoint[sizeof(s_api_endpoint) - 1] = '\0';
+    } else {
+        strncpy(s_api_endpoint, MIMI_LLM_API_URL, sizeof(s_api_endpoint) - 1);
+        s_api_endpoint[sizeof(s_api_endpoint) - 1] = '\0';
     }
 
     /* NVS overrides take highest priority (set via CLI) */
@@ -96,7 +106,7 @@ esp_err_t llm_proxy_init(void)
     }
 
     if (s_api_key[0]) {
-        ESP_LOGI(TAG, "LLM proxy initialized (model: %s)", s_model);
+        ESP_LOGI(TAG, "LLM proxy initialized (model: %s, endpoint: %s)", s_model, s_api_endpoint);
     } else {
         ESP_LOGW(TAG, "No API key. Use CLI: set_api_key <KEY>");
     }
@@ -107,8 +117,14 @@ esp_err_t llm_proxy_init(void)
 
 static esp_err_t llm_http_direct(const char *post_data, resp_buf_t *rb, int *out_status)
 {
+    /* Debug: Log API key info */
+    ESP_LOGI(TAG, "API key length: %d, first 10 chars: %.10s, last 10 chars: %s",
+             (int)strlen(s_api_key), s_api_key,
+             s_api_key + strlen(s_api_key) - 10);
+    ESP_LOGI(TAG, "Endpoint: %s", s_api_endpoint);
+
     esp_http_client_config_t config = {
-        .url = MIMI_LLM_API_URL,
+        .url = s_api_endpoint,
         .event_handler = http_event_handler,
         .user_data = rb,
         .timeout_ms = 120 * 1000,
@@ -136,20 +152,63 @@ static esp_err_t llm_http_direct(const char *post_data, resp_buf_t *rb, int *out
 
 static esp_err_t llm_http_via_proxy(const char *post_data, resp_buf_t *rb, int *out_status)
 {
-    proxy_conn_t *conn = proxy_conn_open("api.anthropic.com", 443, 30000);
+    /* Parse endpoint URL to extract host and path */
+    char host[128] = {0};
+    char path[256] = {0};
+    int port = 443;
+
+    /* Extract host and path from s_api_endpoint */
+    /* Expected format: https://host:port/path or https://host/path */
+    const char *url = s_api_endpoint;
+    if (strncmp(url, "https://", 8) == 0) {
+        url += 8;  /* Skip "https://" */
+    } else if (strncmp(url, "http://", 7) == 0) {
+        url += 7;  /* Skip "http://" */
+        port = 80;
+    }
+
+    /* Find the path separator */
+    const char *path_start = strchr(url, '/');
+    if (path_start) {
+        /* Copy host */
+        size_t host_len = path_start - url;
+        if (host_len >= sizeof(host)) host_len = sizeof(host) - 1;
+        strncpy(host, url, host_len);
+        host[host_len] = '\0';
+
+        /* Copy path */
+        strncpy(path, path_start, sizeof(path) - 1);
+        path[sizeof(path) - 1] = '\0';
+    } else {
+        /* No path, use entire URL as host */
+        strncpy(host, url, sizeof(host) - 1);
+        host[sizeof(host) - 1] = '\0';
+        strcpy(path, "/");
+    }
+
+    /* Check for port in host */
+    char *port_sep = strchr(host, ':');
+    if (port_sep) {
+        *port_sep = '\0';
+        port = atoi(port_sep + 1);
+    }
+
+    ESP_LOGI(TAG, "Proxy: connecting to %s:%d, path: %s", host, port, path);
+
+    proxy_conn_t *conn = proxy_conn_open(host, port, 30000);
     if (!conn) return ESP_ERR_HTTP_CONNECT;
 
     int body_len = strlen(post_data);
     char header[512];
     int hlen = snprintf(header, sizeof(header),
-        "POST /v1/messages HTTP/1.1\r\n"
-        "Host: api.anthropic.com\r\n"
+        "POST %s HTTP/1.1\r\n"
+        "Host: %s\r\n"
         "Content-Type: application/json\r\n"
         "x-api-key: %s\r\n"
         "anthropic-version: %s\r\n"
         "Content-Length: %d\r\n"
         "Connection: close\r\n\r\n",
-        s_api_key, MIMI_LLM_API_VERSION, body_len);
+        path, host, s_api_key, MIMI_LLM_API_VERSION, body_len);
 
     if (proxy_conn_write(conn, header, hlen) < 0 ||
         proxy_conn_write(conn, post_data, body_len) < 0) {

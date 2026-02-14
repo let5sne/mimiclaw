@@ -22,6 +22,9 @@
 #ifndef MIMI_SECRET_MODEL
 #define MIMI_SECRET_MODEL           ""
 #endif
+#ifndef MIMI_SECRET_API_ENDPOINT
+#define MIMI_SECRET_API_ENDPOINT    ""
+#endif
 #ifndef MIMI_SECRET_PROXY_HOST
 #define MIMI_SECRET_PROXY_HOST      ""
 #endif
