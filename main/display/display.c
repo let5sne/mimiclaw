@@ -232,7 +232,7 @@ static void render_screen(void)
                 default: status_icon = "●"; break;
             }
 
-            char status_line[32];
+            char status_line[80];  /* Increased buffer size to prevent truncation */
             snprintf(status_line, sizeof(status_line), "%s %s", status_icon, s_status_text);
             ssd1306_draw_text(0, 0, status_line, 1);
             ssd1306_draw_line(0, 10, 127, 10);
