@@ -172,24 +172,24 @@
 
 /* Audio Configuration */
 #ifndef MIMI_AUDIO_ENABLED
-#define MIMI_AUDIO_ENABLED           0  /* Set to 1 to enable audio */
+#define MIMI_AUDIO_ENABLED           1  /* Set to 1 to enable audio */
 #endif
 
-/* I2S Microphone Configuration */
+/* I2S Microphone Configuration (INMP441) */
 #ifndef MIMI_AUDIO_MIC_I2S_PORT
 #define MIMI_AUDIO_MIC_I2S_PORT      0
 #endif
 
 #ifndef MIMI_AUDIO_MIC_WS_PIN
-#define MIMI_AUDIO_MIC_WS_PIN        42  /* Word Select / LRCK */
+#define MIMI_AUDIO_MIC_WS_PIN        4   /* Word Select / LRCK */
 #endif
 
 #ifndef MIMI_AUDIO_MIC_SCK_PIN
-#define MIMI_AUDIO_MIC_SCK_PIN       41  /* Serial Clock / BCLK */
+#define MIMI_AUDIO_MIC_SCK_PIN       5   /* Serial Clock / BCLK */
 #endif
 
 #ifndef MIMI_AUDIO_MIC_SD_PIN
-#define MIMI_AUDIO_MIC_SD_PIN        2   /* Serial Data / DIN */
+#define MIMI_AUDIO_MIC_SD_PIN        6   /* Serial Data / DOUT */
 #endif
 
 #ifndef MIMI_AUDIO_MIC_SAMPLE_RATE
@@ -200,21 +200,21 @@
 #define MIMI_AUDIO_MIC_BITS          16
 #endif
 
-/* I2S Speaker Configuration */
+/* I2S Speaker Configuration (MAX98357A) */
 #ifndef MIMI_AUDIO_SPK_I2S_PORT
 #define MIMI_AUDIO_SPK_I2S_PORT      1
 #endif
 
 #ifndef MIMI_AUDIO_SPK_WS_PIN
-#define MIMI_AUDIO_SPK_WS_PIN        15
+#define MIMI_AUDIO_SPK_WS_PIN        16  /* LRC */
 #endif
 
 #ifndef MIMI_AUDIO_SPK_SCK_PIN
-#define MIMI_AUDIO_SPK_SCK_PIN       16
+#define MIMI_AUDIO_SPK_SCK_PIN       15  /* BCLK */
 #endif
 
 #ifndef MIMI_AUDIO_SPK_SD_PIN
-#define MIMI_AUDIO_SPK_SD_PIN        17
+#define MIMI_AUDIO_SPK_SD_PIN        7   /* DIN */
 #endif
 
 #ifndef MIMI_AUDIO_SPK_SAMPLE_RATE
@@ -224,6 +224,31 @@
 #ifndef MIMI_AUDIO_SPK_BITS
 #define MIMI_AUDIO_SPK_BITS          16
 #endif
+
+/* Voice Channel Configuration */
+#ifndef MIMI_VOICE_ENABLED
+#define MIMI_VOICE_ENABLED           1  /* Set to 1 to enable push-to-talk voice */
+#endif
+
+#ifndef MIMI_VOICE_BUTTON_PIN
+#define MIMI_VOICE_BUTTON_PIN        0  /* GPIO for push-to-talk (active LOW, internal pull-up) */
+#endif
+
+#ifndef MIMI_VOICE_GATEWAY_URL
+#define MIMI_VOICE_GATEWAY_URL       "http://192.168.1.100:8090"
+#endif
+
+#ifndef MIMI_VOICE_MAX_RECORD_S
+#define MIMI_VOICE_MAX_RECORD_S      15
+#endif
+
+#define MIMI_VOICE_TASK_STACK        (8 * 1024)
+#define MIMI_VOICE_TASK_PRIO         5
+#define MIMI_VOICE_TASK_CORE         0
+
+/* NVS for voice config */
+#define MIMI_NVS_VOICE               "voice_config"
+#define MIMI_NVS_KEY_VOICE_GW        "gateway_url"
 
 /* Wake Word Configuration */
 #ifndef MIMI_AUDIO_WAKE_WORD

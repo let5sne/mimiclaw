@@ -7,9 +7,12 @@
 #include "memory/session_mgr.h"
 #include "proxy/http_proxy.h"
 #include "tools/tool_web_search.h"
+#include "audio/audio.h"
+#include "voice/voice_channel.h"
 
 #include <string.h>
 #include <stdio.h>
+#include <math.h>
 #include "esp_log.h"
 #include "esp_console.h"
 #include "esp_system.h"
@@ -266,6 +269,7 @@ static int cmd_config_show(int argc, char **argv)
     print_config("Proxy Host", MIMI_NVS_PROXY,  MIMI_NVS_KEY_PROXY_HOST, MIMI_SECRET_PROXY_HOST, false);
     print_config("Proxy Port", MIMI_NVS_PROXY,  MIMI_NVS_KEY_PROXY_PORT, MIMI_SECRET_PROXY_PORT, false);
     print_config("Search Key", MIMI_NVS_SEARCH, MIMI_NVS_KEY_API_KEY,  MIMI_SECRET_SEARCH_KEY, true);
+    print_config("Voice GW",   MIMI_NVS_VOICE,  MIMI_NVS_KEY_VOICE_GW, MIMI_VOICE_GATEWAY_URL, false);
     printf("=============================\n");
     return 0;
 }
@@ -274,9 +278,10 @@ static int cmd_config_show(int argc, char **argv)
 static int cmd_config_reset(int argc, char **argv)
 {
     const char *namespaces[] = {
-        MIMI_NVS_WIFI, MIMI_NVS_TG, MIMI_NVS_LLM, MIMI_NVS_PROXY, MIMI_NVS_SEARCH
+        MIMI_NVS_WIFI, MIMI_NVS_TG, MIMI_NVS_LLM, MIMI_NVS_PROXY, MIMI_NVS_SEARCH,
+        MIMI_NVS_VOICE
     };
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 6; i++) {
         nvs_handle_t nvs;
         if (nvs_open(namespaces[i], NVS_READWRITE, &nvs) == ESP_OK) {
             nvs_erase_all(nvs);
@@ -294,6 +299,120 @@ static int cmd_restart(int argc, char **argv)
     printf("Restarting...\n");
     esp_restart();
     return 0;  /* unreachable */
+}
+
+/* --- set_voice_gw command --- */
+static struct {
+    struct arg_str *url;
+    struct arg_end *end;
+} voice_gw_args;
+
+static int cmd_set_voice_gw(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&voice_gw_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, voice_gw_args.end, argv[0]);
+        return 1;
+    }
+    voice_channel_set_gateway(voice_gw_args.url->sval[0]);
+    printf("Voice gateway URL saved: %s\n", voice_gw_args.url->sval[0]);
+    return 0;
+}
+
+/* --- audio_test command: play a 1kHz sine wave for 1 second --- */
+static int cmd_audio_test(int argc, char **argv)
+{
+#if MIMI_AUDIO_ENABLED
+    printf("Playing 1kHz test tone (1 second)...\n");
+
+    const int sample_rate = MIMI_AUDIO_SPK_SAMPLE_RATE;
+    const int duration_ms = 1000;
+    const int num_samples = sample_rate * duration_ms / 1000;
+    const float freq = 1000.0f;
+    const float amplitude = 16000.0f;  /* ~50% of int16 max */
+
+    size_t buf_size = num_samples * sizeof(int16_t);
+    int16_t *buf = malloc(buf_size);
+    if (!buf) {
+        printf("Out of memory for audio buffer (%d bytes)\n", (int)buf_size);
+        return 1;
+    }
+
+    for (int i = 0; i < num_samples; i++) {
+        buf[i] = (int16_t)(amplitude * sinf(2.0f * M_PI * freq * i / sample_rate));
+    }
+
+    esp_err_t ret = audio_play((const uint8_t *)buf, buf_size);
+    free(buf);
+
+    if (ret != ESP_OK) {
+        printf("Playback failed: %s\n", esp_err_to_name(ret));
+        return 1;
+    }
+    printf("Done.\n");
+    return 0;
+#else
+    printf("Audio is disabled. Set MIMI_AUDIO_ENABLED=1 in mimi_config.h\n");
+    return 1;
+#endif
+}
+
+/* --- mic_test command: read mic for 2 seconds and print RMS levels --- */
+static int cmd_mic_test(int argc, char **argv)
+{
+#if MIMI_AUDIO_ENABLED
+    printf("Recording from mic for 2 seconds...\n");
+    printf("Speak or make noise to see levels.\n\n");
+
+    esp_err_t ret = audio_start_listening();
+    if (ret != ESP_OK) {
+        printf("Failed to start mic: %s\n", esp_err_to_name(ret));
+        return 1;
+    }
+
+    const int chunk_samples = 512;
+    int16_t *buf = malloc(chunk_samples * sizeof(int16_t));
+    if (!buf) {
+        audio_stop_listening();
+        printf("Out of memory\n");
+        return 1;
+    }
+
+    const int iterations = (MIMI_AUDIO_MIC_SAMPLE_RATE * 2) / chunk_samples;
+
+    for (int iter = 0; iter < iterations; iter++) {
+        size_t bytes_read = 0;
+        ret = audio_mic_read(buf, chunk_samples * sizeof(int16_t), &bytes_read, 1000);
+        if (ret != ESP_OK) {
+            printf("Read error: %s\n", esp_err_to_name(ret));
+            break;
+        }
+
+        int samples = bytes_read / sizeof(int16_t);
+        int64_t sum_sq = 0;
+        int16_t peak = 0;
+        for (int i = 0; i < samples; i++) {
+            sum_sq += (int64_t)buf[i] * buf[i];
+            int16_t abs_val = buf[i] < 0 ? -buf[i] : buf[i];
+            if (abs_val > peak) peak = abs_val;
+        }
+        int rms = (int)sqrtf((float)sum_sq / samples);
+
+        int bar_len = rms / 500;
+        if (bar_len > 40) bar_len = 40;
+        printf("RMS:%5d Peak:%5d |", rms, peak);
+        for (int i = 0; i < bar_len; i++) printf("#");
+        printf("\n");
+    }
+
+    free(buf);
+    audio_stop_listening();
+    printf("\nMic test done.\n");
+    return 0;
+#else
+    printf("Audio is disabled. Set MIMI_AUDIO_ENABLED=1 in mimi_config.h\n");
+    return 1;
+#endif
 }
 
 esp_err_t serial_cli_init(void)
@@ -465,6 +584,33 @@ esp_err_t serial_cli_init(void)
         .func = &cmd_restart,
     };
     esp_console_cmd_register(&restart_cmd);
+
+    /* audio_test */
+    esp_console_cmd_t audio_test_cmd = {
+        .command = "audio_test",
+        .help = "Play a 1kHz sine wave test tone for 1 second",
+        .func = &cmd_audio_test,
+    };
+    esp_console_cmd_register(&audio_test_cmd);
+
+    /* mic_test */
+    esp_console_cmd_t mic_test_cmd = {
+        .command = "mic_test",
+        .help = "Read microphone for 2 seconds and print RMS levels",
+        .func = &cmd_mic_test,
+    };
+    esp_console_cmd_register(&mic_test_cmd);
+
+    /* set_voice_gw */
+    voice_gw_args.url = arg_str1(NULL, NULL, "<url>", "Voice gateway URL (e.g. http://192.168.1.100:8090)");
+    voice_gw_args.end = arg_end(1);
+    esp_console_cmd_t voice_gw_cmd = {
+        .command = "set_voice_gw",
+        .help = "Set voice gateway URL for STT/TTS",
+        .func = &cmd_set_voice_gw,
+        .argtable = &voice_gw_args,
+    };
+    esp_console_cmd_register(&voice_gw_cmd);
 
     /* Start REPL */
     ESP_ERROR_CHECK(esp_console_start_repl(repl));

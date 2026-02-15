@@ -109,6 +109,25 @@ void audio_set_mute(bool mute);
  */
 void audio_set_event_callback(audio_event_cb_t callback, void *user_data);
 
+/**
+ * Enable/disable mic I2S channel directly (no listen task).
+ * Use these for manual recording via audio_mic_read().
+ */
+esp_err_t audio_mic_enable(void);
+void audio_mic_disable(void);
+
+/**
+ * Read raw samples from microphone (blocking).
+ * Caller must enable mic channel first or call audio_start_listening().
+ *
+ * @param buf       Output buffer for int16_t samples
+ * @param buf_size  Buffer size in bytes
+ * @param bytes_read  Actual bytes read
+ * @param timeout_ms  Timeout in milliseconds
+ * @return ESP_OK on success
+ */
+esp_err_t audio_mic_read(void *buf, size_t buf_size, size_t *bytes_read, uint32_t timeout_ms);
+
 #ifdef __cplusplus
 }
 #endif

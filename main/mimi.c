@@ -22,7 +22,9 @@
 #include "proxy/http_proxy.h"
 #include "tools/tool_registry.h"
 #include "display/display.h"
+#include "display/font_cjk.h"
 #include "audio/audio.h"
+#include "voice/voice_channel.h"
 
 static const char *TAG = "mimi";
 
@@ -106,6 +108,14 @@ static void outbound_dispatch_task(void *arg)
             telegram_send_message(msg.chat_id, msg.content);
         } else if (strcmp(msg.channel, MIMI_CHAN_WEBSOCKET) == 0) {
             ws_server_send(msg.chat_id, msg.content);
+        } else if (strcmp(msg.channel, MIMI_CHAN_VOICE) == 0) {
+            /* Skip "thinking" status messages (e.g. "mimi💭 is pondering...") */
+            if (strncmp(msg.content, "mimi", 4) == 0 && strstr(msg.content, "...")) {
+                ESP_LOGI(TAG, "Voice: skipping status msg");
+            } else {
+                ESP_LOGI(TAG, "Voice outbound: \"%.*s\"", 200, msg.content);
+                voice_channel_speak(msg.content);
+            }
         } else {
             ESP_LOGW(TAG, "Unknown channel: %s", msg.channel);
         }
@@ -134,8 +144,35 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     ESP_ERROR_CHECK(init_spiffs());
 
+    /* Load CJK font (non-fatal if missing) */
+    font_cjk_init("/spiffs/fonts/unifont_cjk.bin");
+
     /* Initialize display early */
     init_display();
+
+#if MIMI_AUDIO_ENABLED
+    /* Initialize audio */
+    {
+        audio_config_t audio_cfg = {
+            .mic_i2s_port = MIMI_AUDIO_MIC_I2S_PORT,
+            .mic_ws_pin = MIMI_AUDIO_MIC_WS_PIN,
+            .mic_sck_pin = MIMI_AUDIO_MIC_SCK_PIN,
+            .mic_sd_pin = MIMI_AUDIO_MIC_SD_PIN,
+            .mic_sample_rate = MIMI_AUDIO_MIC_SAMPLE_RATE,
+            .mic_bits_per_sample = MIMI_AUDIO_MIC_BITS,
+            .spk_i2s_port = MIMI_AUDIO_SPK_I2S_PORT,
+            .spk_ws_pin = MIMI_AUDIO_SPK_WS_PIN,
+            .spk_sck_pin = MIMI_AUDIO_SPK_SCK_PIN,
+            .spk_sd_pin = MIMI_AUDIO_SPK_SD_PIN,
+            .spk_sample_rate = MIMI_AUDIO_SPK_SAMPLE_RATE,
+            .spk_bits_per_sample = MIMI_AUDIO_SPK_BITS,
+        };
+        esp_err_t audio_ret = audio_init(&audio_cfg);
+        if (audio_ret != ESP_OK) {
+            ESP_LOGW(TAG, "Audio init failed: %s", esp_err_to_name(audio_ret));
+        }
+    }
+#endif
 
     /* Initialize subsystems */
     ESP_ERROR_CHECK(message_bus_init());
@@ -178,6 +215,27 @@ void app_main(void)
 
             display_set_status("MimiClaw Ready");
             display_set_display_status(DISPLAY_STATUS_IDLE);
+
+#if MIMI_VOICE_ENABLED && MIMI_AUDIO_ENABLED
+            /* Initialize and start voice channel */
+            {
+                voice_channel_config_t voice_cfg = {
+                    .button_gpio = MIMI_VOICE_BUTTON_PIN,
+                    .max_record_sec = MIMI_VOICE_MAX_RECORD_S,
+                };
+                strncpy(voice_cfg.gateway_url, MIMI_VOICE_GATEWAY_URL,
+                        sizeof(voice_cfg.gateway_url) - 1);
+
+                esp_err_t voice_ret = voice_channel_init(&voice_cfg);
+                if (voice_ret == ESP_OK) {
+                    voice_channel_start();
+                    ESP_LOGI(TAG, "Voice channel started");
+                } else {
+                    ESP_LOGW(TAG, "Voice channel init failed: %s",
+                             esp_err_to_name(voice_ret));
+                }
+            }
+#endif
 
             ESP_LOGI(TAG, "All services started!");
         } else {

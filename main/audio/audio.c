@@ -267,6 +267,29 @@ void audio_set_event_callback(audio_event_cb_t callback, void *user_data)
     s_event_user_data = user_data;
 }
 
+esp_err_t audio_mic_enable(void)
+{
+    if (!s_initialized || !s_mic_handle) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return i2s_channel_enable(s_mic_handle);
+}
+
+void audio_mic_disable(void)
+{
+    if (s_mic_handle) {
+        i2s_channel_disable(s_mic_handle);
+    }
+}
+
+esp_err_t audio_mic_read(void *buf, size_t buf_size, size_t *bytes_read, uint32_t timeout_ms)
+{
+    if (!s_initialized || !s_mic_handle) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return i2s_channel_read(s_mic_handle, buf, buf_size, bytes_read, pdMS_TO_TICKS(timeout_ms));
+}
+
 /* Private functions */
 
 static void listen_task(void *arg)
