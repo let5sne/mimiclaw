@@ -239,7 +239,7 @@ static void render_screen(void)
 
             /* Message area */
             if (s_message_buffer[0]) {
-                ssd1306_draw_text_wrapped(0, 14, s_message_buffer, 1, 16);
+                ssd1306_draw_text_wrapped(0, 14, s_message_buffer, 1, 128);
             }
             break;
         }

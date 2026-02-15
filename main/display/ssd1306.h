@@ -76,7 +76,7 @@ void ssd1306_draw_text(int x, int y, const char *text, int scale);
 /**
  * Draw text with word wrapping
  */
-void ssd1306_draw_text_wrapped(int x, int y, const char *text, int scale, int max_width);
+void ssd1306_draw_text_wrapped(int x, int y, const char *text, int scale, int max_width_px);
 
 /**
  * Set contrast (0-255)

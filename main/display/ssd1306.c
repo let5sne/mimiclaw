@@ -1,4 +1,5 @@
 #include "ssd1306.h"
+#include "font_cjk.h"
 #include "driver/i2c.h"
 #include "esp_log.h"
 #include <string.h>
@@ -335,90 +336,161 @@ void ssd1306_draw_rect(int x, int y, int w, int h, bool fill)
     }
 }
 
+/* Decode one UTF-8 character, advance *pp past it. Returns Unicode codepoint, 0 on error. */
+static uint32_t utf8_decode(const char **pp)
+{
+    const uint8_t *p = (const uint8_t *)*pp;
+    uint32_t cp;
+    int extra;
+
+    if (*p < 0x80) {
+        cp = *p++;
+        extra = 0;
+    } else if ((*p & 0xE0) == 0xC0) {
+        cp = *p++ & 0x1F;
+        extra = 1;
+    } else if ((*p & 0xF0) == 0xE0) {
+        cp = *p++ & 0x0F;
+        extra = 2;
+    } else if ((*p & 0xF8) == 0xF0) {
+        cp = *p++ & 0x07;
+        extra = 3;
+    } else {
+        /* Invalid lead byte – skip it */
+        *pp = (const char *)(p + 1);
+        return 0xFFFD;
+    }
+
+    for (int i = 0; i < extra; i++) {
+        if ((*p & 0xC0) != 0x80) { *pp = (const char *)p; return 0xFFFD; }
+        cp = (cp << 6) | (*p++ & 0x3F);
+    }
+
+    *pp = (const char *)p;
+    return cp;
+}
+
+/* Draw a 16x16 glyph bitmap (row-major, 2 bytes/row, MSB-left) */
+static void draw_glyph_16x16(int x, int y, const uint8_t *bitmap)
+{
+    for (int row = 0; row < 16; row++) {
+        uint8_t hi = bitmap[row * 2];
+        uint8_t lo = bitmap[row * 2 + 1];
+        for (int col = 0; col < 8; col++) {
+            if (hi & (0x80 >> col))
+                ssd1306_draw_pixel(x + col, y + row, true);
+        }
+        for (int col = 0; col < 8; col++) {
+            if (lo & (0x80 >> col))
+                ssd1306_draw_pixel(x + 8 + col, y + row, true);
+        }
+    }
+}
+
+/* Draw a single 8x8 ASCII glyph at scale */
+static void draw_ascii_glyph(int x, int y, uint8_t c, int scale)
+{
+    if (c < 32 || c > 127) c = 32;
+    const uint8_t *glyph = font8x8_basic[c - 32];
+    for (int row = 0; row < 8; row++) {
+        for (int col = 0; col < 8; col++) {
+            if (glyph[row] & (1 << col)) {
+                for (int sy = 0; sy < scale; sy++) {
+                    for (int sx = 0; sx < scale; sx++) {
+                        ssd1306_draw_pixel(x + col * scale + sx,
+                                         y + row * scale + sy, true);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/* Check if codepoint is CJK (U+2E80..U+9FFF, U+F900..U+FAFF, U+FE30..U+FE4F,
+   fullwidth punctuation U+3000..U+303F, U+FF00..U+FFEF) */
+static bool is_cjk(uint32_t cp)
+{
+    return (cp >= 0x2E80 && cp <= 0x9FFF) ||
+           (cp >= 0x3000 && cp <= 0x303F) ||
+           (cp >= 0xF900 && cp <= 0xFAFF) ||
+           (cp >= 0xFE30 && cp <= 0xFE4F) ||
+           (cp >= 0xFF00 && cp <= 0xFFEF);
+}
+
 void ssd1306_draw_text(int x, int y, const char *text, int scale)
 {
     if (!text) return;
 
     int cursor_x = x;
-    int cursor_y = y;
 
     while (*text) {
-        char c = *text++;
-        if (c < 32 || c > 127) c = 32;
+        uint32_t cp = utf8_decode(&text);
+        if (cp == 0) break;
 
-        const uint8_t *glyph = font8x8_basic[c - 32];
-
-        for (int row = 0; row < 8; row++) {
-            for (int col = 0; col < 8; col++) {
-                if (glyph[row] & (1 << col)) {
-                    for (int sy = 0; sy < scale; sy++) {
-                        for (int sx = 0; sx < scale; sx++) {
-                            ssd1306_draw_pixel(cursor_x + col * scale + sx,
-                                             cursor_y + row * scale + sy, true);
-                        }
-                    }
-                }
+        if (is_cjk(cp)) {
+            const uint8_t *bmp = font_cjk_get_glyph(cp);
+            if (bmp) {
+                draw_glyph_16x16(cursor_x, y, bmp);
             }
+            cursor_x += 16;
+        } else {
+            draw_ascii_glyph(cursor_x, y, (uint8_t)cp, scale);
+            cursor_x += 8 * scale;
         }
 
-        cursor_x += 8 * scale;
         if (cursor_x >= s_width) break;
     }
 }
 
-void ssd1306_draw_text_wrapped(int x, int y, const char *text, int scale, int max_width)
+void ssd1306_draw_text_wrapped(int x, int y, const char *text, int scale, int max_width_px)
 {
     if (!text) return;
 
     int cursor_x = x;
     int cursor_y = y;
-    int char_width = 8 * scale;
-    int line_height = 8 * scale;
+    int line_height = 16;  /* Uniform 16px line height for mixed text */
 
-    const char *word_start = text;
-    const char *p = text;
-
-    while (*p) {
-        if (*p == ' ' || *p == '\n' || *(p + 1) == '\0') {
-            /* Draw word */
-            int word_len = p - word_start + (*p != ' ' && *p != '\n' ? 1 : 0);
-            int word_width = word_len * char_width;
-
-            if (cursor_x + word_width > x + max_width * char_width) {
-                cursor_x = x;
-                cursor_y += line_height;
-            }
-
-            for (int i = 0; i < word_len; i++) {
-                char c = word_start[i];
-                if (c < 32 || c > 127) c = 32;
-
-                const uint8_t *glyph = font8x8_basic[c - 32];
-                for (int row = 0; row < 8; row++) {
-                    for (int col = 0; col < 8; col++) {
-                        if (glyph[row] & (1 << col)) {
-                            for (int sy = 0; sy < scale; sy++) {
-                                for (int sx = 0; sx < scale; sx++) {
-                                    ssd1306_draw_pixel(cursor_x + col * scale + sx,
-                                                     cursor_y + row * scale + sy, true);
-                                }
-                            }
-                        }
-                    }
-                }
-                cursor_x += char_width;
-            }
-
-            if (*p == '\n') {
-                cursor_x = x;
-                cursor_y += line_height;
-            } else if (*p == ' ') {
-                cursor_x += char_width;
-            }
-
-            word_start = p + 1;
+    while (*text) {
+        if (*text == '\n') {
+            text++;
+            cursor_x = x;
+            cursor_y += line_height;
+            if (cursor_y + line_height > s_height) break;
+            continue;
         }
-        p++;
+
+        uint32_t cp = utf8_decode(&text);
+        if (cp == 0) break;
+
+        int glyph_w;
+        bool cjk = is_cjk(cp);
+        if (cjk) {
+            glyph_w = 16;
+        } else {
+            glyph_w = 8 * scale;
+        }
+
+        /* Wrap if this glyph won't fit on current line */
+        if (cursor_x + glyph_w > x + max_width_px) {
+            cursor_x = x;
+            cursor_y += line_height;
+            if (cursor_y + line_height > s_height) break;
+
+            /* Skip leading space after wrap */
+            if (cp == ' ') continue;
+        }
+
+        if (cjk) {
+            const uint8_t *bmp = font_cjk_get_glyph(cp);
+            if (bmp) {
+                draw_glyph_16x16(cursor_x, cursor_y, bmp);
+            }
+        } else {
+            /* Vertically center 8px ASCII glyph within 16px line */
+            draw_ascii_glyph(cursor_x, cursor_y + 4, (uint8_t)cp, scale);
+        }
+
+        cursor_x += glyph_w;
     }
 }
 
