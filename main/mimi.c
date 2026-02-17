@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include <inttypes.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -21,12 +22,86 @@
 #include "cli/serial_cli.h"
 #include "proxy/http_proxy.h"
 #include "tools/tool_registry.h"
+#include "security/access_control.h"
+#include "heartbeat/heartbeat_service.h"
+#include "cron/cron_service.h"
 #include "display/display.h"
 #include "display/font_cjk.h"
 #include "audio/audio.h"
 #include "voice/voice_channel.h"
 
 static const char *TAG = "mimi";
+
+static bool outbound_is_status_text(const char *text)
+{
+    if (!text) return false;
+    return (strncmp(text, "mimi", 4) == 0) && (strstr(text, "...") != NULL);
+}
+
+static uint32_t outbound_send_retry_delay_ms(int attempt)
+{
+    uint32_t delay = MIMI_OUTBOUND_SEND_RETRY_BASE_MS;
+    for (int i = 1; i < attempt; i++) {
+        delay <<= 1;
+        if (delay > 5000) {
+            delay = 5000;
+            break;
+        }
+    }
+    return delay;
+}
+
+static esp_err_t outbound_send_once(const mimi_msg_t *msg, bool is_status)
+{
+    if (strcmp(msg->channel, MIMI_CHAN_TELEGRAM) == 0) {
+        return telegram_send_message(msg->chat_id, msg->content);
+    }
+
+    if (strcmp(msg->channel, MIMI_CHAN_WEBSOCKET) == 0) {
+        return ws_server_send(msg->chat_id, msg->content);
+    }
+
+    if (strcmp(msg->channel, MIMI_CHAN_VOICE) == 0) {
+        if (is_status) {
+            ESP_LOGI(TAG, "Voice: skipping status msg");
+            return ESP_OK;
+        }
+        ESP_LOGI(TAG, "Voice outbound: \"%.*s\"", 200, msg->content);
+        return voice_channel_speak(msg->content);
+    }
+
+    if (strcmp(msg->channel, MIMI_CHAN_SYSTEM) == 0) {
+        ESP_LOGI(TAG, "System outbound (local-only): \"%.*s\"", 200, msg->content);
+        return ESP_OK;
+    }
+
+    ESP_LOGW(TAG, "Unknown channel: %s", msg->channel);
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+static esp_err_t outbound_send_with_retry(const mimi_msg_t *msg)
+{
+    bool is_status = outbound_is_status_text(msg->content);
+    int max_attempts = is_status ? 1 : MIMI_OUTBOUND_SEND_RETRY_MAX;
+    esp_err_t last_err = ESP_FAIL;
+
+    for (int attempt = 1; attempt <= max_attempts; attempt++) {
+        last_err = outbound_send_once(msg, is_status);
+        if (last_err == ESP_OK) {
+            return ESP_OK;
+        }
+
+        if (attempt < max_attempts) {
+            uint32_t delay_ms = outbound_send_retry_delay_ms(attempt);
+            ESP_LOGW(TAG, "Outbound send failed for %s:%s (%s), retry %d/%d in %" PRIu32 " ms",
+                     msg->channel, msg->chat_id, esp_err_to_name(last_err),
+                     attempt, max_attempts, delay_ms);
+            vTaskDelay(pdMS_TO_TICKS(delay_ms));
+        }
+    }
+
+    return last_err;
+}
 
 static esp_err_t init_display(void)
 {
@@ -104,23 +179,14 @@ static void outbound_dispatch_task(void *arg)
 
         ESP_LOGI(TAG, "Dispatching response to %s:%s", msg.channel, msg.chat_id);
 
-        if (strcmp(msg.channel, MIMI_CHAN_TELEGRAM) == 0) {
-            telegram_send_message(msg.chat_id, msg.content);
-        } else if (strcmp(msg.channel, MIMI_CHAN_WEBSOCKET) == 0) {
-            ws_server_send(msg.chat_id, msg.content);
-        } else if (strcmp(msg.channel, MIMI_CHAN_VOICE) == 0) {
-            /* Skip "thinking" status messages (e.g. "mimi💭 is pondering...") */
-            if (strncmp(msg.content, "mimi", 4) == 0 && strstr(msg.content, "...")) {
-                ESP_LOGI(TAG, "Voice: skipping status msg");
-            } else {
-                ESP_LOGI(TAG, "Voice outbound: \"%.*s\"", 200, msg.content);
-                voice_channel_speak(msg.content);
-            }
-        } else {
-            ESP_LOGW(TAG, "Unknown channel: %s", msg.channel);
+        esp_err_t send_err = outbound_send_with_retry(&msg);
+        if (send_err != ESP_OK) {
+            agent_loop_record_outbound_send_failure();
+            ESP_LOGE(TAG, "Outbound send failed permanently for %s:%s (%s)",
+                     msg.channel, msg.chat_id, esp_err_to_name(send_err));
         }
 
-        free(msg.content);
+        message_bus_msg_free(&msg);
     }
 }
 
@@ -180,6 +246,7 @@ void app_main(void)
     ESP_ERROR_CHECK(session_mgr_init());
     ESP_ERROR_CHECK(wifi_manager_init());
     ESP_ERROR_CHECK(http_proxy_init());
+    ESP_ERROR_CHECK(access_control_init());
     ESP_ERROR_CHECK(telegram_bot_init());
     ESP_ERROR_CHECK(llm_proxy_init());
     ESP_ERROR_CHECK(tool_registry_init());
@@ -206,6 +273,36 @@ void app_main(void)
             ESP_ERROR_CHECK(telegram_bot_start());
             ESP_ERROR_CHECK(agent_loop_start());
             ESP_ERROR_CHECK(ws_server_start());
+
+#if MIMI_HEARTBEAT_ENABLED
+            {
+                esp_err_t hb_err = heartbeat_service_init();
+                if (hb_err == ESP_OK) {
+                    hb_err = heartbeat_service_start();
+                }
+                if (hb_err != ESP_OK) {
+                    ESP_LOGW(TAG, "Heartbeat disabled due to init/start failure: %s",
+                             esp_err_to_name(hb_err));
+                } else {
+                    ESP_LOGI(TAG, "Heartbeat service started");
+                }
+            }
+#endif
+
+#if MIMI_CRON_ENABLED
+            {
+                esp_err_t cron_err = cron_service_init();
+                if (cron_err == ESP_OK) {
+                    cron_err = cron_service_start();
+                }
+                if (cron_err != ESP_OK) {
+                    ESP_LOGW(TAG, "Cron disabled due to init/start failure: %s",
+                             esp_err_to_name(cron_err));
+                } else {
+                    ESP_LOGI(TAG, "Cron service started");
+                }
+            }
+#endif
 
             /* Outbound dispatch task */
             xTaskCreatePinnedToCore(

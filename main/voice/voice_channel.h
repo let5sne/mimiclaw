@@ -10,6 +10,7 @@ extern "C" {
 /* Voice channel states */
 typedef enum {
     VOICE_STATE_IDLE = 0,
+    VOICE_STATE_CONNECTING,
     VOICE_STATE_RECORDING,
     VOICE_STATE_PROCESSING,
     VOICE_STATE_PLAYING,
@@ -17,7 +18,7 @@ typedef enum {
 
 /* Voice channel configuration */
 typedef struct {
-    char gateway_url[128];  /* e.g. "http://192.168.1.100:8090" */
+    char gateway_url[128];  /* e.g. "ws://192.168.1.100:8090" */
     int button_gpio;        /* Push-to-talk button GPIO (active LOW) */
     int max_record_sec;     /* Max recording duration in seconds */
 } voice_channel_config_t;
@@ -49,6 +50,11 @@ esp_err_t voice_channel_speak(const char *text);
  * Get current voice channel state.
  */
 voice_state_t voice_channel_get_state(void);
+
+/**
+ * Check if WebSocket is connected to gateway.
+ */
+bool voice_channel_is_connected(void);
 
 /**
  * Update gateway URL at runtime (persisted to NVS).

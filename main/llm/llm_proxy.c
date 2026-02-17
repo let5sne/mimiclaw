@@ -4,6 +4,9 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <inttypes.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
@@ -117,12 +120,6 @@ esp_err_t llm_proxy_init(void)
 
 static esp_err_t llm_http_direct(const char *post_data, resp_buf_t *rb, int *out_status)
 {
-    /* Debug: Log API key info */
-    ESP_LOGI(TAG, "API key length: %d, first 10 chars: %.10s, last 10 chars: %s",
-             (int)strlen(s_api_key), s_api_key,
-             s_api_key + strlen(s_api_key) - 10);
-    ESP_LOGI(TAG, "Endpoint: %s", s_api_endpoint);
-
     esp_http_client_config_t config = {
         .url = s_api_endpoint,
         .event_handler = http_event_handler,
@@ -256,6 +253,55 @@ static esp_err_t llm_http_call(const char *post_data, resp_buf_t *rb, int *out_s
     }
 }
 
+static bool llm_status_retryable(int status)
+{
+    return status == 0 || status == 408 || status == 409 ||
+           status == 425 || status == 429 || (status >= 500 && status <= 599);
+}
+
+static uint32_t llm_retry_delay_ms(int attempt)
+{
+    uint32_t delay = MIMI_LLM_RETRY_BASE_MS;
+    for (int i = 1; i < attempt; i++) {
+        if (delay >= MIMI_LLM_RETRY_MAX_DELAY_MS) break;
+        delay <<= 1;
+        if (delay > MIMI_LLM_RETRY_MAX_DELAY_MS) {
+            delay = MIMI_LLM_RETRY_MAX_DELAY_MS;
+            break;
+        }
+    }
+    return delay;
+}
+
+/* 返回值与 llm_http_call 保持一致；会在瞬时错误时自动重试。 */
+static esp_err_t llm_http_call_with_retry(const char *post_data, resp_buf_t *rb, int *out_status)
+{
+    esp_err_t last_err = ESP_FAIL;
+    int last_status = 0;
+
+    for (int attempt = 1; attempt <= MIMI_LLM_RETRY_MAX; attempt++) {
+        rb->len = 0;
+        if (rb->data && rb->cap > 0) rb->data[0] = '\0';
+
+        last_err = llm_http_call(post_data, rb, &last_status);
+        bool should_retry = (last_err != ESP_OK) || llm_status_retryable(last_status);
+        if (!should_retry) {
+            *out_status = last_status;
+            return ESP_OK;
+        }
+
+        if (attempt < MIMI_LLM_RETRY_MAX) {
+            uint32_t delay_ms = llm_retry_delay_ms(attempt);
+            ESP_LOGW(TAG, "Transient LLM failure (attempt %d/%d, err=%s, status=%d), retry in %" PRIu32 " ms",
+                     attempt, MIMI_LLM_RETRY_MAX, esp_err_to_name(last_err), last_status, delay_ms);
+            vTaskDelay(pdMS_TO_TICKS(delay_ms));
+        }
+    }
+
+    *out_status = last_status;
+    return last_err;
+}
+
 /* ── Parse text from JSON response ────────────────────────────── */
 
 static void extract_text(cJSON *root, char *buf, size_t size)
@@ -325,7 +371,7 @@ esp_err_t llm_chat(const char *system_prompt, const char *messages_json,
     }
 
     int status = 0;
-    esp_err_t err = llm_http_call(post_data, &rb, &status);
+    esp_err_t err = llm_http_call_with_retry(post_data, &rb, &status);
     free(post_data);
 
     if (err != ESP_OK) {
@@ -422,7 +468,7 @@ esp_err_t llm_chat_tools(const char *system_prompt,
     }
 
     int status = 0;
-    esp_err_t err = llm_http_call(post_data, &rb, &status);
+    esp_err_t err = llm_http_call_with_retry(post_data, &rb, &status);
     free(post_data);
 
     if (err != ESP_OK) {

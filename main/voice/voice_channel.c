@@ -8,9 +8,10 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
+#include "freertos/event_groups.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
-#include "esp_http_client.h"
+#include "esp_websocket_client.h"
 #include "esp_heap_caps.h"
 #include "nvs_flash.h"
 #include "nvs.h"
@@ -18,23 +19,29 @@
 
 static const char *TAG = "voice";
 
+/* Event group bits */
+#define EVT_WS_CONNECTED   BIT0
+#define EVT_STT_DONE       BIT1
+#define EVT_TTS_DONE       BIT2
+
 /* ---------- State ---------- */
 static voice_state_t s_state = VOICE_STATE_IDLE;
 static voice_channel_config_t s_config;
 static TaskHandle_t s_task_handle = NULL;
-static SemaphoreHandle_t s_btn_sem = NULL;   /* posted by GPIO ISR */
+static SemaphoreHandle_t s_btn_sem = NULL;
+static EventGroupHandle_t s_events = NULL;
 static volatile bool s_btn_pressed = false;
 
-/* PCM record buffer in PSRAM */
-static uint8_t *s_rec_buf = NULL;
-static size_t   s_rec_len = 0;  /* bytes recorded so far */
+/* WebSocket client */
+static esp_websocket_client_handle_t s_ws_client = NULL;
 
-/* HTTP response accumulator */
-typedef struct {
-    uint8_t *buf;
-    size_t   len;
-    size_t   cap;
-} http_buf_t;
+/* STT result (set by WS handler, read by voice task) */
+static char *s_stt_text = NULL;
+
+/* JSON receive buffer for fragmented text frames */
+static char *s_json_buf = NULL;
+static size_t s_json_len = 0;
+static size_t s_json_cap = 0;
 
 /* ---------- Helpers ---------- */
 
@@ -45,6 +52,10 @@ static void set_state(voice_state_t st)
     case VOICE_STATE_IDLE:
         display_set_status("MimiClaw Ready");
         display_set_display_status(DISPLAY_STATUS_IDLE);
+        break;
+    case VOICE_STATE_CONNECTING:
+        display_set_status("Connecting...");
+        display_set_display_status(DISPLAY_STATUS_CONNECTING);
         break;
     case VOICE_STATE_RECORDING:
         display_set_status("Recording...");
@@ -61,7 +72,6 @@ static void set_state(voice_state_t st)
     }
 }
 
-/* Load gateway URL from NVS, fall back to config default */
 static void load_gateway_url(void)
 {
     nvs_handle_t nvs;
@@ -75,144 +85,154 @@ static void load_gateway_url(void)
     }
 }
 
-/* ---------- HTTP helpers ---------- */
-
-static esp_err_t http_event_handler(esp_http_client_event_t *evt)
+/* Send a JSON control message over WebSocket */
+static esp_err_t ws_send_json(const char *type, const cJSON *extra)
 {
-    http_buf_t *acc = (http_buf_t *)evt->user_data;
-    if (!acc) return ESP_OK;
-
-    if (evt->event_id == HTTP_EVENT_ON_DATA) {
-        if (acc->len + evt->data_len > acc->cap) {
-            /* Grow buffer (PSRAM) */
-            size_t new_cap = acc->cap ? acc->cap * 2 : 32768;
-            while (new_cap < acc->len + evt->data_len) new_cap *= 2;
-            uint8_t *tmp = heap_caps_realloc(acc->buf, new_cap, MALLOC_CAP_SPIRAM);
-            if (!tmp) {
-                ESP_LOGE(TAG, "HTTP buf realloc failed (%d)", (int)new_cap);
-                return ESP_FAIL;
-            }
-            acc->buf = tmp;
-            acc->cap = new_cap;
-        }
-        memcpy(acc->buf + acc->len, evt->data, evt->data_len);
-        acc->len += evt->data_len;
-    }
-    return ESP_OK;
-}
-
-/**
- * POST raw PCM to /stt, parse JSON response, return heap-allocated text.
- * Caller must free() the returned string.
- */
-static char *do_stt(const uint8_t *pcm, size_t pcm_len)
-{
-    char url[160];
-    snprintf(url, sizeof(url), "%s/stt", s_config.gateway_url);
-
-    http_buf_t acc = {0};
-
-    esp_http_client_config_t cfg = {
-        .url = url,
-        .method = HTTP_METHOD_POST,
-        .timeout_ms = 30000,
-        .event_handler = http_event_handler,
-        .user_data = &acc,
-        .buffer_size = 4096,
-        .buffer_size_tx = 4096,
-    };
-
-    esp_http_client_handle_t client = esp_http_client_init(&cfg);
-    if (!client) return NULL;
-
-    esp_http_client_set_header(client, "Content-Type", "audio/pcm");
-    esp_http_client_set_post_field(client, (const char *)pcm, (int)pcm_len);
-
-    esp_err_t err = esp_http_client_perform(client);
-    int status = esp_http_client_get_status_code(client);
-    esp_http_client_cleanup(client);
-
-    if (err != ESP_OK || status != 200) {
-        ESP_LOGE(TAG, "STT request failed: err=%s status=%d", esp_err_to_name(err), status);
-        free(acc.buf);
-        return NULL;
+    if (!s_ws_client || !esp_websocket_client_is_connected(s_ws_client)) {
+        return ESP_ERR_INVALID_STATE;
     }
 
-    /* Log raw response */
-    if (acc.buf && acc.len > 0) {
-        acc.buf[acc.len < 511 ? acc.len : 511] = '\0';
-        ESP_LOGI(TAG, "STT response: %s", (char *)acc.buf);
-    }
+    cJSON *msg = cJSON_CreateObject();
+    cJSON_AddStringToObject(msg, "type", type);
 
-    /* Parse JSON {"text": "..."} */
-    char *text = NULL;
-    if (acc.buf && acc.len > 0) {
-        /* Null-terminate */
-        uint8_t *tmp = realloc(acc.buf, acc.len + 1);
-        if (tmp) acc.buf = tmp;
-        acc.buf[acc.len] = '\0';
-
-        cJSON *root = cJSON_Parse((char *)acc.buf);
-        if (root) {
-            cJSON *t = cJSON_GetObjectItem(root, "text");
-            if (cJSON_IsString(t) && t->valuestring[0]) {
-                text = strdup(t->valuestring);
-            }
-            cJSON_Delete(root);
+    /* Merge extra fields if provided */
+    if (extra) {
+        cJSON *item = extra->child;
+        while (item) {
+            cJSON_AddItemToObject(msg, item->string, cJSON_Duplicate(item, 1));
+            item = item->next;
         }
     }
-    free(acc.buf);
-    return text;
-}
 
-/**
- * POST text to /tts, receive raw PCM.
- * Returns PSRAM-allocated buffer, caller must free().
- */
-static uint8_t *do_tts(const char *text, size_t *out_len)
-{
-    char url[160];
-    snprintf(url, sizeof(url), "%s/tts", s_config.gateway_url);
+    char *json_str = cJSON_PrintUnformatted(msg);
+    cJSON_Delete(msg);
+    if (!json_str) return ESP_ERR_NO_MEM;
 
-    /* Build JSON body */
-    cJSON *body = cJSON_CreateObject();
-    cJSON_AddStringToObject(body, "text", text);
-    cJSON_AddStringToObject(body, "voice", "zh-CN-XiaoxiaoNeural");
-    char *json_str = cJSON_PrintUnformatted(body);
-    cJSON_Delete(body);
-    if (!json_str) return NULL;
-
-    http_buf_t acc = {0};
-
-    esp_http_client_config_t cfg = {
-        .url = url,
-        .method = HTTP_METHOD_POST,
-        .timeout_ms = 30000,
-        .event_handler = http_event_handler,
-        .user_data = &acc,
-        .buffer_size = 4096,
-        .buffer_size_tx = 4096,
-    };
-
-    esp_http_client_handle_t client = esp_http_client_init(&cfg);
-    if (!client) { free(json_str); return NULL; }
-
-    esp_http_client_set_header(client, "Content-Type", "application/json");
-    esp_http_client_set_post_field(client, json_str, (int)strlen(json_str));
-
-    esp_err_t err = esp_http_client_perform(client);
-    int status = esp_http_client_get_status_code(client);
-    esp_http_client_cleanup(client);
+    int ret = esp_websocket_client_send_text(s_ws_client, json_str, strlen(json_str), pdMS_TO_TICKS(5000));
     free(json_str);
+    return (ret >= 0) ? ESP_OK : ESP_FAIL;
+}
 
-    if (err != ESP_OK || status != 200) {
-        ESP_LOGE(TAG, "TTS request failed: err=%s status=%d", esp_err_to_name(err), status);
-        free(acc.buf);
-        return NULL;
+/* Send raw binary PCM data over WebSocket */
+static esp_err_t ws_send_binary(const uint8_t *data, size_t len)
+{
+    if (!s_ws_client || !esp_websocket_client_is_connected(s_ws_client)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    int ret = esp_websocket_client_send_bin(s_ws_client, (const char *)data, len, pdMS_TO_TICKS(5000));
+    return (ret >= 0) ? ESP_OK : ESP_FAIL;
+}
+
+/* ---------- JSON message handler ---------- */
+
+static void handle_json_message(const char *data, int len)
+{
+    cJSON *root = cJSON_ParseWithLength(data, len);
+    if (!root) {
+        ESP_LOGW(TAG, "WS: invalid JSON");
+        return;
     }
 
-    *out_len = acc.len;
-    return acc.buf;
+    const char *type = cJSON_GetStringValue(cJSON_GetObjectItem(root, "type"));
+    if (!type) {
+        cJSON_Delete(root);
+        return;
+    }
+
+    if (strcmp(type, "stt_result") == 0) {
+        const char *text = cJSON_GetStringValue(cJSON_GetObjectItem(root, "text"));
+        ESP_LOGI(TAG, "STT result: \"%s\"", text ? text : "");
+
+        /* Store result for voice task */
+        free(s_stt_text);
+        s_stt_text = (text && text[0]) ? strdup(text) : NULL;
+        xEventGroupSetBits(s_events, EVT_STT_DONE);
+
+    } else if (strcmp(type, "tts_start") == 0) {
+        ESP_LOGI(TAG, "TTS stream starting");
+        if (s_state == VOICE_STATE_PLAYING) {
+            audio_spk_enable();
+        }
+
+    } else if (strcmp(type, "tts_end") == 0) {
+        ESP_LOGI(TAG, "TTS stream ended");
+        if (s_state == VOICE_STATE_PLAYING) {
+            audio_spk_disable();
+        }
+        xEventGroupSetBits(s_events, EVT_TTS_DONE);
+
+    } else if (strcmp(type, "error") == 0) {
+        const char *msg = cJSON_GetStringValue(cJSON_GetObjectItem(root, "message"));
+        ESP_LOGE(TAG, "Gateway error: %s", msg ? msg : "unknown");
+        /* Unblock any waiters */
+        xEventGroupSetBits(s_events, EVT_STT_DONE | EVT_TTS_DONE);
+    }
+
+    cJSON_Delete(root);
+}
+
+/* ---------- WebSocket event handler ---------- */
+
+static void ws_event_handler(void *arg, esp_event_base_t base, int32_t event_id, void *event_data)
+{
+    esp_websocket_event_data_t *evt = (esp_websocket_event_data_t *)event_data;
+
+    switch (event_id) {
+    case WEBSOCKET_EVENT_CONNECTED:
+        ESP_LOGI(TAG, "Voice WS connected");
+        xEventGroupSetBits(s_events, EVT_WS_CONNECTED);
+        set_state(VOICE_STATE_IDLE);
+        break;
+
+    case WEBSOCKET_EVENT_DISCONNECTED:
+        ESP_LOGW(TAG, "Voice WS disconnected");
+        xEventGroupClearBits(s_events, EVT_WS_CONNECTED);
+        if (s_state == VOICE_STATE_PLAYING) {
+            audio_spk_disable();
+        }
+        set_state(VOICE_STATE_CONNECTING);
+        break;
+
+    case WEBSOCKET_EVENT_DATA:
+        if (evt->op_code == 0x02) {
+            /* Binary frame: PCM audio chunk during TTS playback */
+            if (s_state == VOICE_STATE_PLAYING && evt->data_len > 0) {
+                size_t written = 0;
+                audio_spk_write((const uint8_t *)evt->data_ptr, evt->data_len, &written, 200);
+            }
+        } else if (evt->op_code == 0x01 || evt->op_code == 0x00) {
+            /* Text frame (possibly fragmented) */
+            /* Accumulate into json buffer */
+            size_t needed = s_json_len + evt->data_len;
+            if (needed > s_json_cap) {
+                size_t new_cap = needed + 256;
+                char *tmp = realloc(s_json_buf, new_cap);
+                if (!tmp) {
+                    ESP_LOGE(TAG, "JSON buf alloc failed");
+                    s_json_len = 0;
+                    break;
+                }
+                s_json_buf = tmp;
+                s_json_cap = new_cap;
+            }
+            memcpy(s_json_buf + s_json_len, evt->data_ptr, evt->data_len);
+            s_json_len += evt->data_len;
+
+            /* Check if this is the final fragment */
+            if (evt->payload_offset + evt->data_len >= evt->payload_len) {
+                handle_json_message(s_json_buf, s_json_len);
+                s_json_len = 0;
+            }
+        }
+        break;
+
+    case WEBSOCKET_EVENT_ERROR:
+        ESP_LOGE(TAG, "Voice WS error");
+        break;
+
+    default:
+        break;
+    }
 }
 
 /* ---------- GPIO ISR ---------- */
@@ -233,19 +253,40 @@ static void voice_task(void *arg)
 {
     ESP_LOGI(TAG, "Voice task started (button GPIO %d)", s_config.button_gpio);
 
+    /* Wait for WebSocket connection */
+    xEventGroupWaitBits(s_events, EVT_WS_CONNECTED, pdFALSE, pdTRUE, portMAX_DELAY);
+    ESP_LOGI(TAG, "Voice WS ready, listening for button");
+
     while (1) {
-        /* Wait for button press */
+        /* Wait for button event */
         xSemaphoreTake(s_btn_sem, portMAX_DELAY);
 
         /* Debounce */
         vTaskDelay(pdMS_TO_TICKS(50));
-        if (gpio_get_level(s_config.button_gpio) != 0) continue;  /* spurious */
+        if (gpio_get_level(s_config.button_gpio) != 0) continue;
 
-        if (s_state != VOICE_STATE_IDLE) continue;
+        /* Check if we're connected */
+        if (!(xEventGroupGetBits(s_events) & EVT_WS_CONNECTED)) {
+            ESP_LOGW(TAG, "WS not connected, ignoring button");
+            continue;
+        }
+
+        /* === INTERRUPT: button press during playback === */
+        if (s_state == VOICE_STATE_PLAYING) {
+            ESP_LOGI(TAG, "Interrupt: stopping playback");
+            ws_send_json("interrupt", NULL);
+            audio_spk_disable();
+            /* Fall through to start recording */
+        } else if (s_state != VOICE_STATE_IDLE) {
+            continue;
+        }
 
         /* === RECORDING === */
         set_state(VOICE_STATE_RECORDING);
-        s_rec_len = 0;
+        xEventGroupClearBits(s_events, EVT_STT_DONE);
+
+        /* Send audio_start */
+        ws_send_json("audio_start", NULL);
 
         esp_err_t ret = audio_mic_enable();
         if (ret != ESP_OK) {
@@ -255,106 +296,108 @@ static void voice_task(void *arg)
         }
 
         const size_t chunk_bytes = 1024;
+        uint8_t *chunk_buf = malloc(chunk_bytes);
+        if (!chunk_buf) {
+            audio_mic_disable();
+            set_state(VOICE_STATE_IDLE);
+            continue;
+        }
+
         const size_t max_bytes = (size_t)s_config.max_record_sec
-                                 * MIMI_AUDIO_MIC_SAMPLE_RATE * 2;  /* 16-bit = 2 bytes/sample */
+                                 * MIMI_AUDIO_MIC_SAMPLE_RATE * 2;
+        size_t total_sent = 0;
 
         ESP_LOGI(TAG, "Recording... (max %d s)", s_config.max_record_sec);
 
-        int err_count = 0;
-        while (s_rec_len < max_bytes) {
+        while (total_sent < max_bytes) {
             /* Check if button released */
             if (gpio_get_level(s_config.button_gpio) != 0) {
-                /* Debounce release */
                 vTaskDelay(pdMS_TO_TICKS(50));
                 if (gpio_get_level(s_config.button_gpio) != 0) break;
             }
 
             size_t bytes_read = 0;
-            ret = audio_mic_read(s_rec_buf + s_rec_len, chunk_bytes, &bytes_read, 500);
+            ret = audio_mic_read(chunk_buf, chunk_bytes, &bytes_read, 500);
             if (ret == ESP_OK && bytes_read > 0) {
-                s_rec_len += bytes_read;
-                err_count = 0;
-            } else if (ret != ESP_OK) {
-                err_count++;
-                if (err_count <= 3) {
-                    ESP_LOGW(TAG, "mic_read error: %s", esp_err_to_name(ret));
+                /* Apply software gain inline */
+                int16_t *samples = (int16_t *)chunk_buf;
+                int num_samples = bytes_read / 2;
+                int16_t peak = 0;
+                for (int i = 0; i < num_samples; i++) {
+                    int16_t abs_val = samples[i] < 0 ? -samples[i] : samples[i];
+                    if (abs_val > peak) peak = abs_val;
                 }
+                if (peak > 0 && peak < 20000) {
+                    int gain = 20000 / peak;
+                    if (gain > 32) gain = 32;
+                    if (gain > 1) {
+                        for (int i = 0; i < num_samples; i++) {
+                            int32_t amplified = (int32_t)samples[i] * gain;
+                            if (amplified > 32767) amplified = 32767;
+                            if (amplified < -32768) amplified = -32768;
+                            samples[i] = (int16_t)amplified;
+                        }
+                    }
+                }
+
+                /* Stream chunk to gateway */
+                ws_send_binary(chunk_buf, bytes_read);
+                total_sent += bytes_read;
             }
         }
 
         audio_mic_disable();
-        ESP_LOGI(TAG, "Recorded %d bytes (%.1f s)", (int)s_rec_len, s_rec_len / 32000.0f);
+        free(chunk_buf);
 
-        /* Log RMS level to verify mic is capturing real audio */
-        if (s_rec_len >= 64) {
-            int16_t *samples = (int16_t *)s_rec_buf;
-            int num_samples = s_rec_len / 2;
-            int64_t sum_sq = 0;
-            int16_t peak = 0;
-            for (int i = 0; i < num_samples; i++) {
-                sum_sq += (int64_t)samples[i] * samples[i];
-                int16_t abs_val = samples[i] < 0 ? -samples[i] : samples[i];
-                if (abs_val > peak) peak = abs_val;
-            }
-            int rms = (int)__builtin_sqrtf((float)sum_sq / num_samples);
-            ESP_LOGI(TAG, "Audio RMS: %d, Peak: %d (samples: %d)", rms, peak, num_samples);
+        ESP_LOGI(TAG, "Recorded %d bytes (%.1f s)", (int)total_sent, total_sent / 32000.0f);
 
-            /* Software gain: amplify to use more of the 16-bit range.
-             * Target peak ~20000 (60% of int16 max). */
-            if (peak > 0 && peak < 20000) {
-                int gain = 20000 / peak;
-                if (gain > 32) gain = 32;  /* cap at 32x */
-                if (gain > 1) {
-                    ESP_LOGI(TAG, "Applying %dx software gain", gain);
-                    for (int i = 0; i < num_samples; i++) {
-                        int32_t amplified = (int32_t)samples[i] * gain;
-                        if (amplified > 32767) amplified = 32767;
-                        if (amplified < -32768) amplified = -32768;
-                        samples[i] = (int16_t)amplified;
-                    }
-                }
-            }
-        }
-
-        if (s_rec_len < 3200) {  /* < 0.1s, too short */
+        if (total_sent < 3200) {
             ESP_LOGW(TAG, "Recording too short, discarding");
             set_state(VOICE_STATE_IDLE);
             continue;
         }
 
-        /* === PROCESSING (STT → agent → TTS) === */
+        /* Send audio_end → triggers STT on gateway */
         set_state(VOICE_STATE_PROCESSING);
+        ws_send_json("audio_end", NULL);
 
-        char *text = do_stt(s_rec_buf, s_rec_len);
-        if (!text || text[0] == '\0') {
-            ESP_LOGW(TAG, "STT returned empty text");
-            free(text);
+        /* Wait for STT result (timeout 30s) */
+        EventBits_t bits = xEventGroupWaitBits(
+            s_events, EVT_STT_DONE, pdTRUE, pdTRUE, pdMS_TO_TICKS(30000));
+
+        if (!(bits & EVT_STT_DONE)) {
+            ESP_LOGW(TAG, "STT timeout");
             set_state(VOICE_STATE_IDLE);
             continue;
         }
 
-        ESP_LOGI(TAG, "STT result: \"%s\"", text);
-        display_show_message("user", text);
+        if (!s_stt_text || s_stt_text[0] == '\0') {
+            ESP_LOGW(TAG, "STT returned empty text");
+            free(s_stt_text);
+            s_stt_text = NULL;
+            set_state(VOICE_STATE_IDLE);
+            continue;
+        }
 
-        /* Push to message bus → agent loop will process and push outbound on "voice" channel */
-        ESP_LOGI(TAG, "Pushing to message bus: channel=%s chat_id=voice content=\"%.*s\"",
-                 MIMI_CHAN_VOICE, 200, text);
+        ESP_LOGI(TAG, "STT: \"%s\"", s_stt_text);
+        display_show_message("user", s_stt_text);
+
+        /* Push to message bus → agent loop processes → outbound dispatch calls voice_channel_speak() */
         mimi_msg_t msg = {0};
         strncpy(msg.channel, MIMI_CHAN_VOICE, sizeof(msg.channel) - 1);
         strncpy(msg.chat_id, "voice", sizeof(msg.chat_id) - 1);
-        msg.content = text;  /* bus takes ownership */
+        strncpy(msg.media_type, "voice", sizeof(msg.media_type) - 1);
+        msg.content = s_stt_text;  /* bus takes ownership */
+        s_stt_text = NULL;
 
         if (message_bus_push_inbound(&msg) != ESP_OK) {
             ESP_LOGE(TAG, "Failed to push to message bus");
-            free(text);
+            message_bus_msg_free(&msg);
             set_state(VOICE_STATE_IDLE);
             continue;
         }
 
-        /* State stays PROCESSING until outbound dispatch calls voice_channel_speak() */
-        /* which will transition to PLAYING → IDLE */
-
-        /* Timeout: if no response in 30s, go back to idle */
+        /* Wait for agent response (voice_channel_speak sets PLAYING → TTS → IDLE) */
         int wait_count = 0;
         while (s_state == VOICE_STATE_PROCESSING && wait_count < 300) {
             vTaskDelay(pdMS_TO_TICKS(100));
@@ -365,6 +408,41 @@ static void voice_task(void *arg)
             set_state(VOICE_STATE_IDLE);
         }
     }
+}
+
+/* ---------- WebSocket connection management ---------- */
+
+static esp_err_t ws_connect(void)
+{
+    if (s_ws_client) return ESP_ERR_INVALID_STATE;
+
+    ESP_LOGI(TAG, "Connecting to %s", s_config.gateway_url);
+    set_state(VOICE_STATE_CONNECTING);
+
+    esp_websocket_client_config_t ws_cfg = {
+        .uri = s_config.gateway_url,
+        .buffer_size = 4096,
+        .reconnect_timeout_ms = 5000,
+        .network_timeout_ms = 10000,
+        .ping_interval_sec = 20,
+        .pingpong_timeout_sec = 20,
+    };
+
+    s_ws_client = esp_websocket_client_init(&ws_cfg);
+    if (!s_ws_client) {
+        ESP_LOGE(TAG, "WS client init failed");
+        return ESP_FAIL;
+    }
+
+    esp_websocket_register_events(s_ws_client, WEBSOCKET_EVENT_ANY, ws_event_handler, NULL);
+
+    esp_err_t ret = esp_websocket_client_start(s_ws_client);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "WS client start failed: %s", esp_err_to_name(ret));
+        esp_websocket_client_destroy(s_ws_client);
+        s_ws_client = NULL;
+    }
+    return ret;
 }
 
 /* ---------- Public API ---------- */
@@ -378,21 +456,15 @@ esp_err_t voice_channel_init(const voice_channel_config_t *config)
         ESP_LOGW(TAG, "No voice gateway URL configured");
     }
 
-    /* Allocate record buffer in PSRAM */
-    size_t buf_size = (size_t)s_config.max_record_sec
-                      * MIMI_AUDIO_MIC_SAMPLE_RATE * 2;
-    s_rec_buf = heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
-    if (!s_rec_buf) {
-        ESP_LOGE(TAG, "Failed to allocate record buffer (%d bytes)", (int)buf_size);
-        return ESP_ERR_NO_MEM;
-    }
-    ESP_LOGI(TAG, "Record buffer: %d bytes in PSRAM", (int)buf_size);
+    /* Create event group */
+    s_events = xEventGroupCreate();
+    if (!s_events) return ESP_ERR_NO_MEM;
 
     /* Create button semaphore */
     s_btn_sem = xSemaphoreCreateBinary();
     if (!s_btn_sem) {
-        heap_caps_free(s_rec_buf);
-        s_rec_buf = NULL;
+        vEventGroupDelete(s_events);
+        s_events = NULL;
         return ESP_ERR_NO_MEM;
     }
 
@@ -417,13 +489,18 @@ esp_err_t voice_channel_start(void)
 {
     if (s_task_handle) return ESP_ERR_INVALID_STATE;
 
-    BaseType_t ret = xTaskCreatePinnedToCore(
+    /* Start WebSocket connection */
+    esp_err_t ret = ws_connect();
+    if (ret != ESP_OK) return ret;
+
+    /* Start voice task */
+    BaseType_t xret = xTaskCreatePinnedToCore(
         voice_task, "voice",
         MIMI_VOICE_TASK_STACK, NULL,
         MIMI_VOICE_TASK_PRIO, &s_task_handle,
         MIMI_VOICE_TASK_CORE);
 
-    return (ret == pdPASS) ? ESP_OK : ESP_FAIL;
+    return (xret == pdPASS) ? ESP_OK : ESP_FAIL;
 }
 
 void voice_channel_stop(void)
@@ -432,14 +509,25 @@ void voice_channel_stop(void)
         vTaskDelete(s_task_handle);
         s_task_handle = NULL;
     }
-    gpio_isr_handler_remove(s_config.button_gpio);
-    if (s_rec_buf) {
-        heap_caps_free(s_rec_buf);
-        s_rec_buf = NULL;
+    if (s_ws_client) {
+        esp_websocket_client_stop(s_ws_client);
+        esp_websocket_client_destroy(s_ws_client);
+        s_ws_client = NULL;
     }
+    gpio_isr_handler_remove(s_config.button_gpio);
+    free(s_stt_text);
+    s_stt_text = NULL;
+    free(s_json_buf);
+    s_json_buf = NULL;
+    s_json_len = 0;
+    s_json_cap = 0;
     if (s_btn_sem) {
         vSemaphoreDelete(s_btn_sem);
         s_btn_sem = NULL;
+    }
+    if (s_events) {
+        vEventGroupDelete(s_events);
+        s_events = NULL;
     }
     s_state = VOICE_STATE_IDLE;
 }
@@ -451,8 +539,8 @@ esp_err_t voice_channel_speak(const char *text)
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (s_config.gateway_url[0] == '\0') {
-        ESP_LOGE(TAG, "No gateway URL, cannot TTS");
+    if (!s_ws_client || !esp_websocket_client_is_connected(s_ws_client)) {
+        ESP_LOGE(TAG, "WS not connected, cannot TTS");
         set_state(VOICE_STATE_IDLE);
         return ESP_ERR_INVALID_STATE;
     }
@@ -461,26 +549,37 @@ esp_err_t voice_channel_speak(const char *text)
     ESP_LOGI(TAG, "TTS speak: \"%.*s\"", 200, text);
     display_show_message("assistant", text);
 
-    size_t pcm_len = 0;
-    uint8_t *pcm = do_tts(text, &pcm_len);
-    if (!pcm || pcm_len == 0) {
-        ESP_LOGE(TAG, "TTS failed");
-        free(pcm);
-        set_state(VOICE_STATE_IDLE);
-        return ESP_FAIL;
+    /* Clear TTS done event */
+    xEventGroupClearBits(s_events, EVT_TTS_DONE);
+
+    /* Send TTS request — gateway will stream PCM back via binary frames */
+    cJSON *extra = cJSON_CreateObject();
+    cJSON_AddStringToObject(extra, "text", text);
+    cJSON_AddStringToObject(extra, "voice", "zh-CN-XiaoxiaoNeural");
+    ws_send_json("tts_request", extra);
+    cJSON_Delete(extra);
+
+    /* Wait for TTS to complete (tts_end or interrupt) */
+    EventBits_t bits = xEventGroupWaitBits(
+        s_events, EVT_TTS_DONE, pdTRUE, pdTRUE, pdMS_TO_TICKS(60000));
+
+    if (!(bits & EVT_TTS_DONE)) {
+        ESP_LOGW(TAG, "TTS timeout");
+        audio_spk_disable();
     }
 
-    ESP_LOGI(TAG, "Playing TTS audio: %d bytes (%.1f s)", (int)pcm_len, pcm_len / 32000.0f);
-    esp_err_t ret = audio_play(pcm, pcm_len);
-    free(pcm);
-
     set_state(VOICE_STATE_IDLE);
-    return ret;
+    return ESP_OK;
 }
 
 voice_state_t voice_channel_get_state(void)
 {
     return s_state;
+}
+
+bool voice_channel_is_connected(void)
+{
+    return s_ws_client && esp_websocket_client_is_connected(s_ws_client);
 }
 
 esp_err_t voice_channel_set_gateway(const char *url)
@@ -499,6 +598,16 @@ esp_err_t voice_channel_set_gateway(const char *url)
         nvs_set_str(nvs, MIMI_NVS_KEY_VOICE_GW, url);
         nvs_commit(nvs);
         nvs_close(nvs);
+    }
+
+    /* Reconnect with new URL */
+    if (s_ws_client) {
+        ESP_LOGI(TAG, "Reconnecting to new gateway: %s", url);
+        esp_websocket_client_stop(s_ws_client);
+        esp_websocket_client_destroy(s_ws_client);
+        s_ws_client = NULL;
+        xEventGroupClearBits(s_events, EVT_WS_CONNECTED);
+        ws_connect();
     }
 
     ESP_LOGI(TAG, "Gateway URL set: %s", url);

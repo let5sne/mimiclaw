@@ -41,10 +41,15 @@ esp_err_t context_build_system_prompt(char *buf, size_t size)
         "- get_current_time: Get the current date and time. "
         "You do NOT have an internal clock — always use this tool when you need to know the time or date.\n"
         "- read_file: Read a file from SPIFFS (path must start with /spiffs/).\n"
-        "- write_file: Write/overwrite a file on SPIFFS.\n"
-        "- edit_file: Find-and-replace edit a file on SPIFFS.\n"
+        "- write_file: Write/overwrite a file on SPIFFS (default allowed dir: /spiffs/memory/).\n"
+        "- edit_file: Find-and-replace edit a file on SPIFFS (default allowed dir: /spiffs/memory/).\n"
         "- list_dir: List files on SPIFFS, optionally filter by prefix.\n\n"
+        "- memory_write_long_term: Overwrite /spiffs/memory/MEMORY.md with organized long-term memory.\n"
+        "- memory_append_today: Append a concise note to /spiffs/memory/daily/<YYYY-MM-DD>.md.\n\n"
         "Use tools when needed. Provide your final answer as text after using tools.\n\n"
+        "Bootstrap config files may add extra behavior constraints, tool rules, and identity guidance.\n\n"
+        "When responding to voice input, use short, natural Chinese sentences that can be spoken aloud. "
+        "Do not reply with emoji-only or symbol-only content.\n\n"
         "## Memory\n"
         "You have persistent memory stored on local flash:\n"
         "- Long-term memory: /spiffs/memory/MEMORY.md\n"
@@ -52,7 +57,7 @@ esp_err_t context_build_system_prompt(char *buf, size_t size)
         "IMPORTANT: Actively use memory to remember things across conversations.\n"
         "- When you learn something new about the user (name, preferences, habits, context), write it to MEMORY.md.\n"
         "- When something noteworthy happens in a conversation, append it to today's daily note.\n"
-        "- Always read_file MEMORY.md before writing, so you can edit_file to update without losing existing content.\n"
+        "- Prefer memory_write_long_term and memory_append_today for memory updates (do not rely on generic file tools for routine memory writes).\n"
         "- Use get_current_time to know today's date before writing daily notes.\n"
         "- Keep MEMORY.md concise and organized — summarize, don't dump raw conversation.\n"
         "- You should proactively save memory without being asked. If the user tells you their name, preferences, or important facts, persist them immediately.\n");
@@ -60,6 +65,10 @@ esp_err_t context_build_system_prompt(char *buf, size_t size)
     /* Bootstrap files */
     off = append_file(buf, size, off, MIMI_SOUL_FILE, "Personality");
     off = append_file(buf, size, off, MIMI_USER_FILE, "User Info");
+    off = append_file(buf, size, off, MIMI_AGENTS_FILE, "Behavior Rules");
+    off = append_file(buf, size, off, MIMI_TOOLS_FILE, "Tool Rules");
+    off = append_file(buf, size, off, MIMI_SKILLS_FILE, "Skill Rules");
+    off = append_file(buf, size, off, MIMI_IDENTITY_FILE, "Identity");
 
     /* Long-term memory */
     char mem_buf[4096];

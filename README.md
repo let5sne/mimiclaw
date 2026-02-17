@@ -85,6 +85,41 @@ ls /dev/ttyACM*          # Linux
 idf.py -p PORT flash monitor
 ```
 
+### Voice/Vision Gateway
+
+Start the local gateway (STT + image analysis endpoint):
+
+```bash
+python3 tools/voice_gateway.py \
+  --host 0.0.0.0 --port 8090 --model small --device cpu \
+  --vision-enabled
+```
+
+- STT endpoint: `http://<your-host-ip>:8091/stt_upload`
+- Vision endpoint: `http://<your-host-ip>:8091/vision_upload`
+- Document endpoint: `http://<your-host-ip>:8091/doc_upload`
+- By default, gateway tries loading API defaults from `main/mimi_secrets.h`; you can override via `--vision-endpoint/--vision-api-key/--vision-model`
+
+### Document Regression Smoke Test
+
+After gateway is running, execute:
+
+```bash
+./tools/run_doc_regression.sh --basic
+./tools/run_doc_regression.sh --office
+```
+
+Or run with custom arguments:
+
+```bash
+python3 tools/doc_regression.py \
+  --manifest tools/doc_regression_manifest.example.json \
+  --base-url http://127.0.0.1:8091
+```
+
+The script calls `/doc_upload` and validates format, extracted text length, keywords, parser prefix, and latency budget.
+`tools/doc_regression_manifest.office.example.json` includes a real `xlsx` sample and an optional `xls` case (`food_legacy.xls`) which is skipped when missing.
+
 ### CLI Commands
 
 Connect via serial to configure or debug. **Config commands** let you change settings without recompiling — just plug in a USB cable anywhere.
@@ -110,6 +145,13 @@ mimi> wifi_status              # am I connected?
 mimi> memory_read              # see what the bot remembers
 mimi> memory_write "content"   # write to MEMORY.md
 mimi> heap_info                # how much RAM is free?
+mimi> agent_stats              # agent success rate / latency / failures
+mimi> heartbeat_status         # heartbeat counters / last run
+mimi> heartbeat_now            # trigger heartbeat immediately
+mimi> cron_status              # cron schedule + counters
+mimi> cron_set 30 "task..."    # run every 30 min
+mimi> cron_now                 # trigger cron immediately
+mimi> cron_clear               # clear cron schedule
 mimi> session_list             # list all chat sessions
 mimi> session_clear 12345      # wipe a conversation
 mimi> restart                  # reboot
@@ -123,8 +165,14 @@ MimiClaw stores everything as plain text files you can read and edit:
 |------|------------|
 | `SOUL.md` | The bot's personality — edit this to change how it behaves |
 | `USER.md` | Info about you — name, preferences, language |
+| `AGENTS.md` | Behavior rules and safety constraints |
+| `TOOLS.md` | Tool usage policy and priorities |
+| `SKILLS.md` | Skill routing hints and trigger-style instruction rules |
+| `IDENTITY.md` | Assistant identity and response consistency constraints |
+| `HEARTBEAT.md` | Periodic internal task instructions (non-comment lines only) |
+| `CRON.md` | Default cron schedule file (`every_minutes` + `task`) |
 | `MEMORY.md` | Long-term memory — things the bot should always remember |
-| `2026-02-05.md` | Daily notes — what happened today |
+| `daily/2026-02-05.md` | Daily notes — what happened today |
 | `tg_12345.jsonl` | Chat history — your conversation with the bot |
 
 ## Tools
@@ -135,6 +183,12 @@ MimiClaw uses Anthropic's tool use protocol — Claude can call tools during a c
 |------|-------------|
 | `web_search` | Search the web via Brave Search API for current information |
 | `get_current_time` | Fetch current date/time via HTTP and set the system clock |
+| `read_file` | Read a SPIFFS file (path must start with `/spiffs/`) |
+| `write_file` | Write or overwrite a SPIFFS file (default allowlist: `/spiffs/memory/`) |
+| `edit_file` | Find-and-replace in a SPIFFS file (default allowlist: `/spiffs/memory/`) |
+| `list_dir` | List SPIFFS files, optionally filtered by prefix |
+| `memory_write_long_term` | Overwrite long-term memory (`/spiffs/memory/MEMORY.md`) |
+| `memory_append_today` | Append one note to today's daily memory |
 
 To enable web search, set a [Brave Search API key](https://brave.com/search/api/) via `MIMI_SECRET_SEARCH_KEY` in `mimi_secrets.h`.
 
@@ -145,6 +199,18 @@ To enable web search, set a [Brave Search API key](https://brave.com/search/api/
 - **Dual-core** — network I/O and AI processing run on separate CPU cores
 - **HTTP proxy** — CONNECT tunnel support for restricted networks
 - **Tool use** — ReAct agent loop with Anthropic tool use protocol
+- **Telegram media handling** — `/start` local reply; voice uses real STT via voice gateway HTTP (`/stt_upload`); photos call cloud vision via `vision_upload` with structured output (`caption`/`ocr_text`/`objects`) and `file_id` cache dedupe; documents call `doc_upload` for parsing (`txt/pdf/docx/pptx/xls/xlsx/image-doc`), and when PDF/PPTX text extraction is too short it auto-falls back to page/image OCR via vision before summary fallback
+
+## P0 Hardening Roadmap (In Progress)
+
+- [x] Inbound security: Telegram allowlist (`allow_from`) + WebSocket auth token
+- [x] File tool safety boundaries: write default-limited to `/spiffs/memory/`
+- [x] Reliability: retries/backoff for LLM and outbound delivery; drop status first, preserve final replies
+- [x] Budget guards: tool iterations, context size, tool output size, end-to-end timeout caps
+- [x] Memory governance: unify daily memory path and add dedicated memory write tools
+- [x] Observability: `run_id`, stage-level latency logs, `agent_stats` diagnostics command
+
+Detailed tracking: **[docs/TODO.md](docs/TODO.md)**.
 
 ## For Developers
 

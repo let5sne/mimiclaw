@@ -2,6 +2,7 @@
 #include "tools/tool_web_search.h"
 #include "tools/tool_get_time.h"
 #include "tools/tool_files.h"
+#include "tools/tool_memory.h"
 
 #include <string.h>
 #include "esp_log.h"
@@ -9,7 +10,7 @@
 
 static const char *TAG = "tools";
 
-#define MAX_TOOLS 8
+#define MAX_TOOLS 12
 
 static mimi_tool_t s_tools[MAX_TOOLS];
 static int s_tool_count = 0;
@@ -94,10 +95,10 @@ esp_err_t tool_registry_init(void)
     /* Register write_file */
     mimi_tool_t wf = {
         .name = "write_file",
-        .description = "Write or overwrite a file on SPIFFS storage. Path must start with /spiffs/.",
+        .description = "Write or overwrite a file on SPIFFS storage. Path must be under /spiffs/memory/ (other dirs only if build-time switches are enabled).",
         .input_schema_json =
             "{\"type\":\"object\","
-            "\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Absolute path starting with /spiffs/\"},"
+            "\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Absolute path under /spiffs/memory/ by default\"},"
             "\"content\":{\"type\":\"string\",\"description\":\"File content to write\"}},"
             "\"required\":[\"path\",\"content\"]}",
         .execute = tool_write_file_execute,
@@ -107,10 +108,10 @@ esp_err_t tool_registry_init(void)
     /* Register edit_file */
     mimi_tool_t ef = {
         .name = "edit_file",
-        .description = "Find and replace text in a file on SPIFFS. Replaces first occurrence of old_string with new_string.",
+        .description = "Find and replace text in a file on SPIFFS. Path must be under /spiffs/memory/ by default. Replaces first occurrence of old_string with new_string.",
         .input_schema_json =
             "{\"type\":\"object\","
-            "\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Absolute path starting with /spiffs/\"},"
+            "\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Absolute path under /spiffs/memory/ by default\"},"
             "\"old_string\":{\"type\":\"string\",\"description\":\"Text to find\"},"
             "\"new_string\":{\"type\":\"string\",\"description\":\"Replacement text\"}},"
             "\"required\":[\"path\",\"old_string\",\"new_string\"]}",
@@ -129,6 +130,30 @@ esp_err_t tool_registry_init(void)
         .execute = tool_list_dir_execute,
     };
     register_tool(&ld);
+
+    /* Register memory_write_long_term */
+    mimi_tool_t mlt = {
+        .name = "memory_write_long_term",
+        .description = "Overwrite long-term memory in /spiffs/memory/MEMORY.md. Use for durable user profile/preferences.",
+        .input_schema_json =
+            "{\"type\":\"object\","
+            "\"properties\":{\"content\":{\"type\":\"string\",\"description\":\"Complete MEMORY.md content to persist\"}},"
+            "\"required\":[\"content\"]}",
+        .execute = tool_memory_write_long_term_execute,
+    };
+    register_tool(&mlt);
+
+    /* Register memory_append_today */
+    mimi_tool_t mat = {
+        .name = "memory_append_today",
+        .description = "Append one note to today's daily memory file under /spiffs/memory/daily/<YYYY-MM-DD>.md.",
+        .input_schema_json =
+            "{\"type\":\"object\","
+            "\"properties\":{\"note\":{\"type\":\"string\",\"description\":\"One concise note to append\"}},"
+            "\"required\":[\"note\"]}",
+        .execute = tool_memory_append_today_execute,
+    };
+    register_tool(&mat);
 
     build_tools_json();
 

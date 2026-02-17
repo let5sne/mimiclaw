@@ -1,4 +1,6 @@
-flask>=3.0
+websockets>=13.0
 edge-tts>=6.1
 faster-whisper>=1.0
 pydub>=0.25
+pypdf>=4.0
+xlrd>=2.0

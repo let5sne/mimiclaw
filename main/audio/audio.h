@@ -110,6 +110,19 @@ void audio_set_mute(bool mute);
 void audio_set_event_callback(audio_event_cb_t callback, void *user_data);
 
 /**
+ * Enable speaker I2S channel for streaming playback.
+ * Call audio_spk_write() to feed PCM chunks, then audio_spk_disable() when done.
+ */
+esp_err_t audio_spk_enable(void);
+void audio_spk_disable(void);
+
+/**
+ * Write PCM data to speaker (blocking, use between spk_enable/spk_disable).
+ * @return bytes actually written
+ */
+esp_err_t audio_spk_write(const uint8_t *data, size_t len, size_t *bytes_written, uint32_t timeout_ms);
+
+/**
  * Enable/disable mic I2S channel directly (no listen task).
  * Use these for manual recording via audio_mic_read().
  */

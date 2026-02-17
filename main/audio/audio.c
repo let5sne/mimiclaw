@@ -243,6 +243,26 @@ void audio_stop_playback(void)
     }
 }
 
+esp_err_t audio_spk_enable(void)
+{
+    if (!s_initialized || !s_spk_handle) return ESP_ERR_INVALID_STATE;
+    return i2s_channel_enable(s_spk_handle);
+}
+
+void audio_spk_disable(void)
+{
+    if (s_spk_handle) {
+        i2s_channel_disable(s_spk_handle);
+    }
+}
+
+esp_err_t audio_spk_write(const uint8_t *data, size_t len, size_t *bytes_written, uint32_t timeout_ms)
+{
+    if (!s_initialized || !s_spk_handle) return ESP_ERR_INVALID_STATE;
+    if (s_muted) { *bytes_written = len; return ESP_OK; }
+    return i2s_channel_write(s_spk_handle, data, len, bytes_written, pdMS_TO_TICKS(timeout_ms));
+}
+
 void audio_set_volume(uint8_t volume)
 {
     if (volume > 100) volume = 100;

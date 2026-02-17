@@ -1,6 +1,7 @@
 #include "ws_server.h"
 #include "mimi_config.h"
 #include "bus/message_bus.h"
+#include "security/access_control.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -67,9 +68,59 @@ static void remove_client(int fd)
     }
 }
 
+static bool get_ws_token_from_req(httpd_req_t *req, char *token, size_t token_size)
+{
+    if (!token || token_size == 0) return false;
+    token[0] = '\0';
+
+    /* 优先读取请求头 X-WS-Token */
+    size_t hlen = httpd_req_get_hdr_value_len(req, "X-WS-Token");
+    if (hlen > 0 && hlen < token_size) {
+        if (httpd_req_get_hdr_value_str(req, "X-WS-Token", token, token_size) == ESP_OK &&
+            token[0] != '\0') {
+            return true;
+        }
+    }
+
+    /* 其次读取 query 参数 token=xxx */
+    size_t qlen = httpd_req_get_url_query_len(req);
+    if (qlen == 0) return false;
+
+    char *query = calloc(1, qlen + 1);
+    if (!query) return false;
+
+    bool found = false;
+    if (httpd_req_get_url_query_str(req, query, qlen + 1) == ESP_OK) {
+        char qtoken[128] = {0};
+        if (httpd_query_key_value(query, "token", qtoken, sizeof(qtoken)) == ESP_OK &&
+            qtoken[0] != '\0') {
+            strncpy(token, qtoken, token_size - 1);
+            token[token_size - 1] = '\0';
+            found = true;
+        }
+    }
+
+    free(query);
+    return found;
+}
+
 static esp_err_t ws_handler(httpd_req_t *req)
 {
     if (req->method == HTTP_GET) {
+        /* 握手鉴权：仅在配置 token 时启用 */
+        if (access_control_ws_token_required()) {
+            char token[128] = {0};
+            if (!get_ws_token_from_req(req, token, sizeof(token)) ||
+                !access_control_validate_ws_token(token)) {
+                int fd = httpd_req_to_sockfd(req);
+                ESP_LOGW(TAG, "WS auth failed (fd=%d)", fd);
+                httpd_resp_set_status(req, "401 Unauthorized");
+                httpd_resp_set_type(req, "text/plain");
+                httpd_resp_sendstr(req, "Unauthorized");
+                return ESP_OK;
+            }
+        }
+
         /* WebSocket handshake — register client */
         int fd = httpd_req_to_sockfd(req);
         add_client(fd);
@@ -130,9 +181,12 @@ static esp_err_t ws_handler(httpd_req_t *req)
         mimi_msg_t msg = {0};
         strncpy(msg.channel, MIMI_CHAN_WEBSOCKET, sizeof(msg.channel) - 1);
         strncpy(msg.chat_id, chat_id, sizeof(msg.chat_id) - 1);
+        strncpy(msg.media_type, "text", sizeof(msg.media_type) - 1);
         msg.content = strdup(content->valuestring);
         if (msg.content) {
-            message_bus_push_inbound(&msg);
+            if (message_bus_push_inbound(&msg) != ESP_OK) {
+                message_bus_msg_free(&msg);
+            }
         }
     }
 

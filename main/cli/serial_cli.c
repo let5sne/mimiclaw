@@ -3,15 +3,20 @@
 #include "wifi/wifi_manager.h"
 #include "telegram/telegram_bot.h"
 #include "llm/llm_proxy.h"
+#include "agent/agent_loop.h"
 #include "memory/memory_store.h"
 #include "memory/session_mgr.h"
 #include "proxy/http_proxy.h"
 #include "tools/tool_web_search.h"
+#include "security/access_control.h"
+#include "heartbeat/heartbeat_service.h"
+#include "cron/cron_service.h"
 #include "audio/audio.h"
 #include "voice/voice_channel.h"
 
 #include <string.h>
 #include <stdio.h>
+#include <inttypes.h>
 #include <math.h>
 #include "esp_log.h"
 #include "esp_console.h"
@@ -181,6 +186,203 @@ static int cmd_heap_info(int argc, char **argv)
     return 0;
 }
 
+/* --- agent_stats command --- */
+static int cmd_agent_stats(int argc, char **argv)
+{
+    agent_stats_t stats;
+    esp_err_t err = agent_loop_get_stats(&stats);
+    if (err != ESP_OK) {
+        printf("Failed to get agent stats: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    uint32_t success_permille = 0;
+    if (stats.total_turns > 0) {
+        success_permille = (stats.success_turns * 1000U) / stats.total_turns;
+    }
+
+    printf("=== Agent Stats ===\n");
+    printf("  Last Run ID        : %" PRIu32 "\n", stats.last_run_id);
+    printf("  Total Turns        : %" PRIu32 "\n", stats.total_turns);
+    printf("  Success Turns      : %" PRIu32 "\n", stats.success_turns);
+    printf("  Failed Turns       : %" PRIu32 "\n", stats.failed_turns);
+    printf("  Success Rate       : %" PRIu32 ".%" PRIu32 "%%\n",
+           success_permille / 10U, success_permille % 10U);
+    printf("  Timeout Turns      : %" PRIu32 "\n", stats.timeout_turns);
+    printf("  Context Budget Hit : %" PRIu32 "\n", stats.context_budget_hits);
+    printf("  Tool Budget Hit    : %" PRIu32 "\n", stats.tool_budget_hits);
+    printf("  Iter Limit Hit     : %" PRIu32 "\n", stats.iter_limit_hits);
+    printf("  LLM Error Turns    : %" PRIu32 "\n", stats.llm_error_turns);
+    printf("  Outbound Q Fail    : %" PRIu32 "\n", stats.outbound_enqueue_failures);
+    printf("  Outbound Send Fail : %" PRIu32 "\n", stats.outbound_send_failures);
+    printf("  Last Latency (ms)  : %" PRIu32 "\n", stats.last_turn_latency_ms);
+    printf("  Avg Latency (ms)   : %" PRIu32 "\n", stats.avg_turn_latency_ms);
+    printf("  Max Latency (ms)   : %" PRIu32 "\n", stats.max_turn_latency_ms);
+    printf("  Avg Context (ms)   : %" PRIu32 "\n", stats.avg_context_ms);
+    printf("  Avg LLM (ms)       : %" PRIu32 "\n", stats.avg_llm_ms);
+    printf("  Avg Tools (ms)     : %" PRIu32 "\n", stats.avg_tools_ms);
+    printf("  Avg Outbound (ms)  : %" PRIu32 "\n", stats.avg_outbound_ms);
+    printf("===================\n");
+    return 0;
+}
+
+/* --- heartbeat_status command --- */
+static int cmd_heartbeat_status(int argc, char **argv)
+{
+#if MIMI_HEARTBEAT_ENABLED
+    heartbeat_stats_t stats;
+    esp_err_t err = heartbeat_service_get_stats(&stats);
+    if (err != ESP_OK) {
+        printf("Heartbeat not ready: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("=== Heartbeat Status ===\n");
+    printf("  Enabled           : yes\n");
+    printf("  Interval (sec)    : %d\n", MIMI_HEARTBEAT_INTERVAL_S);
+    printf("  File              : %s\n", MIMI_HEARTBEAT_FILE);
+    printf("  Total Runs        : %" PRIu32 "\n", stats.total_runs);
+    printf("  Triggered Runs    : %" PRIu32 "\n", stats.triggered_runs);
+    printf("  Enqueue Success   : %" PRIu32 "\n", stats.enqueue_success);
+    printf("  Enqueue Failures  : %" PRIu32 "\n", stats.enqueue_failures);
+    printf("  Skip No File      : %" PRIu32 "\n", stats.skipped_no_file);
+    printf("  Skip Empty        : %" PRIu32 "\n", stats.skipped_empty);
+    printf("  Skip Read Error   : %" PRIu32 "\n", stats.skipped_read_error);
+    printf("  Last Run (unix)   : %" PRIu32 "\n", stats.last_run_unix);
+    printf("========================\n");
+    return 0;
+#else
+    printf("Heartbeat is disabled. Set MIMI_HEARTBEAT_ENABLED=1 in mimi_config.h\n");
+    return 1;
+#endif
+}
+
+/* --- heartbeat_now command --- */
+static int cmd_heartbeat_now(int argc, char **argv)
+{
+#if MIMI_HEARTBEAT_ENABLED
+    esp_err_t err = heartbeat_service_trigger_now();
+    if (err != ESP_OK) {
+        printf("Heartbeat trigger failed: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+    printf("Heartbeat trigger requested.\n");
+    return 0;
+#else
+    printf("Heartbeat is disabled. Set MIMI_HEARTBEAT_ENABLED=1 in mimi_config.h\n");
+    return 1;
+#endif
+}
+
+/* --- cron_set command --- */
+static struct {
+    struct arg_int *minutes;
+    struct arg_str *task;
+    struct arg_end *end;
+} cron_set_args;
+
+static int cmd_cron_set(int argc, char **argv)
+{
+#if MIMI_CRON_ENABLED
+    int nerrors = arg_parse(argc, argv, (void **)&cron_set_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, cron_set_args.end, argv[0]);
+        return 1;
+    }
+
+    int minutes = cron_set_args.minutes->ival[0];
+    const char *task = cron_set_args.task->sval[0];
+    if (minutes < (int)MIMI_CRON_MIN_INTERVAL_MIN || minutes > (int)MIMI_CRON_MAX_INTERVAL_MIN) {
+        printf("Invalid minutes. Range: %d..%d\n",
+               MIMI_CRON_MIN_INTERVAL_MIN, MIMI_CRON_MAX_INTERVAL_MIN);
+        return 1;
+    }
+
+    esp_err_t err = cron_service_set_schedule((uint32_t)minutes, task);
+    if (err != ESP_OK) {
+        printf("Failed to set cron schedule: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("Cron schedule set: every %d min.\n", minutes);
+    return 0;
+#else
+    printf("Cron is disabled. Set MIMI_CRON_ENABLED=1 in mimi_config.h\n");
+    return 1;
+#endif
+}
+
+/* --- cron_clear command --- */
+static int cmd_cron_clear(int argc, char **argv)
+{
+#if MIMI_CRON_ENABLED
+    esp_err_t err = cron_service_clear_schedule();
+    if (err != ESP_OK) {
+        printf("Failed to clear cron schedule: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+    printf("Cron schedule cleared.\n");
+    return 0;
+#else
+    printf("Cron is disabled. Set MIMI_CRON_ENABLED=1 in mimi_config.h\n");
+    return 1;
+#endif
+}
+
+/* --- cron_status command --- */
+static int cmd_cron_status(int argc, char **argv)
+{
+#if MIMI_CRON_ENABLED
+    cron_stats_t stats;
+    esp_err_t err = cron_service_get_stats(&stats);
+    if (err != ESP_OK) {
+        printf("Cron not ready: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    char task[MIMI_CRON_TASK_MAX_BYTES + 1];
+    err = cron_service_get_task(task, sizeof(task));
+    if (err != ESP_OK) {
+        printf("Cron task read failed: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("=== Cron Status ===\n");
+    printf("  Enabled           : %s\n", stats.enabled ? "yes" : "no");
+    printf("  Interval (min)    : %" PRIu32 "\n", stats.interval_min);
+    printf("  Total Runs        : %" PRIu32 "\n", stats.total_runs);
+    printf("  Triggered Runs    : %" PRIu32 "\n", stats.triggered_runs);
+    printf("  Enqueue Success   : %" PRIu32 "\n", stats.enqueue_success);
+    printf("  Enqueue Failures  : %" PRIu32 "\n", stats.enqueue_failures);
+    printf("  Skip Not Config   : %" PRIu32 "\n", stats.skipped_not_configured);
+    printf("  Last Run (unix)   : %" PRIu32 "\n", stats.last_run_unix);
+    printf("  Task              : %s\n", task[0] ? task : "(empty)");
+    printf("===================\n");
+    return 0;
+#else
+    printf("Cron is disabled. Set MIMI_CRON_ENABLED=1 in mimi_config.h\n");
+    return 1;
+#endif
+}
+
+/* --- cron_now command --- */
+static int cmd_cron_now(int argc, char **argv)
+{
+#if MIMI_CRON_ENABLED
+    esp_err_t err = cron_service_trigger_now();
+    if (err != ESP_OK) {
+        printf("Cron trigger failed: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("Cron trigger requested.\n");
+    return 0;
+#else
+    printf("Cron is disabled. Set MIMI_CRON_ENABLED=1 in mimi_config.h\n");
+    return 1;
+#endif
+}
+
 /* --- set_proxy command --- */
 static struct {
     struct arg_str *host;
@@ -223,6 +425,80 @@ static int cmd_set_search_key(int argc, char **argv)
     }
     tool_web_search_set_key(search_key_args.key->sval[0]);
     printf("Search API key saved.\n");
+    return 0;
+}
+
+/* --- set_allow_from command --- */
+static struct {
+    struct arg_str *allow_from;
+    struct arg_end *end;
+} allow_from_args;
+
+static int cmd_set_allow_from(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&allow_from_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, allow_from_args.end, argv[0]);
+        return 1;
+    }
+
+    esp_err_t err = access_control_set_allow_from(allow_from_args.allow_from->sval[0]);
+    if (err != ESP_OK) {
+        printf("Failed to set allow_from: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("Telegram allow_from set: %s\n", allow_from_args.allow_from->sval[0]);
+    return 0;
+}
+
+/* --- clear_allow_from command --- */
+static int cmd_clear_allow_from(int argc, char **argv)
+{
+    esp_err_t err = access_control_clear_allow_from();
+    if (err != ESP_OK) {
+        printf("Failed to clear allow_from: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("Telegram allow_from cleared (open mode).\n");
+    return 0;
+}
+
+/* --- set_ws_token command --- */
+static struct {
+    struct arg_str *token;
+    struct arg_end *end;
+} ws_token_args;
+
+static int cmd_set_ws_token(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&ws_token_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, ws_token_args.end, argv[0]);
+        return 1;
+    }
+
+    esp_err_t err = access_control_set_ws_token(ws_token_args.token->sval[0]);
+    if (err != ESP_OK) {
+        printf("Failed to set WS token: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("WS token saved.\n");
+    return 0;
+}
+
+/* --- clear_ws_token command --- */
+static int cmd_clear_ws_token(int argc, char **argv)
+{
+    esp_err_t err = access_control_clear_ws_token();
+    if (err != ESP_OK) {
+        printf("Failed to clear WS token: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("WS token cleared (open mode).\n");
     return 0;
 }
 
@@ -269,6 +545,8 @@ static int cmd_config_show(int argc, char **argv)
     print_config("Proxy Host", MIMI_NVS_PROXY,  MIMI_NVS_KEY_PROXY_HOST, MIMI_SECRET_PROXY_HOST, false);
     print_config("Proxy Port", MIMI_NVS_PROXY,  MIMI_NVS_KEY_PROXY_PORT, MIMI_SECRET_PROXY_PORT, false);
     print_config("Search Key", MIMI_NVS_SEARCH, MIMI_NVS_KEY_API_KEY,  MIMI_SECRET_SEARCH_KEY, true);
+    print_config("Allow From", MIMI_NVS_SECURITY, MIMI_NVS_KEY_ALLOW_FROM, MIMI_SECRET_ALLOW_FROM, false);
+    print_config("WS Token",  MIMI_NVS_SECURITY, MIMI_NVS_KEY_WS_TOKEN, MIMI_SECRET_WS_TOKEN, true);
     print_config("Voice GW",   MIMI_NVS_VOICE,  MIMI_NVS_KEY_VOICE_GW, MIMI_VOICE_GATEWAY_URL, false);
     printf("=============================\n");
     return 0;
@@ -279,9 +557,10 @@ static int cmd_config_reset(int argc, char **argv)
 {
     const char *namespaces[] = {
         MIMI_NVS_WIFI, MIMI_NVS_TG, MIMI_NVS_LLM, MIMI_NVS_PROXY, MIMI_NVS_SEARCH,
-        MIMI_NVS_VOICE
+        MIMI_NVS_VOICE, MIMI_NVS_SECURITY
     };
-    for (int i = 0; i < 6; i++) {
+    int ns_count = sizeof(namespaces) / sizeof(namespaces[0]);
+    for (int i = 0; i < ns_count; i++) {
         nvs_handle_t nvs;
         if (nvs_open(namespaces[i], NVS_READWRITE, &nvs) == ESP_OK) {
             nvs_erase_all(nvs);
@@ -530,6 +809,66 @@ esp_err_t serial_cli_init(void)
     };
     esp_console_cmd_register(&heap_cmd);
 
+    /* agent_stats */
+    esp_console_cmd_t agent_stats_cmd = {
+        .command = "agent_stats",
+        .help = "Show agent diagnostics (success rate, latency, failures)",
+        .func = &cmd_agent_stats,
+    };
+    esp_console_cmd_register(&agent_stats_cmd);
+
+    /* heartbeat_status */
+    esp_console_cmd_t heartbeat_status_cmd = {
+        .command = "heartbeat_status",
+        .help = "Show heartbeat diagnostics and counters",
+        .func = &cmd_heartbeat_status,
+    };
+    esp_console_cmd_register(&heartbeat_status_cmd);
+
+    /* heartbeat_now */
+    esp_console_cmd_t heartbeat_now_cmd = {
+        .command = "heartbeat_now",
+        .help = "Trigger heartbeat task immediately",
+        .func = &cmd_heartbeat_now,
+    };
+    esp_console_cmd_register(&heartbeat_now_cmd);
+
+    /* cron_set */
+    cron_set_args.minutes = arg_int1(NULL, NULL, "<minutes>", "Run interval in minutes");
+    cron_set_args.task = arg_str1(NULL, NULL, "<task>", "Task text for scheduled agent run");
+    cron_set_args.end = arg_end(2);
+    esp_console_cmd_t cron_set_cmd = {
+        .command = "cron_set",
+        .help = "Set cron schedule (example: cron_set 30 \"check agent health\")",
+        .func = &cmd_cron_set,
+        .argtable = &cron_set_args,
+    };
+    esp_console_cmd_register(&cron_set_cmd);
+
+    /* cron_clear */
+    esp_console_cmd_t cron_clear_cmd = {
+        .command = "cron_clear",
+        .help = "Clear cron schedule",
+        .func = &cmd_cron_clear,
+    };
+    esp_console_cmd_register(&cron_clear_cmd);
+
+    /* cron_status */
+    esp_console_cmd_t cron_status_cmd = {
+        .command = "cron_status",
+        .help = "Show cron schedule and counters",
+        .func = &cmd_cron_status,
+    };
+    esp_console_cmd_register(&cron_status_cmd);
+
+    /* cron_now */
+    esp_console_cmd_t cron_now_cmd = {
+        .command = "cron_now",
+        .help = "Trigger cron task immediately",
+        .func = &cmd_cron_now,
+    };
+    esp_console_cmd_register(&cron_now_cmd);
+
     /* set_search_key */
     search_key_args.key = arg_str1(NULL, NULL, "<key>", "Brave Search API key");
     search_key_args.end = arg_end(1);
@@ -540,6 +879,44 @@ esp_err_t serial_cli_init(void)
         .argtable = &search_key_args,
     };
     esp_console_cmd_register(&search_key_cmd);
+
+    /* set_allow_from */
+    allow_from_args.allow_from = arg_str1(NULL, NULL, "<csv>", "Comma-separated sender IDs (or *)");
+    allow_from_args.end = arg_end(1);
+    esp_console_cmd_t allow_from_cmd = {
+        .command = "set_allow_from",
+        .help = "Set Telegram allowlist (example: set_allow_from 12345,67890)",
+        .func = &cmd_set_allow_from,
+        .argtable = &allow_from_args,
+    };
+    esp_console_cmd_register(&allow_from_cmd);
+
+    /* clear_allow_from */
+    esp_console_cmd_t clear_allow_from_cmd = {
+        .command = "clear_allow_from",
+        .help = "Clear Telegram allowlist (open mode)",
+        .func = &cmd_clear_allow_from,
+    };
+    esp_console_cmd_register(&clear_allow_from_cmd);
+
+    /* set_ws_token */
+    ws_token_args.token = arg_str1(NULL, NULL, "<token>", "WebSocket auth token");
+    ws_token_args.end = arg_end(1);
+    esp_console_cmd_t ws_token_cmd = {
+        .command = "set_ws_token",
+        .help = "Set WebSocket auth token",
+        .func = &cmd_set_ws_token,
+        .argtable = &ws_token_args,
+    };
+    esp_console_cmd_register(&ws_token_cmd);
+
+    /* clear_ws_token */
+    esp_console_cmd_t clear_ws_token_cmd = {
+        .command = "clear_ws_token",
+        .help = "Clear WebSocket auth token (open mode)",
+        .func = &cmd_clear_ws_token,
+    };
+    esp_console_cmd_register(&clear_ws_token_cmd);
 
     /* set_proxy */
     proxy_args.host = arg_str1(NULL, NULL, "<host>", "Proxy host/IP");
@@ -602,7 +979,7 @@ esp_err_t serial_cli_init(void)
     esp_console_cmd_register(&mic_test_cmd);
 
     /* set_voice_gw */
-    voice_gw_args.url = arg_str1(NULL, NULL, "<url>", "Voice gateway URL (e.g. http://192.168.1.100:8090)");
+    voice_gw_args.url = arg_str1(NULL, NULL, "<url>", "Voice gateway URL (e.g. ws://192.168.1.100:8090)");
     voice_gw_args.end = arg_end(1);
     esp_console_cmd_t voice_gw_cmd = {
         .command = "set_voice_gw",
