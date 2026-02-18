@@ -10,6 +10,8 @@ Client → Server:
   [binary frames]                 — raw PCM 16kHz 16-bit mono chunks
   {"type":"audio_end"}            — end recording, trigger STT
   {"type":"tts_request","text":"..."}  — request streaming TTS
+  {"type":"music_request","query":"..."} — request streaming music
+  {"type":"music_stop"}           — stop music playback
   {"type":"interrupt"}            — cancel ongoing TTS
 
 Server → Client:
@@ -17,6 +19,9 @@ Server → Client:
   {"type":"tts_start"}
   [binary frames]                 — PCM 16kHz 16-bit mono chunks
   {"type":"tts_end"}
+  {"type":"music_start"}
+  [binary frames]                 — PCM 16kHz 16-bit mono chunks
+  {"type":"music_end"}
   {"type":"error","message":"..."}
 
 Usage:
@@ -131,6 +136,54 @@ def clean_text_for_tts(text: str) -> str:
         r'[^\u4e00-\u9fff\u3000-\u303f\uff00-\uffef'
         r'a-zA-Z0-9\s.,!?;:\'\"()\-\u3002\uff0c\uff01\uff1f\uff1b\uff1a\u201c\u201d\u2018\u2019]',
         '', text).strip()
+
+
+def normalize_music_query(text: str) -> str:
+    s = (text or "").strip()
+    s = re.sub(r"[，。！？、；：,.!?;:]+$", "", s)
+    return s.strip()
+
+
+def is_http_url(text: str) -> bool:
+    t = (text or "").strip().lower()
+    return t.startswith("http://") or t.startswith("https://")
+
+
+def resolve_music_source(query: str) -> str:
+    """Resolve music query to a playable media URL/path."""
+    q = normalize_music_query(query)
+    if not q:
+        raise RuntimeError("empty music query")
+
+    if is_http_url(q):
+        return q
+
+    if os.path.exists(q):
+        return q
+
+    # Keyword search fallback via yt-dlp (optional runtime dependency)
+    cmd = [
+        "yt-dlp",
+        "--no-playlist",
+        "--no-warnings",
+        "-f", "bestaudio",
+        "-g",
+        f"ytsearch1:{q}",
+    ]
+    try:
+        out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=20)
+    except FileNotFoundError:
+        raise RuntimeError("yt-dlp not installed, cannot resolve music query")
+    except subprocess.CalledProcessError as e:
+        msg = (e.output or b"").decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"yt-dlp resolve failed: {msg[:200]}")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("yt-dlp resolve timeout")
+
+    url = out.decode("utf-8", errors="replace").strip().splitlines()
+    if not url:
+        raise RuntimeError("yt-dlp resolved empty result")
+    return url[0].strip()
 
 
 def do_stt(pcm_data: bytes) -> tuple[str, str]:
@@ -1259,6 +1312,62 @@ async def stream_tts_pcm(ws, text: str, voice: str, rate: str, cancel_event: asy
     log.info("TTS: sent %d bytes PCM (%.1fs)", bytes_sent, bytes_sent / 32000)
 
 
+async def stream_music_pcm(ws, source: str, cancel_event: asyncio.Event):
+    """Stream music source as PCM chunks over WebSocket using ffmpeg."""
+    await ws.send(json.dumps({"type": "music_start"}))
+
+    ffmpeg = subprocess.Popen(
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "error",
+            "-reconnect", "1",
+            "-reconnect_streamed", "1",
+            "-reconnect_delay_max", "2",
+            "-i", source,
+            "-f", "s16le", "-ar", "16000", "-ac", "1", "pipe:1",
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        bufsize=0,
+    )
+
+    bytes_sent = 0
+    loop = asyncio.get_event_loop()
+    try:
+        while True:
+            if cancel_event.is_set():
+                break
+            try:
+                pcm_chunk = await loop.run_in_executor(None, ffmpeg.stdout.read, 4096)
+            except Exception:
+                break
+            if not pcm_chunk:
+                break
+            try:
+                await ws.send(pcm_chunk)
+                bytes_sent += len(pcm_chunk)
+            except websockets.exceptions.ConnectionClosed:
+                break
+    finally:
+        try:
+            ffmpeg.terminate()
+        except Exception:
+            pass
+        try:
+            ffmpeg.wait(timeout=2)
+        except Exception:
+            pass
+
+    if not cancel_event.is_set():
+        try:
+            await ws.send(json.dumps({"type": "music_end"}))
+        except websockets.exceptions.ConnectionClosed:
+            pass
+
+    log.info("Music: sent %d bytes PCM (%.1fs) source=%.120s",
+             bytes_sent, bytes_sent / 32000, source)
+
+
 async def handle_client(ws):
     """Handle a single WebSocket client connection."""
     remote = ws.remote_address
@@ -1268,6 +1377,8 @@ async def handle_client(ws):
     recording = False
     tts_cancel = asyncio.Event()
     tts_task = None
+    music_cancel = asyncio.Event()
+    music_task = None
 
     try:
         async for message in ws:
@@ -1334,10 +1445,55 @@ async def handle_client(ws):
                 if tts_task and not tts_task.done():
                     tts_cancel.set()
                     await tts_task
+                if music_task and not music_task.done():
+                    music_cancel.set()
+                    await music_task
 
                 tts_cancel = asyncio.Event()
                 tts_task = asyncio.create_task(
                     stream_tts_pcm(ws, clean, voice, rate, tts_cancel))
+
+            elif msg_type == "music_request":
+                query = normalize_music_query(msg.get("query", ""))
+                if not query:
+                    await ws.send(json.dumps({
+                        "type": "error", "message": "music query empty"
+                    }))
+                    continue
+
+                log.info("Music request: %.120s", query)
+
+                if tts_task and not tts_task.done():
+                    tts_cancel.set()
+                    await tts_task
+                    tts_task = None
+                if music_task and not music_task.done():
+                    music_cancel.set()
+                    await music_task
+
+                loop = asyncio.get_event_loop()
+                try:
+                    source = await loop.run_in_executor(None, resolve_music_source, query)
+                except Exception as e:
+                    await ws.send(json.dumps({
+                        "type": "error", "message": f"music resolve failed: {e}"
+                    }))
+                    continue
+
+                music_cancel = asyncio.Event()
+                music_task = asyncio.create_task(
+                    stream_music_pcm(ws, source, music_cancel))
+
+            elif msg_type == "music_stop":
+                log.info("Music stop from %s", remote)
+                if music_task and not music_task.done():
+                    music_cancel.set()
+                    await music_task
+                    music_task = None
+                try:
+                    await ws.send(json.dumps({"type": "music_end"}))
+                except websockets.exceptions.ConnectionClosed:
+                    pass
 
             elif msg_type == "interrupt":
                 log.info("Interrupt from %s", remote)
@@ -1345,6 +1501,10 @@ async def handle_client(ws):
                     tts_cancel.set()
                     await tts_task
                     tts_task = None
+                if music_task and not music_task.done():
+                    music_cancel.set()
+                    await music_task
+                    music_task = None
 
             else:
                 log.warning("Unknown message type: %s", msg_type)
@@ -1357,6 +1517,12 @@ async def handle_client(ws):
             tts_cancel.set()
             try:
                 await tts_task
+            except Exception:
+                pass
+        if music_task and not music_task.done():
+            music_cancel.set()
+            try:
+                await music_task
             except Exception:
                 pass
         log.info("Client disconnected: %s", remote)
