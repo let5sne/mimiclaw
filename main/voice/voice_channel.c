@@ -27,6 +27,7 @@ static const char *TAG = "voice";
 #define EVT_TTS_DONE       BIT2
 #define EVT_WAKE_WORD      BIT3
 #define EVT_BUTTON_PRESS   BIT4
+#define WS_FORCE_RECONNECT_MS 15000
 
 /* ---------- State ---------- */
 static voice_state_t s_state = VOICE_STATE_IDLE;
@@ -49,6 +50,11 @@ static bool s_ws_recv_binary_frag = false;
 static bool s_ws_recv_text_frag = false;
 static volatile int64_t s_followup_deadline_ms = 0;
 static volatile int64_t s_playback_started_ms = 0;
+static volatile int64_t s_last_ws_connected_ms = 0;
+static volatile int64_t s_last_ws_recreate_ms = 0;
+static volatile bool s_drop_playback_frames = false;
+
+static esp_err_t ws_connect(void);
 
 static inline int16_t sample_abs_i16(int16_t v)
 {
@@ -336,12 +342,14 @@ static void handle_json_message(const char *data, int len)
 
     } else if (strcmp(type, "tts_start") == 0) {
         ESP_LOGI(TAG, "TTS stream starting");
+        s_drop_playback_frames = false;
         if (s_state == VOICE_STATE_PLAYING) {
             audio_spk_enable();
         }
 
     } else if (strcmp(type, "tts_end") == 0) {
         ESP_LOGI(TAG, "TTS stream ended");
+        s_drop_playback_frames = false;
         if (s_state == VOICE_STATE_PLAYING) {
             audio_spk_disable();
         }
@@ -349,12 +357,14 @@ static void handle_json_message(const char *data, int len)
 
     } else if (strcmp(type, "music_start") == 0 || strcmp(type, "media_start") == 0) {
         ESP_LOGI(TAG, "Music stream starting");
+        s_drop_playback_frames = false;
         if (s_state == VOICE_STATE_PLAYING) {
             audio_spk_enable();
         }
 
     } else if (strcmp(type, "music_end") == 0 || strcmp(type, "media_end") == 0) {
         ESP_LOGI(TAG, "Music stream ended");
+        s_drop_playback_frames = false;
         if (s_state == VOICE_STATE_PLAYING) {
             audio_spk_disable();
             s_playback_started_ms = 0;
@@ -380,6 +390,8 @@ static void ws_event_handler(void *arg, esp_event_base_t base, int32_t event_id,
     switch (event_id) {
     case WEBSOCKET_EVENT_CONNECTED:
         ESP_LOGI(TAG, "Voice WS connected");
+        s_last_ws_connected_ms = esp_timer_get_time() / 1000;
+        s_last_ws_recreate_ms = s_last_ws_connected_ms;
         xEventGroupSetBits(s_events, EVT_WS_CONNECTED);
         set_state(VOICE_STATE_IDLE);
         break;
@@ -412,7 +424,7 @@ static void ws_event_handler(void *arg, esp_event_base_t base, int32_t event_id,
 
         if (is_binary) {
             /* Binary frame: PCM audio chunk during TTS playback, including continuation frames */
-            if (s_state == VOICE_STATE_PLAYING && evt->data_len > 0) {
+            if (!s_drop_playback_frames && s_state == VOICE_STATE_PLAYING && evt->data_len > 0) {
                 audio_spk_write_all((const uint8_t *)evt->data_ptr, evt->data_len);
             }
         } else if (is_text) {
@@ -478,10 +490,34 @@ static void voice_task(void *arg)
     ESP_LOGI(TAG, "Voice WS ready, listening for button or wake word");
 
     while (1) {
+        if (!(xEventGroupGetBits(s_events) & EVT_WS_CONNECTED)) {
+            int64_t now_ms = esp_timer_get_time() / 1000;
+            int64_t disconnected_ms = (s_last_ws_connected_ms > 0)
+                                        ? (now_ms - s_last_ws_connected_ms)
+                                        : now_ms;
+            if (disconnected_ms >= WS_FORCE_RECONNECT_MS &&
+                now_ms - s_last_ws_recreate_ms >= WS_FORCE_RECONNECT_MS) {
+                s_last_ws_recreate_ms = now_ms;
+                ESP_LOGW(TAG, "WS disconnected for >%d ms, recreate client", WS_FORCE_RECONNECT_MS);
+                if (s_ws_client) {
+                    esp_websocket_client_stop(s_ws_client);
+                    esp_websocket_client_destroy(s_ws_client);
+                    s_ws_client = NULL;
+                }
+                xEventGroupClearBits(s_events, EVT_WS_CONNECTED);
+                ws_connect();
+            }
+            vTaskDelay(pdMS_TO_TICKS(200));
+            continue;
+        }
+
         /* Wait for button event or wake word event */
         EventBits_t bits = xEventGroupWaitBits(
             s_events, EVT_WAKE_WORD | (s_config.button_gpio >= 0 ? EVT_BUTTON_PRESS : 0),
-            pdTRUE, pdFALSE, portMAX_DELAY);
+            pdTRUE, pdFALSE, pdMS_TO_TICKS(200));
+        if ((bits & (EVT_WAKE_WORD | EVT_BUTTON_PRESS)) == 0) {
+            continue;
+        }
 
         bool wake_word_detected = (bits & EVT_WAKE_WORD) != 0;
         bool button_pressed = (bits & EVT_BUTTON_PRESS) != 0;
@@ -504,7 +540,9 @@ static void voice_task(void *arg)
         /* === INTERRUPT: event during playback === */
         if (s_state == VOICE_STATE_PLAYING) {
             ESP_LOGI(TAG, "Interrupt: stopping playback");
+            s_drop_playback_frames = true;
             ws_send_json("interrupt", NULL);
+            xEventGroupSetBits(s_events, EVT_TTS_DONE);
             audio_spk_disable();
             /* Fall through to start recording */
         } else if (s_state != VOICE_STATE_IDLE) {
@@ -730,6 +768,8 @@ static esp_err_t ws_connect(void)
     esp_websocket_client_config_t ws_cfg = {
         .uri = s_config.gateway_url,
         .buffer_size = 4096,
+        .disable_auto_reconnect = false,
+        .enable_close_reconnect = true,
         .reconnect_timeout_ms = 5000,
         .network_timeout_ms = 10000,
         .ping_interval_sec = 20,
@@ -900,12 +940,13 @@ esp_err_t voice_channel_play_music(const char *query)
         ESP_LOGE(TAG, "WS not connected, cannot play music");
         return ESP_ERR_INVALID_STATE;
     }
-    if (s_state == VOICE_STATE_RECORDING || s_state == VOICE_STATE_PROCESSING) {
+    if (s_state == VOICE_STATE_RECORDING) {
         return ESP_ERR_INVALID_STATE;
     }
 
     set_state(VOICE_STATE_PLAYING);
     s_playback_started_ms = esp_timer_get_time() / 1000;
+    s_drop_playback_frames = false;
     ESP_LOGI(TAG, "Music play: \"%.*s\"", 200, query);
     display_show_message("assistant", "播放音乐中...");
 
@@ -931,6 +972,7 @@ esp_err_t voice_channel_stop_music(void)
     }
 
     esp_err_t ret = ws_send_json("music_stop", NULL);
+    s_drop_playback_frames = true;
     audio_spk_disable();
     s_playback_started_ms = 0;
     set_state(VOICE_STATE_IDLE);

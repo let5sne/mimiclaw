@@ -1316,10 +1316,11 @@ static bool parse_music_command(const mimi_msg_t *msg, control_command_t *out)
     const char *text = msg->content;
 
     static const char *const stop_keywords[] = {
-        "停止音乐", "暂停音乐", "关闭音乐", "停掉音乐", "停歌", "别放了"
+        "停止音乐", "暂停音乐", "关闭音乐", "停掉音乐", "停歌", "别放了", "停止播放", "暂停播放"
     };
     static const char *const play_keywords[] = {
-        "播放音乐", "放音乐", "来点音乐", "来首歌", "放首歌", "播一首"
+        "播放音乐", "放音乐", "来点音乐", "来首歌", "放首歌", "播一首",
+        "播放", "来一首", "放一首"
     };
     bool is_stop = contains_any(text, stop_keywords, sizeof(stop_keywords) / sizeof(stop_keywords[0]));
     bool is_play = contains_any(text, play_keywords, sizeof(play_keywords) / sizeof(play_keywords[0]));
@@ -1350,6 +1351,12 @@ static bool parse_music_command(const mimi_msg_t *msg, control_command_t *out)
         p += strlen("放首歌");
     } else if ((p = strstr(text, "播一首")) != NULL) {
         p += strlen("播一首");
+    } else if ((p = strstr(text, "来一首")) != NULL) {
+        p += strlen("来一首");
+    } else if ((p = strstr(text, "放一首")) != NULL) {
+        p += strlen("放一首");
+    } else if ((p = strstr(text, "播放")) != NULL) {
+        p += strlen("播放");
     } else {
         p = text;
     }
@@ -1421,6 +1428,7 @@ esp_err_t control_plane_try_handle_message(const mimi_msg_t *msg, control_result
     out->handled = true;
     out->from_rule = true;
     strncpy(out->request_id, cmd.request_id, sizeof(out->request_id) - 1);
+    strncpy(out->capability, cmd.capability, sizeof(out->capability) - 1);
 
     if (idemp_lookup(cmd.request_id, out)) {
         out->handled = true;

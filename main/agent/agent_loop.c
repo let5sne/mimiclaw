@@ -821,7 +821,8 @@ static void agent_loop_task(void *arg)
             display_set_display_status(DISPLAY_STATUS_IDLE);
 
             uint32_t total_ms = elapsed_ms(turn_start_tick, xTaskGetTickCount());
-            bool success = produced_final_response && !outbound_enqueue_failed;
+            bool response_ready = control_result.response_text[0] ? produced_final_response : true;
+            bool success = control_result.success && response_ready && !outbound_enqueue_failed;
             record_turn_stats(run_id, success, total_ms, context_ms, llm_ms, tools_ms, outbound_ms,
                               hit_timeout, hit_context_budget, hit_tool_budget, hit_iter_limit,
                               hit_llm_error, outbound_enqueue_failed);
