@@ -7,6 +7,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "esp_timer.h"
 #include <ctype.h>
 #include <string.h>
 
@@ -17,6 +18,7 @@ static bool s_initialized = false;
 static audio_config_t s_config = {0};
 static i2s_chan_handle_t s_mic_handle = NULL;
 static i2s_chan_handle_t s_spk_handle = NULL;
+static bool s_spk_channel_enabled = false;
 static audio_event_cb_t s_event_callback = NULL;
 static void *s_event_user_data = NULL;
 static uint8_t s_volume = 80;
@@ -165,6 +167,7 @@ void audio_deinit(void)
         i2s_del_channel(s_spk_handle);
         s_spk_handle = NULL;
     }
+    s_spk_channel_enabled = false;
 
     audio_wakenet_deinit();
 
@@ -262,7 +265,7 @@ esp_err_t audio_play(const uint8_t *data, size_t len)
     }
 
     /* Enable speaker */
-    esp_err_t ret = i2s_channel_enable(s_spk_handle);
+    esp_err_t ret = audio_spk_enable();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to enable speaker: %s", esp_err_to_name(ret));
         return ret;
@@ -273,7 +276,7 @@ esp_err_t audio_play(const uint8_t *data, size_t len)
     ret = i2s_channel_write(s_spk_handle, data, len, &bytes_written, portMAX_DELAY);
 
     /* Disable speaker */
-    i2s_channel_disable(s_spk_handle);
+    audio_spk_disable();
 
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to write audio: %s", esp_err_to_name(ret));
@@ -286,21 +289,28 @@ esp_err_t audio_play(const uint8_t *data, size_t len)
 
 void audio_stop_playback(void)
 {
-    if (s_spk_handle) {
-        i2s_channel_disable(s_spk_handle);
-    }
+    audio_spk_disable();
 }
 
 esp_err_t audio_spk_enable(void)
 {
     if (!s_initialized || !s_spk_handle) return ESP_ERR_INVALID_STATE;
-    return i2s_channel_enable(s_spk_handle);
+    if (s_spk_channel_enabled) return ESP_OK;
+    esp_err_t ret = i2s_channel_enable(s_spk_handle);
+    if (ret == ESP_OK || ret == ESP_ERR_INVALID_STATE) {
+        s_spk_channel_enabled = true;
+        return ESP_OK;
+    }
+    return ret;
 }
 
 void audio_spk_disable(void)
 {
-    if (s_spk_handle) {
-        i2s_channel_disable(s_spk_handle);
+    if (!s_spk_handle || !s_spk_channel_enabled) return;
+    s_spk_channel_enabled = false;
+    esp_err_t ret = i2s_channel_disable(s_spk_handle);
+    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "Speaker disable failed: %s", esp_err_to_name(ret));
     }
 }
 
@@ -553,6 +563,10 @@ static void listen_task(void *arg)
 
     int low_signal_frames = 0;
     uint32_t debug_frames = 0;
+    int speech_frames = 0;
+    int silence_frames = 0;
+    bool speech_active = false;
+    int64_t last_speech_event_ms = 0;
 
     while (1) {
         if (!s_wakenet || !s_wakenet_data) {
@@ -615,6 +629,43 @@ static void listen_task(void *arg)
                     if (scaled < -32768) scaled = -32768;
                     buffer[i] = (int16_t)scaled;
                 }
+            }
+        }
+
+        /* 语音起始/结束事件：用于播放中打断与连续对话窗口。 */
+        int speech_peak_threshold = s_config.vad_threshold > 0 ? (s_config.vad_threshold * 30) : 1500;
+        if (speech_peak_threshold < 1200) {
+            speech_peak_threshold = 1200;
+        }
+        if (speech_peak_threshold > 8000) {
+            speech_peak_threshold = 8000;
+        }
+
+        if (peak >= speech_peak_threshold) {
+            speech_frames++;
+            silence_frames = 0;
+        } else {
+            speech_frames = 0;
+            if (speech_active) {
+                silence_frames++;
+            }
+        }
+
+        int64_t now_ms = esp_timer_get_time() / 1000;
+        if (!speech_active && speech_frames >= 3) {
+            if (now_ms - last_speech_event_ms > 1200) {
+                speech_active = true;
+                last_speech_event_ms = now_ms;
+                if (s_event_callback) {
+                    s_event_callback(AUDIO_EVENT_SPEECH_START, s_event_user_data);
+                }
+            }
+            speech_frames = 0;
+        } else if (speech_active && silence_frames >= 20) {
+            speech_active = false;
+            silence_frames = 0;
+            if (s_event_callback) {
+                s_event_callback(AUDIO_EVENT_SPEECH_END, s_event_user_data);
             }
         }
 

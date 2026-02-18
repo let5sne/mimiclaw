@@ -1188,7 +1188,7 @@ class STTUploadHandler(BaseHTTPRequestHandler):
         log.info("http: " + format, *args)
 
 
-async def stream_tts_pcm(ws, text: str, voice: str, cancel_event: asyncio.Event):
+async def stream_tts_pcm(ws, text: str, voice: str, rate: str, cancel_event: asyncio.Event):
     """Stream TTS as PCM chunks over WebSocket using ffmpeg for MP3→PCM conversion."""
     import edge_tts
 
@@ -1208,7 +1208,7 @@ async def stream_tts_pcm(ws, text: str, voice: str, cancel_event: asyncio.Event)
 
     async def feed_mp3():
         """Feed MP3 chunks from edge-tts into ffmpeg stdin."""
-        communicate = edge_tts.Communicate(text, voice)
+        communicate = edge_tts.Communicate(text, voice, rate=rate)
         try:
             async for chunk in communicate.stream():
                 if cancel_event.is_set():
@@ -1321,13 +1321,14 @@ async def handle_client(ws):
             elif msg_type == "tts_request":
                 text = msg.get("text", "")
                 voice = msg.get("voice", "zh-CN-XiaoxiaoNeural")
+                rate = msg.get("rate", "+0%")
 
                 clean = clean_text_for_tts(text)
                 if not clean:
                     log.warning("TTS: no speakable text after cleanup, fallback to default reply")
                     clean = "收到"
 
-                log.info("TTS request: voice=%s text=%.80s...", voice, clean)
+                log.info("TTS request: voice=%s rate=%s text=%.80s...", voice, rate, clean)
 
                 # Cancel any ongoing TTS
                 if tts_task and not tts_task.done():
@@ -1336,7 +1337,7 @@ async def handle_client(ws):
 
                 tts_cancel = asyncio.Event()
                 tts_task = asyncio.create_task(
-                    stream_tts_pcm(ws, clean, voice, tts_cancel))
+                    stream_tts_pcm(ws, clean, voice, rate, tts_cancel))
 
             elif msg_type == "interrupt":
                 log.info("Interrupt from %s", remote)

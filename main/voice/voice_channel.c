@@ -46,6 +46,8 @@ static size_t s_json_len = 0;
 static size_t s_json_cap = 0;
 static bool s_ws_recv_binary_frag = false;
 static bool s_ws_recv_text_frag = false;
+static volatile int64_t s_followup_deadline_ms = 0;
+static volatile int64_t s_playback_started_ms = 0;
 
 static esp_err_t normalize_gateway_url(const char *input, char *output, size_t output_size)
 {
@@ -138,7 +140,17 @@ static void audio_event_handler(audio_event_type_t event, void *user_data)
         }
         break;
     case AUDIO_EVENT_SPEECH_START:
-        ESP_LOGI(TAG, "Speech start event received");
+        if (s_events) {
+            int64_t now_ms = esp_timer_get_time() / 1000;
+            bool barge_in = (s_state == VOICE_STATE_PLAYING)
+                            && (now_ms - s_playback_started_ms > 800);
+            bool in_followup_window = (s_followup_deadline_ms > now_ms);
+            if (barge_in || in_followup_window) {
+                ESP_LOGI(TAG, "Speech start -> trigger capture (barge_in=%d followup=%d)",
+                         barge_in ? 1 : 0, in_followup_window ? 1 : 0);
+                xEventGroupSetBits(s_events, EVT_WAKE_WORD);
+            }
+        }
         break;
     case AUDIO_EVENT_SPEECH_END:
         ESP_LOGI(TAG, "Speech end event received");
@@ -318,9 +330,11 @@ static void ws_event_handler(void *arg, esp_event_base_t base, int32_t event_id,
     case WEBSOCKET_EVENT_DISCONNECTED:
         ESP_LOGW(TAG, "Voice WS disconnected");
         xEventGroupClearBits(s_events, EVT_WS_CONNECTED);
+        s_followup_deadline_ms = 0;
         s_ws_recv_binary_frag = false;
         s_ws_recv_text_frag = false;
         s_json_len = 0;
+        s_playback_started_ms = 0;
         if (s_state == VOICE_STATE_PLAYING) {
             audio_spk_disable();
         }
@@ -414,6 +428,9 @@ static void voice_task(void *arg)
 
         bool wake_word_detected = (bits & EVT_WAKE_WORD) != 0;
         bool button_pressed = (bits & EVT_BUTTON_PRESS) != 0;
+        if (wake_word_detected || button_pressed) {
+            s_followup_deadline_ms = 0;
+        }
 
         /* If button pressed, debounce */
         if (button_pressed && s_config.button_gpio >= 0) {
@@ -772,6 +789,8 @@ void voice_channel_stop(void)
     s_json_buf = NULL;
     s_json_len = 0;
     s_json_cap = 0;
+    s_followup_deadline_ms = 0;
+    s_playback_started_ms = 0;
     if (s_events) {
         vEventGroupDelete(s_events);
         s_events = NULL;
@@ -793,6 +812,7 @@ esp_err_t voice_channel_speak(const char *text)
     }
 
     set_state(VOICE_STATE_PLAYING);
+    s_playback_started_ms = esp_timer_get_time() / 1000;
     ESP_LOGI(TAG, "TTS speak: \"%.*s\"", 200, text);
     display_show_message("assistant", text);
 
@@ -803,6 +823,7 @@ esp_err_t voice_channel_speak(const char *text)
     cJSON *extra = cJSON_CreateObject();
     cJSON_AddStringToObject(extra, "text", text);
     cJSON_AddStringToObject(extra, "voice", "zh-CN-XiaoxiaoNeural");
+    cJSON_AddStringToObject(extra, "rate", MIMI_VOICE_TTS_RATE);
     ws_send_json("tts_request", extra);
     cJSON_Delete(extra);
 
@@ -815,6 +836,9 @@ esp_err_t voice_channel_speak(const char *text)
         audio_spk_disable();
     }
 
+    s_followup_deadline_ms = (esp_timer_get_time() / 1000) + MIMI_VOICE_FOLLOWUP_WINDOW_MS;
+    s_playback_started_ms = 0;
+    ESP_LOGI(TAG, "Follow-up window opened for %d ms", MIMI_VOICE_FOLLOWUP_WINDOW_MS);
     set_state(VOICE_STATE_IDLE);
     return ESP_OK;
 }

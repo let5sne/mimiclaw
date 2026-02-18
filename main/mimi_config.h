@@ -306,6 +306,14 @@
 #define MIMI_VOICE_MAX_RECORD_S      15
 #endif
 
+#ifndef MIMI_VOICE_FOLLOWUP_WINDOW_MS
+#define MIMI_VOICE_FOLLOWUP_WINDOW_MS 10000
+#endif
+
+#ifndef MIMI_VOICE_TTS_RATE
+#define MIMI_VOICE_TTS_RATE          "-5%"
+#endif
+
 #define MIMI_VOICE_TASK_STACK        (8 * 1024)
 #define MIMI_VOICE_TASK_PRIO         5
 #define MIMI_VOICE_TASK_CORE         0

@@ -42,3 +42,6 @@ nanobot/
 Thumbs.db
 
 .codeartsdoer
+
+# Local agent metadata
+.serena/
