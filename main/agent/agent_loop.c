@@ -83,6 +83,12 @@ typedef struct {
     int count;
 } skill_rule_cfg_t;
 
+typedef enum {
+    VOLUME_INTENT_NONE = 0,
+    VOLUME_INTENT_QUERY,
+    VOLUME_INTENT_ADJUST,
+} volume_intent_t;
+
 static skill_rule_cfg_t s_skill_rule_cfg = {0};
 static TickType_t s_skill_rule_loaded_at = 0;
 static bool s_skill_rule_cfg_ready = false;
@@ -549,12 +555,66 @@ static const char *infer_route_hint(const mimi_msg_t *msg)
     return s_route_hint_cfg.text;
 }
 
+static bool text_contains_any(const char *text, const char *const keywords[], size_t count)
+{
+    if (!text || !text[0]) return false;
+    for (size_t i = 0; i < count; i++) {
+        if (keywords[i] && keywords[i][0] && strstr(text, keywords[i])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static volume_intent_t detect_voice_volume_intent(const mimi_msg_t *msg)
+{
+    if (!msg || !msg->content) return VOLUME_INTENT_NONE;
+
+    const char *media_type = msg->media_type[0] ? msg->media_type : "text";
+    if (strcmp(media_type, "voice") != 0) {
+        return VOLUME_INTENT_NONE;
+    }
+    if (!strstr(msg->content, "音量")) {
+        return VOLUME_INTENT_NONE;
+    }
+
+    static const char *const adjust_keywords[] = {
+        "调", "调整", "设置", "设为", "改成", "改到", "变成",
+        "增大", "增加", "调大", "大一点", "开大",
+        "减小", "减少", "调小", "小一点", "开小", "降低",
+        "静音", "mute", "unmute", "%"
+    };
+    if (text_contains_any(msg->content, adjust_keywords,
+                          sizeof(adjust_keywords) / sizeof(adjust_keywords[0]))) {
+        return VOLUME_INTENT_ADJUST;
+    }
+
+    static const char *const query_keywords[] = {
+        "多少", "几", "多大", "当前", "现在", "查询", "查看",
+        "是多少", "是什么", "啥", "吗", "？", "?"
+    };
+    if (text_contains_any(msg->content, query_keywords,
+                          sizeof(query_keywords) / sizeof(query_keywords[0]))) {
+        return VOLUME_INTENT_QUERY;
+    }
+
+    /* 未命中明显关键词时，保守按查询处理，避免直接口胡音量值。 */
+    return VOLUME_INTENT_QUERY;
+}
+
 static char *build_user_content_with_meta(const mimi_msg_t *msg)
 {
     if (!msg || !msg->content || !msg->content[0]) return NULL;
 
     const char *media_type = msg->media_type[0] ? msg->media_type : "text";
     const char *route_hint = infer_route_hint(msg);
+    volume_intent_t volume_intent = detect_voice_volume_intent(msg);
+    const char *runtime_hint = "";
+    if (volume_intent == VOLUME_INTENT_QUERY) {
+        runtime_hint = "这是音量查询问题。必须先调用 get_volume 获取实时音量，再回答用户。禁止凭上下文记忆直接给出音量数值。";
+    } else if (volume_intent == VOLUME_INTENT_ADJUST) {
+        runtime_hint = "这是音量调节问题。必须调用 set_volume 执行调整；如果用户说“增大/减小X%”这类相对变化，先调用 get_volume，再计算后调用 set_volume。";
+    }
     char skill_hints[SKILL_HINTS_BLOCK_MAX] = {0};
     int skill_hint_count = collect_skill_hints(msg, skill_hints, sizeof(skill_hints));
     bool has_skills = skill_hint_count > 0;
@@ -563,11 +623,12 @@ static char *build_user_content_with_meta(const mimi_msg_t *msg)
                  skill_hint_count, msg->channel, media_type);
     }
     bool has_hint = route_hint[0] != '\0';
+    bool has_runtime_hint = runtime_hint[0] != '\0';
     bool has_meta = (strcmp(media_type, "text") != 0) ||
                     (msg->file_id[0] != '\0') ||
                     (msg->file_path[0] != '\0') ||
                     (msg->meta_json && msg->meta_json[0] != '\0');
-    if (!has_meta && !has_hint && !has_skills) {
+    if (!has_meta && !has_hint && !has_runtime_hint && !has_skills) {
         return strdup(msg->content);
     }
 
@@ -577,7 +638,7 @@ static char *build_user_content_with_meta(const mimi_msg_t *msg)
 
     size_t cap = strlen(msg->content) + strlen(media_type) + strlen(file_id) +
                  strlen(file_path) + strlen(meta_json) + strlen(route_hint) +
-                 strlen(skill_hints) + 320;
+                 strlen(runtime_hint) + strlen(skill_hints) + 384;
     char *buf = malloc(cap);
     if (!buf) return NULL;
 
@@ -591,6 +652,15 @@ static char *build_user_content_with_meta(const mimi_msg_t *msg)
     if (off >= cap) off = cap - 1;
     if (has_hint) {
         n = snprintf(buf + off, cap - off, "\n\n[route_hint]\n%s", route_hint);
+        if (n < 0) {
+            free(buf);
+            return NULL;
+        }
+        off += (size_t)n;
+        if (off >= cap) off = cap - 1;
+    }
+    if (has_runtime_hint) {
+        n = snprintf(buf + off, cap - off, "\n\n[route_hint_runtime]\n%s", runtime_hint);
         if (n < 0) {
             free(buf);
             return NULL;

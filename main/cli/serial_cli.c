@@ -548,6 +548,7 @@ static int cmd_config_show(int argc, char **argv)
     print_config("Allow From", MIMI_NVS_SECURITY, MIMI_NVS_KEY_ALLOW_FROM, MIMI_SECRET_ALLOW_FROM, false);
     print_config("WS Token",  MIMI_NVS_SECURITY, MIMI_NVS_KEY_WS_TOKEN, MIMI_SECRET_WS_TOKEN, true);
     print_config("Voice GW",   MIMI_NVS_VOICE,  MIMI_NVS_KEY_VOICE_GW, MIMI_VOICE_GATEWAY_URL, false);
+    printf("  %-14s: %u%%  [runtime]\n", "Volume", (unsigned)audio_get_volume());
     printf("=============================\n");
     return 0;
 }
@@ -557,7 +558,7 @@ static int cmd_config_reset(int argc, char **argv)
 {
     const char *namespaces[] = {
         MIMI_NVS_WIFI, MIMI_NVS_TG, MIMI_NVS_LLM, MIMI_NVS_PROXY, MIMI_NVS_SEARCH,
-        MIMI_NVS_VOICE, MIMI_NVS_SECURITY
+        MIMI_NVS_VOICE, MIMI_NVS_SECURITY, MIMI_NVS_AUDIO
     };
     int ns_count = sizeof(namespaces) / sizeof(namespaces[0]);
     for (int i = 0; i < ns_count; i++) {
@@ -586,6 +587,12 @@ static struct {
     struct arg_end *end;
 } voice_gw_args;
 
+/* --- set_volume command --- */
+static struct {
+    struct arg_int *volume;
+    struct arg_end *end;
+} volume_args;
+
 static int cmd_set_voice_gw(int argc, char **argv)
 {
     int nerrors = arg_parse(argc, argv, (void **)&voice_gw_args);
@@ -595,6 +602,33 @@ static int cmd_set_voice_gw(int argc, char **argv)
     }
     voice_channel_set_gateway(voice_gw_args.url->sval[0]);
     printf("Voice gateway URL saved: %s\n", voice_gw_args.url->sval[0]);
+    return 0;
+}
+
+static int cmd_set_volume(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&volume_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, volume_args.end, argv[0]);
+        return 1;
+    }
+
+    int volume = volume_args.volume->ival[0];
+    if (volume < 0 || volume > 100) {
+        printf("Invalid volume. Range: 0..100\n");
+        return 1;
+    }
+
+    audio_set_volume((uint8_t)volume);
+    printf("Volume set to %d%%\n", volume);
+    return 0;
+}
+
+static int cmd_get_volume(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    printf("Current volume: %u%%\n", (unsigned)audio_get_volume());
     return 0;
 }
 
@@ -969,6 +1003,25 @@ esp_err_t serial_cli_init(void)
         .func = &cmd_audio_test,
     };
     esp_console_cmd_register(&audio_test_cmd);
+
+    /* set_volume */
+    volume_args.volume = arg_int1(NULL, NULL, "<0-100>", "Speaker volume percent");
+    volume_args.end = arg_end(1);
+    esp_console_cmd_t set_volume_cmd = {
+        .command = "set_volume",
+        .help = "Set speaker volume (0-100)",
+        .func = &cmd_set_volume,
+        .argtable = &volume_args,
+    };
+    esp_console_cmd_register(&set_volume_cmd);
+
+    /* get_volume */
+    esp_console_cmd_t get_volume_cmd = {
+        .command = "get_volume",
+        .help = "Get current speaker volume",
+        .func = &cmd_get_volume,
+    };
+    esp_console_cmd_register(&get_volume_cmd);
 
     /* mic_test */
     esp_console_cmd_t mic_test_cmd = {

@@ -6,6 +6,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <ctype.h>
+#include <limits.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
@@ -48,6 +49,48 @@ static bool s_ws_recv_binary_frag = false;
 static bool s_ws_recv_text_frag = false;
 static volatile int64_t s_followup_deadline_ms = 0;
 static volatile int64_t s_playback_started_ms = 0;
+
+static inline int16_t sample_abs_i16(int16_t v)
+{
+    if (v == INT16_MIN) {
+        return INT16_MAX;
+    }
+    return (v < 0) ? (int16_t)(-v) : v;
+}
+
+static int16_t pcm_peak_abs(const int16_t *samples, int num_samples)
+{
+    int16_t peak = 0;
+    for (int i = 0; i < num_samples; i++) {
+        int16_t abs_val = sample_abs_i16(samples[i]);
+        if (abs_val > peak) {
+            peak = abs_val;
+        }
+    }
+    return peak;
+}
+
+static void pcm_apply_soft_gain(int16_t *samples, int num_samples, int16_t peak)
+{
+    if (peak <= 0 || peak >= 20000) {
+        return;
+    }
+
+    int gain = 20000 / peak;
+    if (gain > 32) {
+        gain = 32;
+    }
+    if (gain <= 1) {
+        return;
+    }
+
+    for (int i = 0; i < num_samples; i++) {
+        int32_t amplified = (int32_t)samples[i] * gain;
+        if (amplified > INT16_MAX) amplified = INT16_MAX;
+        if (amplified < INT16_MIN) amplified = INT16_MIN;
+        samples[i] = (int16_t)amplified;
+    }
+}
 
 static esp_err_t normalize_gateway_url(const char *input, char *output, size_t output_size)
 {
@@ -503,6 +546,8 @@ static void voice_task(void *arg)
         /* For wake word, use VAD to detect speech end; for button, use button release */
         bool recording = true;
         uint32_t silence_start_ms = 0;
+        uint32_t record_started_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        bool speech_started = false;
         int vad_threshold = audio_get_vad_threshold();
         if (vad_threshold <= 0) {
             vad_threshold = 500;
@@ -511,6 +556,21 @@ static void voice_task(void *arg)
         if (silence_timeout_ms == 0) {
             silence_timeout_ms = 1500;
         }
+        int speech_peak_threshold = vad_threshold * 6;
+        if (speech_peak_threshold < 180) {
+            speech_peak_threshold = 180;
+        }
+        if (speech_peak_threshold > 6000) {
+            speech_peak_threshold = 6000;
+        }
+        int silence_peak_threshold = speech_peak_threshold / 2;
+        if (silence_peak_threshold < 80) {
+            silence_peak_threshold = 80;
+        }
+        const uint32_t no_speech_timeout_ms = 4000;
+        ESP_LOGI(TAG, "Record VAD: speech_peak=%d silence_peak=%d silence_timeout=%u no_speech_timeout=%u",
+                 speech_peak_threshold, silence_peak_threshold,
+                 (unsigned)silence_timeout_ms, (unsigned)no_speech_timeout_ms);
 
         while (recording && total_sent < max_bytes) {
             if (wake_word_detected) {
@@ -518,42 +578,30 @@ static void voice_task(void *arg)
                 size_t bytes_read = 0;
                 ret = audio_mic_read(chunk_buf, chunk_bytes, &bytes_read, 500);
                 if (ret == ESP_OK && bytes_read > 0) {
-                    /* Apply software gain inline */
                     int16_t *samples = (int16_t *)chunk_buf;
                     int num_samples = bytes_read / 2;
-                    int16_t peak = 0;
-                    for (int i = 0; i < num_samples; i++) {
-                        int16_t abs_val = samples[i] < 0 ? -samples[i] : samples[i];
-                        if (abs_val > peak) peak = abs_val;
-                    }
-                    if (peak > 0 && peak < 20000) {
-                        int gain = 20000 / peak;
-                        if (gain > 32) gain = 32;
-                        if (gain > 1) {
-                            for (int i = 0; i < num_samples; i++) {
-                                int32_t amplified = (int32_t)samples[i] * gain;
-                                if (amplified > 32767) amplified = 32767;
-                                if (amplified < -32768) amplified = -32768;
-                                samples[i] = (int16_t)amplified;
-                            }
-                        }
-                    }
 
-                    /* Check for silence */
-                    int16_t max_val = 0;
-                    for (int i = 0; i < num_samples; i++) {
-                        int16_t abs_val = samples[i] < 0 ? -samples[i] : samples[i];
-                        if (abs_val > max_val) max_val = abs_val;
-                    }
+                    /* 用原始峰值做VAD，避免上传前增益导致“永不静音” */
+                    int16_t raw_peak = pcm_peak_abs(samples, num_samples);
+                    pcm_apply_soft_gain(samples, num_samples, raw_peak);
 
-                    if (max_val < vad_threshold) {
+                    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+                    if (raw_peak >= speech_peak_threshold) {
+                        speech_started = true;
+                        silence_start_ms = 0;
+                    } else if (speech_started && raw_peak < silence_peak_threshold) {
                         if (silence_start_ms == 0) {
-                            silence_start_ms = esp_timer_get_time() / 1000;
-                        } else if (esp_timer_get_time() / 1000 - silence_start_ms > silence_timeout_ms) {
+                            silence_start_ms = now_ms;
+                        } else if (now_ms - silence_start_ms >= silence_timeout_ms) {
                             recording = false;
                         }
                     } else {
                         silence_start_ms = 0;
+                    }
+                    if (!speech_started && (now_ms - record_started_ms >= no_speech_timeout_ms)) {
+                        ESP_LOGI(TAG, "No speech detected in %u ms, stop recording",
+                                 (unsigned)no_speech_timeout_ms);
+                        recording = false;
                     }
 
                     /* Stream chunk to gateway */
@@ -576,23 +624,8 @@ static void voice_task(void *arg)
                     /* Apply software gain inline */
                     int16_t *samples = (int16_t *)chunk_buf;
                     int num_samples = bytes_read / 2;
-                    int16_t peak = 0;
-                    for (int i = 0; i < num_samples; i++) {
-                        int16_t abs_val = samples[i] < 0 ? -samples[i] : samples[i];
-                        if (abs_val > peak) peak = abs_val;
-                    }
-                    if (peak > 0 && peak < 20000) {
-                        int gain = 20000 / peak;
-                        if (gain > 32) gain = 32;
-                        if (gain > 1) {
-                            for (int i = 0; i < num_samples; i++) {
-                                int32_t amplified = (int32_t)samples[i] * gain;
-                                if (amplified > 32767) amplified = 32767;
-                                if (amplified < -32768) amplified = -32768;
-                                samples[i] = (int16_t)amplified;
-                            }
-                        }
-                    }
+                    int16_t peak = pcm_peak_abs(samples, num_samples);
+                    pcm_apply_soft_gain(samples, num_samples, peak);
 
                     /* Stream chunk to gateway */
                     ws_send_binary(chunk_buf, bytes_read);

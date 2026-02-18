@@ -26,6 +26,7 @@ idf_component_register(
         "tools/tool_get_time.c"
         "tools/tool_files.c"
         "tools/tool_memory.c"
+        "tools/tool_audio.c"
     INCLUDE_DIRS
         "."
     REQUIRES

@@ -157,6 +157,7 @@
 #define MIMI_NVS_SEARCH              "search_config"
 #define MIMI_NVS_SECURITY            "security_cfg"
 #define MIMI_NVS_CRON                "cron_cfg"
+#define MIMI_NVS_AUDIO               "audio_config"
 
 /* NVS Keys */
 #define MIMI_NVS_KEY_SSID            "ssid"
@@ -170,6 +171,7 @@
 #define MIMI_NVS_KEY_WS_TOKEN        "ws_token"
 #define MIMI_NVS_KEY_CRON_INTERVAL   "interval_min"
 #define MIMI_NVS_KEY_CRON_TASK       "task"
+#define MIMI_NVS_KEY_VOLUME          "volume"
 
 /* Display Configuration */
 #ifndef MIMI_DISPLAY_ENABLED

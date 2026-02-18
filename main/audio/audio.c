@@ -1,9 +1,11 @@
 #include "audio.h"
+#include "mimi_config.h"
 #include "esp_log.h"
 #include "driver/i2s_std.h"
 #include "esp_wn_iface.h"
 #include "esp_wn_models.h"
 #include "model_path.h"
+#include "nvs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -37,6 +39,8 @@ static TaskHandle_t s_listen_task = NULL;
 static TaskHandle_t s_record_task = NULL;
 
 /* Forward declarations */
+static void load_persisted_volume(void);
+static void persist_volume(uint8_t volume);
 static const char *wake_word_keyword_from_config(const char *wake_word,
                                                  char *out, size_t out_size);
 static esp_err_t audio_wakenet_init(void);
@@ -44,6 +48,79 @@ static void audio_wakenet_deinit(void);
 static esp_err_t audio_set_mic_slot_mask(i2s_std_slot_mask_t slot_mask);
 static void listen_task(void *arg);
 static void record_task(void *arg) __attribute__((unused));
+
+static inline int16_t apply_gain_q15(int16_t sample, uint16_t gain_q15)
+{
+    int32_t scaled = ((int32_t)sample * gain_q15 + (1 << 14)) >> 15;
+    if (scaled > 32767) {
+        return 32767;
+    }
+    if (scaled < -32768) {
+        return -32768;
+    }
+    return (int16_t)scaled;
+}
+
+static esp_err_t write_pcm_with_volume(const uint8_t *data, size_t len,
+                                       size_t *bytes_written, TickType_t timeout_ticks)
+{
+    if (len == 0) {
+        *bytes_written = 0;
+        return ESP_OK;
+    }
+
+    /* 设备播放链路当前固定为16-bit PCM，非对齐数据直接透传 */
+    if ((len % sizeof(int16_t)) != 0 || s_volume >= 100) {
+        return i2s_channel_write(s_spk_handle, data, len, bytes_written, timeout_ticks);
+    }
+
+    const size_t total_samples = len / sizeof(int16_t);
+    const uint16_t gain_q15 = (uint16_t)((((uint32_t)s_volume) * 32767U + 50U) / 100U);
+    size_t done_samples = 0;
+    *bytes_written = 0;
+
+    while (done_samples < total_samples) {
+        int16_t scaled[256];
+        size_t chunk_samples = total_samples - done_samples;
+        if (chunk_samples > (sizeof(scaled) / sizeof(scaled[0]))) {
+            chunk_samples = sizeof(scaled) / sizeof(scaled[0]);
+        }
+
+        if (gain_q15 == 0) {
+            memset(scaled, 0, chunk_samples * sizeof(int16_t));
+        } else {
+            for (size_t i = 0; i < chunk_samples; i++) {
+                int16_t sample = 0;
+                size_t sample_offset = (done_samples + i) * sizeof(int16_t);
+                memcpy(&sample, data + sample_offset, sizeof(int16_t));
+                scaled[i] = apply_gain_q15(sample, gain_q15);
+            }
+        }
+
+        size_t chunk_written = 0;
+        esp_err_t ret = i2s_channel_write(s_spk_handle, scaled,
+                                          chunk_samples * sizeof(int16_t),
+                                          &chunk_written, timeout_ticks);
+        *bytes_written += chunk_written;
+        if (ret != ESP_OK) {
+            return ret;
+        }
+        if (chunk_written == 0) {
+            break;
+        }
+        if ((chunk_written % sizeof(int16_t)) != 0) {
+            ESP_LOGW(TAG, "Speaker write returned odd bytes: %d", (int)chunk_written);
+            break;
+        }
+
+        done_samples += chunk_written / sizeof(int16_t);
+        if (chunk_written < chunk_samples * sizeof(int16_t)) {
+            break;
+        }
+    }
+
+    return ESP_OK;
+}
 
 esp_err_t audio_init(const audio_config_t *config)
 {
@@ -58,6 +135,7 @@ esp_err_t audio_init(const audio_config_t *config)
     }
 
     memcpy(&s_config, config, sizeof(audio_config_t));
+    load_persisted_volume();
 
     /* Initialize I2S for microphone (RX) */
     i2s_chan_config_t mic_chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(
@@ -273,7 +351,7 @@ esp_err_t audio_play(const uint8_t *data, size_t len)
 
     /* Write audio data */
     size_t bytes_written = 0;
-    ret = i2s_channel_write(s_spk_handle, data, len, &bytes_written, portMAX_DELAY);
+    ret = audio_spk_write(data, len, &bytes_written, UINT32_MAX);
 
     /* Disable speaker */
     audio_spk_disable();
@@ -317,14 +395,20 @@ void audio_spk_disable(void)
 esp_err_t audio_spk_write(const uint8_t *data, size_t len, size_t *bytes_written, uint32_t timeout_ms)
 {
     if (!s_initialized || !s_spk_handle) return ESP_ERR_INVALID_STATE;
+    if (!data || !bytes_written) return ESP_ERR_INVALID_ARG;
     if (s_muted) { *bytes_written = len; return ESP_OK; }
-    return i2s_channel_write(s_spk_handle, data, len, bytes_written, pdMS_TO_TICKS(timeout_ms));
+
+    TickType_t timeout_ticks = (timeout_ms == UINT32_MAX)
+                             ? portMAX_DELAY
+                             : pdMS_TO_TICKS(timeout_ms);
+    return write_pcm_with_volume(data, len, bytes_written, timeout_ticks);
 }
 
 void audio_set_volume(uint8_t volume)
 {
     if (volume > 100) volume = 100;
     s_volume = volume;
+    persist_volume(volume);
     ESP_LOGI(TAG, "Volume set to %d%%", volume);
 }
 
@@ -389,6 +473,44 @@ esp_err_t audio_mic_read(void *buf, size_t buf_size, size_t *bytes_read, uint32_
 }
 
 /* Private functions */
+
+static void load_persisted_volume(void)
+{
+    nvs_handle_t nvs;
+    if (nvs_open(MIMI_NVS_AUDIO, NVS_READONLY, &nvs) != ESP_OK) {
+        return;
+    }
+
+    uint8_t volume = s_volume;
+    if (nvs_get_u8(nvs, MIMI_NVS_KEY_VOLUME, &volume) == ESP_OK) {
+        if (volume > 100) {
+            volume = 100;
+        }
+        s_volume = volume;
+        ESP_LOGI(TAG, "Loaded volume from NVS: %d%%", s_volume);
+    }
+    nvs_close(nvs);
+}
+
+static void persist_volume(uint8_t volume)
+{
+    nvs_handle_t nvs;
+    esp_err_t ret = nvs_open(MIMI_NVS_AUDIO, NVS_READWRITE, &nvs);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Open audio NVS failed: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    ret = nvs_set_u8(nvs, MIMI_NVS_KEY_VOLUME, volume);
+    if (ret == ESP_OK) {
+        ret = nvs_commit(nvs);
+    }
+    nvs_close(nvs);
+
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Persist volume failed: %s", esp_err_to_name(ret));
+    }
+}
 
 static const char *wake_word_keyword_from_config(const char *wake_word,
                                                  char *out, size_t out_size)

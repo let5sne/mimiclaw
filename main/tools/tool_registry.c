@@ -3,6 +3,7 @@
 #include "tools/tool_get_time.h"
 #include "tools/tool_files.h"
 #include "tools/tool_memory.h"
+#include "tools/tool_audio.h"
 
 #include <string.h>
 #include "esp_log.h"
@@ -154,6 +155,30 @@ esp_err_t tool_registry_init(void)
         .execute = tool_memory_append_today_execute,
     };
     register_tool(&mat);
+
+    /* Register set_volume */
+    mimi_tool_t sv = {
+        .name = "set_volume",
+        .description = "Set speaker volume percentage (0-100). Use this when the user asks to raise, lower, mute, or adjust voice playback loudness.",
+        .input_schema_json =
+            "{\"type\":\"object\","
+            "\"properties\":{\"volume\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100,\"description\":\"Target volume percent\"}},"
+            "\"required\":[\"volume\"]}",
+        .execute = tool_set_volume_execute,
+    };
+    register_tool(&sv);
+
+    /* Register get_volume */
+    mimi_tool_t gv = {
+        .name = "get_volume",
+        .description = "Get current speaker volume percentage.",
+        .input_schema_json =
+            "{\"type\":\"object\","
+            "\"properties\":{},"
+            "\"required\":[]}",
+        .execute = tool_get_volume_execute,
+    };
+    register_tool(&gv);
 
     build_tools_json();
 

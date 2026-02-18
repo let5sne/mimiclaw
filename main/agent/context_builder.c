@@ -46,6 +46,8 @@ esp_err_t context_build_system_prompt(char *buf, size_t size)
         "- list_dir: List files on SPIFFS, optionally filter by prefix.\n\n"
         "- memory_write_long_term: Overwrite /spiffs/memory/MEMORY.md with organized long-term memory.\n"
         "- memory_append_today: Append a concise note to /spiffs/memory/daily/<YYYY-MM-DD>.md.\n\n"
+        "- set_volume: Set speaker volume (0-100) for voice playback loudness.\n"
+        "- get_volume: Get current speaker volume percentage.\n\n"
         "Use tools when needed. Provide your final answer as text after using tools.\n\n"
         "Bootstrap config files may add extra behavior constraints, tool rules, and identity guidance.\n\n"
         "When responding to voice input, use short, natural Chinese sentences that can be spoken aloud. "
