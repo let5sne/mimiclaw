@@ -1,6 +1,7 @@
 #include "control/control_plane.h"
 #include "mimi_config.h"
 #include "audio/audio.h"
+#include "voice/voice_channel.h"
 
 #include <ctype.h>
 #include <inttypes.h>
@@ -323,6 +324,37 @@ static bool parse_percent_value(const char *text, int *value)
         }
     }
     return false;
+}
+
+static void trim_ascii_inplace(char *s)
+{
+    if (!s || s[0] == '\0') return;
+    char *start = s;
+    while (*start == ' ' || *start == '\t' || *start == '\n' || *start == '\r') start++;
+    if (start != s) {
+        memmove(s, start, strlen(start) + 1);
+    }
+    size_t n = strlen(s);
+    while (n > 0) {
+        char c = s[n - 1];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r' ||
+            c == '.' || c == '!' || c == '?') {
+            s[n - 1] = '\0';
+            n--;
+        } else {
+            break;
+        }
+    }
+    while (n >= 3) {
+        if (strcmp(s + n - 3, "。") == 0 ||
+            strcmp(s + n - 3, "！") == 0 ||
+            strcmp(s + n - 3, "？") == 0) {
+            s[n - 3] = '\0';
+            n -= 3;
+            continue;
+        }
+        break;
+    }
 }
 
 static bool parse_temperature_threshold_x10(const char *text, int *threshold_x10)
@@ -881,6 +913,49 @@ static esp_err_t execute_temp_rule_clear(const control_command_t *cmd, control_r
     return ESP_OK;
 }
 
+static esp_err_t validate_play_music(const control_command_t *cmd, char *err, size_t err_size)
+{
+    if (!cmd->note[0]) {
+        snprintf(err, err_size, "音乐内容为空");
+        return ESP_ERR_INVALID_ARG;
+    }
+    return ESP_OK;
+}
+
+static esp_err_t execute_play_music(const control_command_t *cmd, control_result_t *out,
+                                    char *err, size_t err_size)
+{
+    esp_err_t ret = voice_channel_play_music(cmd->note);
+    if (ret != ESP_OK) {
+        snprintf(err, err_size, "播放音乐失败: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    out->pending_action = true;
+    out->response_text[0] = '\0';  /* 语音通道静默返回，避免打断音乐播放 */
+    return ESP_OK;
+}
+
+static esp_err_t validate_stop_music(const control_command_t *cmd, char *err, size_t err_size)
+{
+    (void)cmd;
+    (void)err;
+    (void)err_size;
+    return ESP_OK;
+}
+
+static esp_err_t execute_stop_music(const control_command_t *cmd, control_result_t *out,
+                                    char *err, size_t err_size)
+{
+    (void)cmd;
+    esp_err_t ret = voice_channel_stop_music();
+    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+        snprintf(err, err_size, "停止音乐失败: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    snprintf(out->response_text, sizeof(out->response_text), "已停止音乐播放。");
+    return ESP_OK;
+}
+
 static const control_capability_t s_capabilities[] = {
     {
         .cmd_type = CONTROL_CMD_GET_VOLUME,
@@ -953,6 +1028,22 @@ static const control_capability_t s_capabilities[] = {
         .retry_max = 0,
         .validate = validate_temp_rule_clear,
         .execute = execute_temp_rule_clear,
+    },
+    {
+        .cmd_type = CONTROL_CMD_PLAY_MUSIC,
+        .name = "play_music",
+        .timeout_ms = 1000,
+        .retry_max = 0,
+        .validate = validate_play_music,
+        .execute = execute_play_music,
+    },
+    {
+        .cmd_type = CONTROL_CMD_STOP_MUSIC,
+        .name = "stop_music",
+        .timeout_ms = 1000,
+        .retry_max = 0,
+        .validate = validate_stop_music,
+        .execute = execute_stop_music,
     },
 };
 
@@ -1219,6 +1310,58 @@ static bool parse_temp_rule_command(const mimi_msg_t *msg, control_command_t *ou
     return true;
 }
 
+static bool parse_music_command(const mimi_msg_t *msg, control_command_t *out)
+{
+    if (!msg || !msg->content || !out) return false;
+    const char *text = msg->content;
+
+    static const char *const stop_keywords[] = {
+        "停止音乐", "暂停音乐", "关闭音乐", "停掉音乐", "停歌", "别放了"
+    };
+    static const char *const play_keywords[] = {
+        "播放音乐", "放音乐", "来点音乐", "来首歌", "放首歌", "播一首"
+    };
+    bool is_stop = contains_any(text, stop_keywords, sizeof(stop_keywords) / sizeof(stop_keywords[0]));
+    bool is_play = contains_any(text, play_keywords, sizeof(play_keywords) / sizeof(play_keywords[0]));
+    if (!is_stop && !is_play) {
+        return false;
+    }
+
+    init_command_common(msg, out);
+    if (is_stop) {
+        out->type = CONTROL_CMD_STOP_MUSIC;
+        strncpy(out->capability, "stop_music", sizeof(out->capability) - 1);
+        return true;
+    }
+
+    out->type = CONTROL_CMD_PLAY_MUSIC;
+    strncpy(out->capability, "play_music", sizeof(out->capability) - 1);
+
+    const char *p = NULL;
+    if ((p = strstr(text, "播放音乐")) != NULL) {
+        p += strlen("播放音乐");
+    } else if ((p = strstr(text, "放音乐")) != NULL) {
+        p += strlen("放音乐");
+    } else if ((p = strstr(text, "来点音乐")) != NULL) {
+        p += strlen("来点音乐");
+    } else if ((p = strstr(text, "来首歌")) != NULL) {
+        p += strlen("来首歌");
+    } else if ((p = strstr(text, "放首歌")) != NULL) {
+        p += strlen("放首歌");
+    } else if ((p = strstr(text, "播一首")) != NULL) {
+        p += strlen("播一首");
+    } else {
+        p = text;
+    }
+
+    strncpy(out->note, p, sizeof(out->note) - 1);
+    trim_ascii_inplace(out->note);
+    if (out->note[0] == '\0') {
+        strncpy(out->note, "轻音乐", sizeof(out->note) - 1);
+    }
+    return true;
+}
+
 static esp_err_t execute_with_capability(const control_command_t *cmd, control_result_t *out,
                                          char *err, size_t err_size)
 {
@@ -1269,6 +1412,7 @@ esp_err_t control_plane_try_handle_message(const mimi_msg_t *msg, control_result
     bool recognized = parse_reboot_command(msg, &cmd) ||
                       parse_alarm_command(msg, &cmd) ||
                       parse_temp_rule_command(msg, &cmd, reason, sizeof(reason)) ||
+                      parse_music_command(msg, &cmd) ||
                       parse_volume_command(msg, &cmd, reason, sizeof(reason));
     if (!recognized) {
         return ESP_OK;

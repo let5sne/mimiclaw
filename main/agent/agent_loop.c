@@ -810,6 +810,10 @@ static void agent_loop_task(void *arg)
                                                ? DISPLAY_STATUS_SPEAKING
                                                : DISPLAY_STATUS_ERROR);
                 }
+            } else if (control_result.success) {
+                /* 某些确定性动作（如音乐播放）采用静默返回，视为已完成。 */
+                produced_final_response = true;
+                display_set_display_status(DISPLAY_STATUS_IDLE);
             }
             outbound_ms = elapsed_ms(outbound_stage_start, xTaskGetTickCount());
 

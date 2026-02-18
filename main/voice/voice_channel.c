@@ -347,6 +347,20 @@ static void handle_json_message(const char *data, int len)
         }
         xEventGroupSetBits(s_events, EVT_TTS_DONE);
 
+    } else if (strcmp(type, "music_start") == 0 || strcmp(type, "media_start") == 0) {
+        ESP_LOGI(TAG, "Music stream starting");
+        if (s_state == VOICE_STATE_PLAYING) {
+            audio_spk_enable();
+        }
+
+    } else if (strcmp(type, "music_end") == 0 || strcmp(type, "media_end") == 0) {
+        ESP_LOGI(TAG, "Music stream ended");
+        if (s_state == VOICE_STATE_PLAYING) {
+            audio_spk_disable();
+            s_playback_started_ms = 0;
+            set_state(VOICE_STATE_IDLE);
+        }
+
     } else if (strcmp(type, "error") == 0) {
         const char *msg = cJSON_GetStringValue(cJSON_GetObjectItem(root, "message"));
         ESP_LOGE(TAG, "Gateway error: %s", msg ? msg : "unknown");
@@ -874,6 +888,53 @@ esp_err_t voice_channel_speak(const char *text)
     ESP_LOGI(TAG, "Follow-up window opened for %d ms", MIMI_VOICE_FOLLOWUP_WINDOW_MS);
     set_state(VOICE_STATE_IDLE);
     return ESP_OK;
+}
+
+esp_err_t voice_channel_play_music(const char *query)
+{
+    if (!query || query[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (!s_ws_client || !esp_websocket_client_is_connected(s_ws_client)) {
+        ESP_LOGE(TAG, "WS not connected, cannot play music");
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_state == VOICE_STATE_RECORDING || s_state == VOICE_STATE_PROCESSING) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    set_state(VOICE_STATE_PLAYING);
+    s_playback_started_ms = esp_timer_get_time() / 1000;
+    ESP_LOGI(TAG, "Music play: \"%.*s\"", 200, query);
+    display_show_message("assistant", "播放音乐中...");
+
+    cJSON *extra = cJSON_CreateObject();
+    cJSON_AddStringToObject(extra, "query", query);
+    cJSON_AddStringToObject(extra, "format", "pcm16");
+    esp_err_t ret = ws_send_json("music_request", extra);
+    cJSON_Delete(extra);
+    if (ret != ESP_OK) {
+        audio_spk_disable();
+        s_playback_started_ms = 0;
+        set_state(VOICE_STATE_IDLE);
+    }
+    return ret;
+}
+
+esp_err_t voice_channel_stop_music(void)
+{
+    if (!s_ws_client || !esp_websocket_client_is_connected(s_ws_client)) {
+        audio_spk_disable();
+        set_state(VOICE_STATE_IDLE);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_err_t ret = ws_send_json("music_stop", NULL);
+    audio_spk_disable();
+    s_playback_started_ms = 0;
+    set_state(VOICE_STATE_IDLE);
+    return ret;
 }
 
 voice_state_t voice_channel_get_state(void)

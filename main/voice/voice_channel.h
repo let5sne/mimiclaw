@@ -47,6 +47,17 @@ void voice_channel_stop(void);
 esp_err_t voice_channel_speak(const char *text);
 
 /**
+ * Request gateway to start music playback (query/url).
+ * Playback audio stream is rendered through existing speaker pipeline.
+ */
+esp_err_t voice_channel_play_music(const char *query);
+
+/**
+ * Stop current music playback.
+ */
+esp_err_t voice_channel_stop_music(void);
+
+/**
  * Get current voice channel state.
  */
 voice_state_t voice_channel_get_state(void);

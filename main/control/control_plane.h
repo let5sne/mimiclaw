@@ -20,6 +20,8 @@ typedef enum {
     CONTROL_CMD_CREATE_TEMP_RULE,
     CONTROL_CMD_LIST_TEMP_RULE,
     CONTROL_CMD_CLEAR_TEMP_RULE,
+    CONTROL_CMD_PLAY_MUSIC,
+    CONTROL_CMD_STOP_MUSIC,
 } control_cmd_type_t;
 
 typedef struct {

@@ -600,6 +600,11 @@ static struct {
     struct arg_end *end;
 } temp_event_args;
 
+static struct {
+    struct arg_str *query;
+    struct arg_end *end;
+} music_play_args;
+
 static int cmd_set_voice_gw(int argc, char **argv)
 {
     int nerrors = arg_parse(argc, argv, (void **)&voice_gw_args);
@@ -739,6 +744,38 @@ static int cmd_temp_event(int argc, char **argv)
     }
 
     printf("Temperature event injected: %d.%d C\n", temp_x10 / 10, abs(temp_x10 % 10));
+    return 0;
+}
+
+static int cmd_music_play(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&music_play_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, music_play_args.end, argv[0]);
+        return 1;
+    }
+
+    const char *query = music_play_args.query->sval[0];
+    esp_err_t err = voice_channel_play_music(query);
+    if (err != ESP_OK) {
+        printf("Music play failed: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+    printf("Music playback requested: %s\n", query);
+    return 0;
+}
+
+static int cmd_music_stop(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    esp_err_t err = voice_channel_stop_music();
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        printf("Music stop failed: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+    printf("Music playback stopped.\n");
     return 0;
 }
 
@@ -1167,6 +1204,25 @@ esp_err_t serial_cli_init(void)
         .argtable = &temp_event_args,
     };
     esp_console_cmd_register(&temp_event_cmd);
+
+    /* music_play */
+    music_play_args.query = arg_str1(NULL, NULL, "<query>", "Music query/url");
+    music_play_args.end = arg_end(1);
+    esp_console_cmd_t music_play_cmd = {
+        .command = "music_play",
+        .help = "Request gateway music playback (example: music_play 周杰伦 稻香)",
+        .func = &cmd_music_play,
+        .argtable = &music_play_args,
+    };
+    esp_console_cmd_register(&music_play_cmd);
+
+    /* music_stop */
+    esp_console_cmd_t music_stop_cmd = {
+        .command = "music_stop",
+        .help = "Stop gateway music playback",
+        .func = &cmd_music_stop,
+    };
+    esp_console_cmd_register(&music_stop_cmd);
 
     /* mic_test */
     esp_console_cmd_t mic_test_cmd = {
