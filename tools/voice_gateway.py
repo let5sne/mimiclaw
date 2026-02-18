@@ -70,6 +70,9 @@ vision_cfg = {
     ),
     "http_proxy": "",
 }
+music_alias_cfg = {
+    "alias_map": {},
+}
 
 DOC_MAX_TEXT = 12000
 DOC_OCR_FALLBACK_MIN_LEN = 80
@@ -140,8 +143,40 @@ def clean_text_for_tts(text: str) -> str:
 
 def normalize_music_query(text: str) -> str:
     s = (text or "").strip()
+    # 常见标点归一化为空格，避免 "周杰伦,稻香" 影响检索质量
+    s = re.sub(r"[，,、|/]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    # 可配置纠偏词典（网关侧），不在固件硬编码
+    for src, dst in music_alias_cfg["alias_map"].items():
+        s = s.replace(src, dst)
     s = re.sub(r"[，。！？、；：,.!?;:]+$", "", s)
     return s.strip()
+
+
+def load_music_aliases_from_env():
+    """
+    Load optional alias map from env:
+    - MIMI_MUSIC_ALIAS_MAP='{\"倒箱\":\"稻香\",\"道乡\":\"稻香\"}'
+    """
+    raw = os.environ.get("MIMI_MUSIC_ALIAS_MAP", "").strip()
+    if not raw:
+        music_alias_cfg["alias_map"] = {}
+        return
+    try:
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            raise ValueError("not object")
+        norm = {}
+        for k, v in parsed.items():
+            ks = str(k or "").strip()
+            vs = str(v or "").strip()
+            if ks and vs:
+                norm[ks] = vs
+        music_alias_cfg["alias_map"] = norm
+        log.info("Music alias map loaded: %d entries", len(norm))
+    except Exception as e:
+        music_alias_cfg["alias_map"] = {}
+        log.warning("Invalid MIMI_MUSIC_ALIAS_MAP: %s", e)
 
 
 def is_http_url(text: str) -> bool:
@@ -162,28 +197,49 @@ def resolve_music_source(query: str) -> str:
         return q
 
     # Keyword search fallback via yt-dlp (optional runtime dependency)
-    cmd = [
-        "yt-dlp",
-        "--no-playlist",
-        "--no-warnings",
-        "-f", "bestaudio",
-        "-g",
-        f"ytsearch1:{q}",
+    # 先尝试更不容易触发风控的平台，再回退 YouTube。
+    providers = [
+        ("ytmusicsearch1", "ytmusic"),
+        ("bilisearch1", "bilibili"),
+        ("scsearch1", "soundcloud"),
+        ("ytsearch1", "youtube"),
     ]
-    try:
-        out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=20)
-    except FileNotFoundError:
-        raise RuntimeError("yt-dlp not installed, cannot resolve music query")
-    except subprocess.CalledProcessError as e:
-        msg = (e.output or b"").decode("utf-8", errors="replace").strip()
-        raise RuntimeError(f"yt-dlp resolve failed: {msg[:200]}")
-    except subprocess.TimeoutExpired:
-        raise RuntimeError("yt-dlp resolve timeout")
 
-    url = out.decode("utf-8", errors="replace").strip().splitlines()
-    if not url:
-        raise RuntimeError("yt-dlp resolved empty result")
-    return url[0].strip()
+    cookie_path = os.environ.get("MIMI_YTDLP_COOKIES", "").strip()
+    cookie_browser = os.environ.get("MIMI_YTDLP_COOKIES_FROM_BROWSER", "").strip()
+    errors = []
+    for prefix, provider in providers:
+        cmd = [
+            "yt-dlp",
+            "--no-playlist",
+            "--no-warnings",
+            "-f", "bestaudio",
+            "-g",
+            f"{prefix}:{q}",
+        ]
+        if cookie_browser:
+            cmd.extend(["--cookies-from-browser", cookie_browser])
+        elif cookie_path:
+            cmd.extend(["--cookies", cookie_path])
+
+        try:
+            out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=20)
+            lines = out.decode("utf-8", errors="replace").strip().splitlines()
+            if lines:
+                url = lines[0].strip()
+                if url:
+                    log.info("Music resolve success provider=%s query=%.80s", provider, q)
+                    return url
+            errors.append(f"{provider}: empty")
+        except FileNotFoundError:
+            raise RuntimeError("yt-dlp not installed, cannot resolve music query")
+        except subprocess.TimeoutExpired:
+            errors.append(f"{provider}: timeout")
+        except subprocess.CalledProcessError as e:
+            msg = (e.output or b"").decode("utf-8", errors="replace").strip()
+            errors.append(f"{provider}: {msg[:180]}")
+
+    raise RuntimeError("yt-dlp resolve failed: " + " | ".join(errors))
 
 
 def do_stt(pcm_data: bytes) -> tuple[str, str]:
@@ -1577,6 +1633,7 @@ def main():
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
+    load_music_aliases_from_env()
 
     global whisper_model
     log.info("Loading whisper model '%s' on %s...", args.model, args.device)
