@@ -5,6 +5,7 @@
 #include "llm/llm_proxy.h"
 #include "memory/session_mgr.h"
 #include "tools/tool_registry.h"
+#include "control/control_plane.h"
 #include "display/display.h"
 
 #include <inttypes.h>
@@ -786,6 +787,50 @@ static void agent_loop_task(void *arg)
         display_show_message("user", msg.content);
         display_set_display_status(DISPLAY_STATUS_THINKING);
 
+        /* 规则优先：高确定性控制命令直接执行，跳过 LLM。 */
+        control_result_t control_result = {0};
+        err = control_plane_try_handle_message(&msg, &control_result);
+        if (err == ESP_OK && control_result.handled) {
+            TickType_t outbound_stage_start = xTaskGetTickCount();
+            if (control_result.response_text[0]) {
+                session_append(msg.chat_id, "user", msg.content);
+                session_append(msg.chat_id, "assistant", control_result.response_text);
+
+                mimi_msg_t out = {0};
+                strncpy(out.channel, msg.channel, sizeof(out.channel) - 1);
+                strncpy(out.chat_id, msg.chat_id, sizeof(out.chat_id) - 1);
+                out.content = strdup(control_result.response_text);
+                if (!out.content || message_bus_push_outbound(&out) != ESP_OK) {
+                    outbound_enqueue_failed = true;
+                    message_bus_msg_free(&out);
+                } else {
+                    produced_final_response = true;
+                    display_show_message("assistant", control_result.response_text);
+                    display_set_display_status(control_result.success
+                                               ? DISPLAY_STATUS_SPEAKING
+                                               : DISPLAY_STATUS_ERROR);
+                }
+            }
+            outbound_ms = elapsed_ms(outbound_stage_start, xTaskGetTickCount());
+
+            message_bus_msg_free(&msg);
+            display_set_display_status(DISPLAY_STATUS_IDLE);
+
+            uint32_t total_ms = elapsed_ms(turn_start_tick, xTaskGetTickCount());
+            bool success = produced_final_response && !outbound_enqueue_failed;
+            record_turn_stats(run_id, success, total_ms, context_ms, llm_ms, tools_ms, outbound_ms,
+                              hit_timeout, hit_context_budget, hit_tool_budget, hit_iter_limit,
+                              hit_llm_error, outbound_enqueue_failed);
+            ESP_LOGI(TAG,
+                     "run=%" PRIu32 " done via control plane success=%d total=%" PRIu32
+                     "ms outbound=%" PRIu32 "ms capability=%s",
+                     run_id, success ? 1 : 0, total_ms, outbound_ms,
+                     control_result.capability[0] ? control_result.capability : "-");
+            continue;
+        } else if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Control plane error: %s", esp_err_to_name(err));
+        }
+
         TickType_t context_stage_start = xTaskGetTickCount();
 
         /* 1. Build system prompt */
@@ -991,6 +1036,7 @@ static void agent_loop_task(void *arg)
 
 esp_err_t agent_loop_init(void)
 {
+    ESP_ERROR_CHECK(control_plane_init());
     ESP_LOGI(TAG, "Agent loop initialized");
     return ESP_OK;
 }

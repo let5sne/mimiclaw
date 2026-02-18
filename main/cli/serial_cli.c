@@ -13,9 +13,11 @@
 #include "cron/cron_service.h"
 #include "audio/audio.h"
 #include "voice/voice_channel.h"
+#include "control/control_plane.h"
 
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <inttypes.h>
 #include <math.h>
 #include "esp_log.h"
@@ -593,6 +595,11 @@ static struct {
     struct arg_end *end;
 } volume_args;
 
+static struct {
+    struct arg_int *temp_x10;
+    struct arg_end *end;
+} temp_event_args;
+
 static int cmd_set_voice_gw(int argc, char **argv)
 {
     int nerrors = arg_parse(argc, argv, (void **)&voice_gw_args);
@@ -629,6 +636,109 @@ static int cmd_get_volume(int argc, char **argv)
     (void)argc;
     (void)argv;
     printf("Current volume: %u%%\n", (unsigned)audio_get_volume());
+    return 0;
+}
+
+static int cmd_control_audit(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    control_audit_entry_t entries[10];
+    size_t n = control_plane_get_recent_audits(entries, 10);
+    if (n == 0) {
+        printf("No control audit records.\n");
+        return 0;
+    }
+
+    printf("=== Control Audit (latest %u) ===\n", (unsigned)n);
+    for (size_t i = 0; i < n; i++) {
+        const control_audit_entry_t *e = &entries[i];
+        printf("[%u] ts=%lld req=%s cap=%s ok=%d dedup=%d\n",
+               (unsigned)(i + 1),
+               (long long)e->ts_ms,
+               e->request_id[0] ? e->request_id : "-",
+               e->capability[0] ? e->capability : "-",
+               e->success ? 1 : 0,
+               e->dedup_hit ? 1 : 0);
+        printf("     %s\n", e->summary[0] ? e->summary : "-");
+    }
+    printf("=================================\n");
+    return 0;
+}
+
+static int cmd_alarm_list(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    control_alarm_info_t alarms[MIMI_CONTROL_MAX_ALARMS];
+    size_t n = control_plane_get_active_alarms(alarms, MIMI_CONTROL_MAX_ALARMS);
+    if (n == 0) {
+        printf("No active alarms.\n");
+        return 0;
+    }
+
+    printf("=== Active Alarms (%u) ===\n", (unsigned)n);
+    for (size_t i = 0; i < n; i++) {
+        const control_alarm_info_t *a = &alarms[i];
+        printf("  #%" PRIu32 "  remaining=%" PRIu32 " ms  target=%s:%s  note=%s\n",
+               a->alarm_id,
+               a->remaining_ms,
+               a->channel[0] ? a->channel : "-",
+               a->chat_id[0] ? a->chat_id : "-",
+               a->note[0] ? a->note : "-");
+    }
+    printf("===========================\n");
+    return 0;
+}
+
+static int cmd_temp_rule_list(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    control_temp_rule_info_t rules[MIMI_CONTROL_MAX_TEMP_RULES];
+    size_t n = control_plane_get_temperature_rules(rules, MIMI_CONTROL_MAX_TEMP_RULES);
+    if (n == 0) {
+        printf("No temperature rules.\n");
+        return 0;
+    }
+
+    printf("=== Temperature Rules (%u) ===\n", (unsigned)n);
+    for (size_t i = 0; i < n; i++) {
+        const control_temp_rule_info_t *r = &rules[i];
+        const char *cmp = (r->comparator == 1) ? ">=" : "<=";
+        if (r->action_type == 2) {
+            printf("  #%" PRIu32 "  when temp %s %d.%d C  -> set_volume=%d%%\n",
+                   r->rule_id, cmp, r->threshold_x10 / 10, abs(r->threshold_x10 % 10),
+                   r->action_value);
+        } else {
+            printf("  #%" PRIu32 "  when temp %s %d.%d C  -> remind: %s\n",
+                   r->rule_id, cmp, r->threshold_x10 / 10, abs(r->threshold_x10 % 10),
+                   r->note[0] ? r->note : "-");
+        }
+    }
+    printf("===============================\n");
+    return 0;
+}
+
+static int cmd_temp_event(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&temp_event_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, temp_event_args.end, argv[0]);
+        return 1;
+    }
+
+    int temp_x10 = temp_event_args.temp_x10->ival[0];
+    esp_err_t err = control_plane_handle_temperature_event(temp_x10);
+    if (err != ESP_OK) {
+        printf("Temperature event failed: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("Temperature event injected: %d.%d C\n", temp_x10 / 10, abs(temp_x10 % 10));
     return 0;
 }
 
@@ -1022,6 +1132,41 @@ esp_err_t serial_cli_init(void)
         .func = &cmd_get_volume,
     };
     esp_console_cmd_register(&get_volume_cmd);
+
+    /* control_audit */
+    esp_console_cmd_t control_audit_cmd = {
+        .command = "control_audit",
+        .help = "Show recent deterministic control audit logs",
+        .func = &cmd_control_audit,
+    };
+    esp_console_cmd_register(&control_audit_cmd);
+
+    /* alarm_list */
+    esp_console_cmd_t alarm_list_cmd = {
+        .command = "alarm_list",
+        .help = "Show active local alarms in control plane",
+        .func = &cmd_alarm_list,
+    };
+    esp_console_cmd_register(&alarm_list_cmd);
+
+    /* temp_rule_list */
+    esp_console_cmd_t temp_rule_list_cmd = {
+        .command = "temp_rule_list",
+        .help = "Show active temperature rules in control plane",
+        .func = &cmd_temp_rule_list,
+    };
+    esp_console_cmd_register(&temp_rule_list_cmd);
+
+    /* temp_event */
+    temp_event_args.temp_x10 = arg_int1(NULL, NULL, "<temp_x10>", "Temperature x10 (e.g. 305 = 30.5C)");
+    temp_event_args.end = arg_end(1);
+    esp_console_cmd_t temp_event_cmd = {
+        .command = "temp_event",
+        .help = "Inject temperature event to evaluate deterministic temp rules",
+        .func = &cmd_temp_event,
+        .argtable = &temp_event_args,
+    };
+    esp_console_cmd_register(&temp_event_cmd);
 
     /* mic_test */
     esp_console_cmd_t mic_test_cmd = {

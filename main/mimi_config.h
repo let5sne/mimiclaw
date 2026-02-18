@@ -71,6 +71,14 @@
 #define MIMI_AGENT_ROUTE_HINT_RELOAD_MS    60000
 #define MIMI_AGENT_SKILL_RULE_RELOAD_MS    60000
 
+/* Deterministic Control Plane */
+#define MIMI_CONTROL_IDEMP_WINDOW_MS       3000
+#define MIMI_CONTROL_AUDIT_SIZE            32
+#define MIMI_CONTROL_IDEMP_CACHE_SIZE      16
+#define MIMI_CONTROL_MAX_ALARMS            8
+#define MIMI_CONTROL_MAX_TEMP_RULES        8
+#define MIMI_CONTROL_TEMP_RULE_COOLDOWN_MS 10000
+
 /* Timezone (POSIX TZ format) */
 #define MIMI_TIMEZONE                "PST8PDT,M3.2.0,M11.1.0"
 
