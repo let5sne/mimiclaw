@@ -28,8 +28,8 @@ typedef struct {
 
     /* Wake word detection */
     bool enable_wake_word;
-    const char *wake_word;  /* e.g., "Hi Mimi" */
-    float wake_word_threshold;
+    const char *wake_word;  /* e.g., "Hi ESP" (maps to selected WakeNet model) */
+    float wake_word_threshold; /* WakeNet threshold in [0.4, 0.9999], <=0 uses model default */
 
     /* Audio processing */
     int vad_threshold;      /* Voice Activity Detection threshold */
@@ -108,6 +108,14 @@ void audio_set_mute(bool mute);
  * Register event callback
  */
 void audio_set_event_callback(audio_event_cb_t callback, void *user_data);
+
+/**
+ * Query runtime audio capture configuration/state.
+ */
+bool audio_is_listening(void);
+bool audio_is_wake_word_enabled(void);
+int audio_get_vad_threshold(void);
+int audio_get_silence_timeout_ms(void);
 
 /**
  * Enable speaker I2S channel for streaming playback.

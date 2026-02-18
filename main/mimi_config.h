@@ -316,9 +316,9 @@
 
 /* Wake Word Configuration */
 #ifndef MIMI_AUDIO_WAKE_WORD
-#define MIMI_AUDIO_WAKE_WORD         "Hi Mimi"
+#define MIMI_AUDIO_WAKE_WORD         "Hi ESP"
 #endif
 
 #ifndef MIMI_AUDIO_WAKE_THRESHOLD
-#define MIMI_AUDIO_WAKE_THRESHOLD    0.5f
+#define MIMI_AUDIO_WAKE_THRESHOLD    0.4f
 #endif

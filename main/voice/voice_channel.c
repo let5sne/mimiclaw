@@ -5,9 +5,9 @@
 #include "display/display.h"
 #include <string.h>
 #include <stdlib.h>
+#include <ctype.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/semphr.h"
 #include "freertos/event_groups.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
@@ -16,6 +16,7 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "cJSON.h"
+#include "esp_timer.h"
 
 static const char *TAG = "voice";
 
@@ -23,12 +24,13 @@ static const char *TAG = "voice";
 #define EVT_WS_CONNECTED   BIT0
 #define EVT_STT_DONE       BIT1
 #define EVT_TTS_DONE       BIT2
+#define EVT_WAKE_WORD      BIT3
+#define EVT_BUTTON_PRESS   BIT4
 
 /* ---------- State ---------- */
 static voice_state_t s_state = VOICE_STATE_IDLE;
 static voice_channel_config_t s_config;
 static TaskHandle_t s_task_handle = NULL;
-static SemaphoreHandle_t s_btn_sem = NULL;
 static EventGroupHandle_t s_events = NULL;
 static volatile bool s_btn_pressed = false;
 
@@ -42,6 +44,109 @@ static char *s_stt_text = NULL;
 static char *s_json_buf = NULL;
 static size_t s_json_len = 0;
 static size_t s_json_cap = 0;
+static bool s_ws_recv_binary_frag = false;
+static bool s_ws_recv_text_frag = false;
+
+static esp_err_t normalize_gateway_url(const char *input, char *output, size_t output_size)
+{
+    if (!input || !output || output_size < 8) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    while (*input && isspace((unsigned char)*input)) {
+        input++;
+    }
+    if (*input == '\0') {
+        output[0] = '\0';
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    size_t in_len = strlen(input);
+    while (in_len > 0 && isspace((unsigned char)input[in_len - 1])) {
+        in_len--;
+    }
+    if (in_len == 0) {
+        output[0] = '\0';
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    char tmp[160] = {0};
+    if (in_len >= sizeof(tmp)) {
+        output[0] = '\0';
+        return ESP_ERR_INVALID_SIZE;
+    }
+    memcpy(tmp, input, in_len);
+    tmp[in_len] = '\0';
+
+    if (strncmp(tmp, "ws://", 5) != 0 && strncmp(tmp, "wss://", 6) != 0) {
+        char with_scheme[160] = {0};
+        int n = snprintf(with_scheme, sizeof(with_scheme), "ws://%s", tmp);
+        if (n <= 0 || (size_t)n >= sizeof(with_scheme)) {
+            output[0] = '\0';
+            return ESP_ERR_INVALID_SIZE;
+        }
+        strncpy(tmp, with_scheme, sizeof(tmp) - 1);
+        tmp[sizeof(tmp) - 1] = '\0';
+    }
+
+    const char *scheme_end = strstr(tmp, "://");
+    if (!scheme_end) {
+        output[0] = '\0';
+        return ESP_ERR_INVALID_ARG;
+    }
+    const char *host_begin = scheme_end + 3;
+    const char *sep = strpbrk(host_begin, "/?#");
+
+    if (!sep) {
+        int n = snprintf(output, output_size, "%s/", tmp);
+        if (n <= 0 || (size_t)n >= output_size) {
+            output[0] = '\0';
+            return ESP_ERR_INVALID_SIZE;
+        }
+        return ESP_OK;
+    }
+
+    if (*sep == '/') {
+        if (strlen(tmp) + 1 > output_size) {
+            output[0] = '\0';
+            return ESP_ERR_INVALID_SIZE;
+        }
+        strncpy(output, tmp, output_size - 1);
+        output[output_size - 1] = '\0';
+        return ESP_OK;
+    }
+
+    size_t prefix_len = (size_t)(sep - tmp);
+    if (prefix_len + 1 + strlen(sep) + 1 > output_size) {
+        output[0] = '\0';
+        return ESP_ERR_INVALID_SIZE;
+    }
+    memcpy(output, tmp, prefix_len);
+    output[prefix_len] = '/';
+    strcpy(output + prefix_len + 1, sep);
+    return ESP_OK;
+}
+
+/* ---------- Audio event callback ---------- */
+static void audio_event_handler(audio_event_type_t event, void *user_data)
+{
+    switch (event) {
+    case AUDIO_EVENT_WAKE_WORD_DETECTED:
+        ESP_LOGI(TAG, "Wake word detected event received");
+        if (s_events) {
+            xEventGroupSetBits(s_events, EVT_WAKE_WORD);
+        }
+        break;
+    case AUDIO_EVENT_SPEECH_START:
+        ESP_LOGI(TAG, "Speech start event received");
+        break;
+    case AUDIO_EVENT_SPEECH_END:
+        ESP_LOGI(TAG, "Speech end event received");
+        break;
+    default:
+        break;
+    }
+}
 
 /* ---------- Helpers ---------- */
 
@@ -76,10 +181,17 @@ static void load_gateway_url(void)
 {
     nvs_handle_t nvs;
     if (nvs_open(MIMI_NVS_VOICE, NVS_READONLY, &nvs) == ESP_OK) {
-        size_t len = sizeof(s_config.gateway_url);
-        if (nvs_get_str(nvs, MIMI_NVS_KEY_VOICE_GW, s_config.gateway_url, &len) == ESP_OK
-            && s_config.gateway_url[0]) {
-            ESP_LOGI(TAG, "Gateway URL from NVS: %s", s_config.gateway_url);
+        char raw[sizeof(s_config.gateway_url)] = {0};
+        size_t len = sizeof(raw);
+        if (nvs_get_str(nvs, MIMI_NVS_KEY_VOICE_GW, raw, &len) == ESP_OK && raw[0]) {
+            char normalized[sizeof(s_config.gateway_url)] = {0};
+            if (normalize_gateway_url(raw, normalized, sizeof(normalized)) == ESP_OK) {
+                strncpy(s_config.gateway_url, normalized, sizeof(s_config.gateway_url) - 1);
+                s_config.gateway_url[sizeof(s_config.gateway_url) - 1] = '\0';
+                ESP_LOGI(TAG, "Gateway URL from NVS: %s", s_config.gateway_url);
+            } else {
+                ESP_LOGW(TAG, "Invalid gateway URL in NVS, keep current config: %s", raw);
+            }
         }
         nvs_close(nvs);
     }
@@ -121,6 +233,25 @@ static esp_err_t ws_send_binary(const uint8_t *data, size_t len)
     }
     int ret = esp_websocket_client_send_bin(s_ws_client, (const char *)data, len, pdMS_TO_TICKS(5000));
     return (ret >= 0) ? ESP_OK : ESP_FAIL;
+}
+
+static void audio_spk_write_all(const uint8_t *data, size_t len)
+{
+    size_t offset = 0;
+    while (offset < len) {
+        size_t written = 0;
+        esp_err_t ret = audio_spk_write(data + offset, len - offset, &written, 1000);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Speaker write failed: %s (written=%d/%d)",
+                     esp_err_to_name(ret), (int)offset, (int)len);
+            break;
+        }
+        if (written == 0) {
+            ESP_LOGW(TAG, "Speaker write stalled (written=0)");
+            break;
+        }
+        offset += written;
+    }
 }
 
 /* ---------- JSON message handler ---------- */
@@ -187,6 +318,9 @@ static void ws_event_handler(void *arg, esp_event_base_t base, int32_t event_id,
     case WEBSOCKET_EVENT_DISCONNECTED:
         ESP_LOGW(TAG, "Voice WS disconnected");
         xEventGroupClearBits(s_events, EVT_WS_CONNECTED);
+        s_ws_recv_binary_frag = false;
+        s_ws_recv_text_frag = false;
+        s_json_len = 0;
         if (s_state == VOICE_STATE_PLAYING) {
             audio_spk_disable();
         }
@@ -195,14 +329,23 @@ static void ws_event_handler(void *arg, esp_event_base_t base, int32_t event_id,
 
     case WEBSOCKET_EVENT_DATA:
         if (evt->op_code == 0x02) {
-            /* Binary frame: PCM audio chunk during TTS playback */
+            s_ws_recv_binary_frag = true;
+            s_ws_recv_text_frag = false;
+        } else if (evt->op_code == 0x01) {
+            s_ws_recv_text_frag = true;
+            s_ws_recv_binary_frag = false;
+        }
+
+        bool is_binary = (evt->op_code == 0x02) || (evt->op_code == 0x00 && s_ws_recv_binary_frag);
+        bool is_text = (evt->op_code == 0x01) || (evt->op_code == 0x00 && s_ws_recv_text_frag);
+
+        if (is_binary) {
+            /* Binary frame: PCM audio chunk during TTS playback, including continuation frames */
             if (s_state == VOICE_STATE_PLAYING && evt->data_len > 0) {
-                size_t written = 0;
-                audio_spk_write((const uint8_t *)evt->data_ptr, evt->data_len, &written, 200);
+                audio_spk_write_all((const uint8_t *)evt->data_ptr, evt->data_len);
             }
-        } else if (evt->op_code == 0x01 || evt->op_code == 0x00) {
+        } else if (is_text) {
             /* Text frame (possibly fragmented) */
-            /* Accumulate into json buffer */
             size_t needed = s_json_len + evt->data_len;
             if (needed > s_json_cap) {
                 size_t new_cap = needed + 256;
@@ -218,11 +361,15 @@ static void ws_event_handler(void *arg, esp_event_base_t base, int32_t event_id,
             memcpy(s_json_buf + s_json_len, evt->data_ptr, evt->data_len);
             s_json_len += evt->data_len;
 
-            /* Check if this is the final fragment */
             if (evt->payload_offset + evt->data_len >= evt->payload_len) {
                 handle_json_message(s_json_buf, s_json_len);
                 s_json_len = 0;
             }
+        }
+
+        if (evt->payload_offset + evt->data_len >= evt->payload_len) {
+            s_ws_recv_binary_frag = false;
+            s_ws_recv_text_frag = false;
         }
         break;
 
@@ -243,7 +390,9 @@ static void IRAM_ATTR gpio_isr_handler(void *arg)
     s_btn_pressed = (level == 0);  /* active LOW */
 
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-    xSemaphoreGiveFromISR(s_btn_sem, &xHigherPriorityTaskWoken);
+    if (s_btn_pressed && s_events) {
+        xEventGroupSetBitsFromISR(s_events, EVT_BUTTON_PRESS, &xHigherPriorityTaskWoken);
+    }
     if (xHigherPriorityTaskWoken) portYIELD_FROM_ISR();
 }
 
@@ -255,23 +404,30 @@ static void voice_task(void *arg)
 
     /* Wait for WebSocket connection */
     xEventGroupWaitBits(s_events, EVT_WS_CONNECTED, pdFALSE, pdTRUE, portMAX_DELAY);
-    ESP_LOGI(TAG, "Voice WS ready, listening for button");
+    ESP_LOGI(TAG, "Voice WS ready, listening for button or wake word");
 
     while (1) {
-        /* Wait for button event */
-        xSemaphoreTake(s_btn_sem, portMAX_DELAY);
+        /* Wait for button event or wake word event */
+        EventBits_t bits = xEventGroupWaitBits(
+            s_events, EVT_WAKE_WORD | (s_config.button_gpio >= 0 ? EVT_BUTTON_PRESS : 0),
+            pdTRUE, pdFALSE, portMAX_DELAY);
 
-        /* Debounce */
-        vTaskDelay(pdMS_TO_TICKS(50));
-        if (gpio_get_level(s_config.button_gpio) != 0) continue;
+        bool wake_word_detected = (bits & EVT_WAKE_WORD) != 0;
+        bool button_pressed = (bits & EVT_BUTTON_PRESS) != 0;
+
+        /* If button pressed, debounce */
+        if (button_pressed && s_config.button_gpio >= 0) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            if (gpio_get_level(s_config.button_gpio) != 0) continue;
+        }
 
         /* Check if we're connected */
         if (!(xEventGroupGetBits(s_events) & EVT_WS_CONNECTED)) {
-            ESP_LOGW(TAG, "WS not connected, ignoring button");
+            ESP_LOGW(TAG, "WS not connected, ignoring event");
             continue;
         }
 
-        /* === INTERRUPT: button press during playback === */
+        /* === INTERRUPT: event during playback === */
         if (s_state == VOICE_STATE_PLAYING) {
             ESP_LOGI(TAG, "Interrupt: stopping playback");
             ws_send_json("interrupt", NULL);
@@ -288,9 +444,21 @@ static void voice_task(void *arg)
         /* Send audio_start */
         ws_send_json("audio_start", NULL);
 
+        bool resume_wake_listening = false;
+        if (audio_is_wake_word_enabled() && audio_is_listening()) {
+            audio_stop_listening();
+            resume_wake_listening = true;
+        }
+
         esp_err_t ret = audio_mic_enable();
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to enable mic: %s", esp_err_to_name(ret));
+            if (resume_wake_listening) {
+                esp_err_t listen_ret = audio_start_listening();
+                if (listen_ret != ESP_OK) {
+                    ESP_LOGW(TAG, "Failed to resume wake listening: %s", esp_err_to_name(listen_ret));
+                }
+            }
             set_state(VOICE_STATE_IDLE);
             continue;
         }
@@ -299,6 +467,12 @@ static void voice_task(void *arg)
         uint8_t *chunk_buf = malloc(chunk_bytes);
         if (!chunk_buf) {
             audio_mic_disable();
+            if (resume_wake_listening) {
+                esp_err_t listen_ret = audio_start_listening();
+                if (listen_ret != ESP_OK) {
+                    ESP_LOGW(TAG, "Failed to resume wake listening: %s", esp_err_to_name(listen_ret));
+                }
+            }
             set_state(VOICE_STATE_IDLE);
             continue;
         }
@@ -309,44 +483,114 @@ static void voice_task(void *arg)
 
         ESP_LOGI(TAG, "Recording... (max %d s)", s_config.max_record_sec);
 
-        while (total_sent < max_bytes) {
-            /* Check if button released */
-            if (gpio_get_level(s_config.button_gpio) != 0) {
-                vTaskDelay(pdMS_TO_TICKS(50));
-                if (gpio_get_level(s_config.button_gpio) != 0) break;
-            }
+        /* For wake word, use VAD to detect speech end; for button, use button release */
+        bool recording = true;
+        uint32_t silence_start_ms = 0;
+        int vad_threshold = audio_get_vad_threshold();
+        if (vad_threshold <= 0) {
+            vad_threshold = 500;
+        }
+        uint32_t silence_timeout_ms = (uint32_t)audio_get_silence_timeout_ms();
+        if (silence_timeout_ms == 0) {
+            silence_timeout_ms = 1500;
+        }
 
-            size_t bytes_read = 0;
-            ret = audio_mic_read(chunk_buf, chunk_bytes, &bytes_read, 500);
-            if (ret == ESP_OK && bytes_read > 0) {
-                /* Apply software gain inline */
-                int16_t *samples = (int16_t *)chunk_buf;
-                int num_samples = bytes_read / 2;
-                int16_t peak = 0;
-                for (int i = 0; i < num_samples; i++) {
-                    int16_t abs_val = samples[i] < 0 ? -samples[i] : samples[i];
-                    if (abs_val > peak) peak = abs_val;
-                }
-                if (peak > 0 && peak < 20000) {
-                    int gain = 20000 / peak;
-                    if (gain > 32) gain = 32;
-                    if (gain > 1) {
-                        for (int i = 0; i < num_samples; i++) {
-                            int32_t amplified = (int32_t)samples[i] * gain;
-                            if (amplified > 32767) amplified = 32767;
-                            if (amplified < -32768) amplified = -32768;
-                            samples[i] = (int16_t)amplified;
+        while (recording && total_sent < max_bytes) {
+            if (wake_word_detected) {
+                /* For wake word, use simple silence detection */
+                size_t bytes_read = 0;
+                ret = audio_mic_read(chunk_buf, chunk_bytes, &bytes_read, 500);
+                if (ret == ESP_OK && bytes_read > 0) {
+                    /* Apply software gain inline */
+                    int16_t *samples = (int16_t *)chunk_buf;
+                    int num_samples = bytes_read / 2;
+                    int16_t peak = 0;
+                    for (int i = 0; i < num_samples; i++) {
+                        int16_t abs_val = samples[i] < 0 ? -samples[i] : samples[i];
+                        if (abs_val > peak) peak = abs_val;
+                    }
+                    if (peak > 0 && peak < 20000) {
+                        int gain = 20000 / peak;
+                        if (gain > 32) gain = 32;
+                        if (gain > 1) {
+                            for (int i = 0; i < num_samples; i++) {
+                                int32_t amplified = (int32_t)samples[i] * gain;
+                                if (amplified > 32767) amplified = 32767;
+                                if (amplified < -32768) amplified = -32768;
+                                samples[i] = (int16_t)amplified;
+                            }
                         }
+                    }
+
+                    /* Check for silence */
+                    int16_t max_val = 0;
+                    for (int i = 0; i < num_samples; i++) {
+                        int16_t abs_val = samples[i] < 0 ? -samples[i] : samples[i];
+                        if (abs_val > max_val) max_val = abs_val;
+                    }
+
+                    if (max_val < vad_threshold) {
+                        if (silence_start_ms == 0) {
+                            silence_start_ms = esp_timer_get_time() / 1000;
+                        } else if (esp_timer_get_time() / 1000 - silence_start_ms > silence_timeout_ms) {
+                            recording = false;
+                        }
+                    } else {
+                        silence_start_ms = 0;
+                    }
+
+                    /* Stream chunk to gateway */
+                    ws_send_binary(chunk_buf, bytes_read);
+                    total_sent += bytes_read;
+                }
+            } else if (s_config.button_gpio >= 0) {
+                /* For button, check if button released */
+                if (gpio_get_level(s_config.button_gpio) != 0) {
+                    vTaskDelay(pdMS_TO_TICKS(50));
+                    if (gpio_get_level(s_config.button_gpio) != 0) {
+                        recording = false;
+                        continue;
                     }
                 }
 
-                /* Stream chunk to gateway */
-                ws_send_binary(chunk_buf, bytes_read);
-                total_sent += bytes_read;
+                size_t bytes_read = 0;
+                ret = audio_mic_read(chunk_buf, chunk_bytes, &bytes_read, 500);
+                if (ret == ESP_OK && bytes_read > 0) {
+                    /* Apply software gain inline */
+                    int16_t *samples = (int16_t *)chunk_buf;
+                    int num_samples = bytes_read / 2;
+                    int16_t peak = 0;
+                    for (int i = 0; i < num_samples; i++) {
+                        int16_t abs_val = samples[i] < 0 ? -samples[i] : samples[i];
+                        if (abs_val > peak) peak = abs_val;
+                    }
+                    if (peak > 0 && peak < 20000) {
+                        int gain = 20000 / peak;
+                        if (gain > 32) gain = 32;
+                        if (gain > 1) {
+                            for (int i = 0; i < num_samples; i++) {
+                                int32_t amplified = (int32_t)samples[i] * gain;
+                                if (amplified > 32767) amplified = 32767;
+                                if (amplified < -32768) amplified = -32768;
+                                samples[i] = (int16_t)amplified;
+                            }
+                        }
+                    }
+
+                    /* Stream chunk to gateway */
+                    ws_send_binary(chunk_buf, bytes_read);
+                    total_sent += bytes_read;
+                }
             }
         }
 
         audio_mic_disable();
+        if (resume_wake_listening) {
+            esp_err_t listen_ret = audio_start_listening();
+            if (listen_ret != ESP_OK) {
+                ESP_LOGW(TAG, "Failed to resume wake listening: %s", esp_err_to_name(listen_ret));
+            }
+        }
         free(chunk_buf);
 
         ESP_LOGI(TAG, "Recorded %d bytes (%.1f s)", (int)total_sent, total_sent / 32000.0f);
@@ -362,7 +606,7 @@ static void voice_task(void *arg)
         ws_send_json("audio_end", NULL);
 
         /* Wait for STT result (timeout 30s) */
-        EventBits_t bits = xEventGroupWaitBits(
+        bits = xEventGroupWaitBits(
             s_events, EVT_STT_DONE, pdTRUE, pdTRUE, pdMS_TO_TICKS(30000));
 
         if (!(bits & EVT_STT_DONE)) {
@@ -450,6 +694,11 @@ static esp_err_t ws_connect(void)
 esp_err_t voice_channel_init(const voice_channel_config_t *config)
 {
     memcpy(&s_config, config, sizeof(s_config));
+    char normalized[sizeof(s_config.gateway_url)] = {0};
+    if (normalize_gateway_url(s_config.gateway_url, normalized, sizeof(normalized)) == ESP_OK) {
+        strncpy(s_config.gateway_url, normalized, sizeof(s_config.gateway_url) - 1);
+        s_config.gateway_url[sizeof(s_config.gateway_url) - 1] = '\0';
+    }
     load_gateway_url();
 
     if (s_config.gateway_url[0] == '\0') {
@@ -460,25 +709,23 @@ esp_err_t voice_channel_init(const voice_channel_config_t *config)
     s_events = xEventGroupCreate();
     if (!s_events) return ESP_ERR_NO_MEM;
 
-    /* Create button semaphore */
-    s_btn_sem = xSemaphoreCreateBinary();
-    if (!s_btn_sem) {
-        vEventGroupDelete(s_events);
-        s_events = NULL;
-        return ESP_ERR_NO_MEM;
+    /* Configure button GPIO if enabled */
+    if (s_config.button_gpio >= 0) {
+        /* Configure GPIO with internal pull-up, interrupt on any edge */
+        gpio_config_t io_conf = {
+            .pin_bit_mask = (1ULL << s_config.button_gpio),
+            .mode = GPIO_MODE_INPUT,
+            .pull_up_en = GPIO_PULLUP_ENABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type = GPIO_INTR_ANYEDGE,
+        };
+        gpio_config(&io_conf);
+        gpio_install_isr_service(0);
+        gpio_isr_handler_add(s_config.button_gpio, gpio_isr_handler, NULL);
     }
 
-    /* Configure GPIO with internal pull-up, interrupt on any edge */
-    gpio_config_t io_conf = {
-        .pin_bit_mask = (1ULL << s_config.button_gpio),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_ANYEDGE,
-    };
-    gpio_config(&io_conf);
-    gpio_install_isr_service(0);
-    gpio_isr_handler_add(s_config.button_gpio, gpio_isr_handler, NULL);
+    /* Register audio event callback for wake word detection */
+    audio_set_event_callback(audio_event_handler, NULL);
 
     ESP_LOGI(TAG, "Voice channel initialized (GPIO %d, gateway %s)",
              s_config.button_gpio, s_config.gateway_url);
@@ -505,6 +752,8 @@ esp_err_t voice_channel_start(void)
 
 void voice_channel_stop(void)
 {
+    audio_set_event_callback(NULL, NULL);
+
     if (s_task_handle) {
         vTaskDelete(s_task_handle);
         s_task_handle = NULL;
@@ -514,17 +763,15 @@ void voice_channel_stop(void)
         esp_websocket_client_destroy(s_ws_client);
         s_ws_client = NULL;
     }
-    gpio_isr_handler_remove(s_config.button_gpio);
+    if (s_config.button_gpio >= 0) {
+        gpio_isr_handler_remove(s_config.button_gpio);
+    }
     free(s_stt_text);
     s_stt_text = NULL;
     free(s_json_buf);
     s_json_buf = NULL;
     s_json_len = 0;
     s_json_cap = 0;
-    if (s_btn_sem) {
-        vSemaphoreDelete(s_btn_sem);
-        s_btn_sem = NULL;
-    }
     if (s_events) {
         vEventGroupDelete(s_events);
         s_events = NULL;
@@ -588,21 +835,27 @@ esp_err_t voice_channel_set_gateway(const char *url)
         return ESP_ERR_INVALID_ARG;
     }
 
-    strncpy(s_config.gateway_url, url, sizeof(s_config.gateway_url) - 1);
+    char normalized[sizeof(s_config.gateway_url)] = {0};
+    esp_err_t norm_ret = normalize_gateway_url(url, normalized, sizeof(normalized));
+    if (norm_ret != ESP_OK) {
+        return norm_ret;
+    }
+
+    strncpy(s_config.gateway_url, normalized, sizeof(s_config.gateway_url) - 1);
     s_config.gateway_url[sizeof(s_config.gateway_url) - 1] = '\0';
 
     /* Persist to NVS */
     nvs_handle_t nvs;
     esp_err_t ret = nvs_open(MIMI_NVS_VOICE, NVS_READWRITE, &nvs);
     if (ret == ESP_OK) {
-        nvs_set_str(nvs, MIMI_NVS_KEY_VOICE_GW, url);
+        nvs_set_str(nvs, MIMI_NVS_KEY_VOICE_GW, s_config.gateway_url);
         nvs_commit(nvs);
         nvs_close(nvs);
     }
 
     /* Reconnect with new URL */
     if (s_ws_client) {
-        ESP_LOGI(TAG, "Reconnecting to new gateway: %s", url);
+        ESP_LOGI(TAG, "Reconnecting to new gateway: %s", s_config.gateway_url);
         esp_websocket_client_stop(s_ws_client);
         esp_websocket_client_destroy(s_ws_client);
         s_ws_client = NULL;
@@ -610,6 +863,6 @@ esp_err_t voice_channel_set_gateway(const char *url)
         ws_connect();
     }
 
-    ESP_LOGI(TAG, "Gateway URL set: %s", url);
+    ESP_LOGI(TAG, "Gateway URL set: %s", s_config.gateway_url);
     return ESP_OK;
 }

@@ -150,7 +150,8 @@ static esp_err_t init_spiffs(void)
 {
     esp_vfs_spiffs_conf_t conf = {
         .base_path = MIMI_SPIFFS_BASE,
-        .partition_label = NULL,
+        // 存在 model 与 spiffs 两个 data/spiffs 分区时，必须显式指定业务 SPIFFS 分区
+        .partition_label = "spiffs",
         .max_files = 10,
         .format_if_mount_failed = true,
     };
@@ -162,7 +163,7 @@ static esp_err_t init_spiffs(void)
     }
 
     size_t total = 0, used = 0;
-    esp_spiffs_info(NULL, &total, &used);
+    esp_spiffs_info("spiffs", &total, &used);
     ESP_LOGI(TAG, "SPIFFS: total=%d, used=%d", (int)total, (int)used);
 
     return ESP_OK;
@@ -232,10 +233,21 @@ void app_main(void)
             .spk_sd_pin = MIMI_AUDIO_SPK_SD_PIN,
             .spk_sample_rate = MIMI_AUDIO_SPK_SAMPLE_RATE,
             .spk_bits_per_sample = MIMI_AUDIO_SPK_BITS,
+            .enable_wake_word = true,
+            .wake_word = MIMI_AUDIO_WAKE_WORD,
+            .wake_word_threshold = MIMI_AUDIO_WAKE_THRESHOLD,
+            .vad_threshold = 50,
+            .silence_timeout_ms = 1000,
         };
         esp_err_t audio_ret = audio_init(&audio_cfg);
         if (audio_ret != ESP_OK) {
             ESP_LOGW(TAG, "Audio init failed: %s", esp_err_to_name(audio_ret));
+        } else if (audio_cfg.enable_wake_word) {
+            /* Start listening for wake word */
+            audio_ret = audio_start_listening();
+            if (audio_ret != ESP_OK) {
+                ESP_LOGW(TAG, "Audio start listening failed: %s", esp_err_to_name(audio_ret));
+            }
         }
     }
 #endif
@@ -326,7 +338,8 @@ void app_main(void)
                 esp_err_t voice_ret = voice_channel_init(&voice_cfg);
                 if (voice_ret == ESP_OK) {
                     voice_channel_start();
-                    ESP_LOGI(TAG, "Voice channel started");
+                    ESP_LOGI(TAG, "Voice channel started (button GPIO: %d, wake word enabled: %s)", 
+                             MIMI_VOICE_BUTTON_PIN, "true");
                 } else {
                     ESP_LOGW(TAG, "Voice channel init failed: %s",
                              esp_err_to_name(voice_ret));
