@@ -28,6 +28,7 @@ static const char *TAG = "voice";
 #define EVT_WAKE_WORD      BIT3
 #define EVT_BUTTON_PRESS   BIT4
 #define WS_FORCE_RECONNECT_MS 15000
+#define MUSIC_STALL_RECOVER_MS 12000
 
 /* ---------- State ---------- */
 static voice_state_t s_state = VOICE_STATE_IDLE;
@@ -52,7 +53,10 @@ static volatile int64_t s_followup_deadline_ms = 0;
 static volatile int64_t s_playback_started_ms = 0;
 static volatile int64_t s_last_ws_connected_ms = 0;
 static volatile int64_t s_last_ws_recreate_ms = 0;
+static volatile int64_t s_last_ws_disconnected_ms = 0;
 static volatile bool s_drop_playback_frames = false;
+static volatile bool s_music_playback_active = false;
+static volatile int64_t s_last_playback_frame_ms = 0;
 
 static esp_err_t ws_connect(void);
 
@@ -178,11 +182,28 @@ static esp_err_t normalize_gateway_url(const char *input, char *output, size_t o
     return ESP_OK;
 }
 
+static bool gateway_looks_like_http_stt_port(const char *url)
+{
+    if (!url || !url[0]) {
+        return false;
+    }
+    const char *p = strstr(url, ":8091");
+    if (!p) {
+        return false;
+    }
+    char tail = p[5];
+    return (tail == '\0' || tail == '/' || tail == '?' || tail == '#');
+}
+
 /* ---------- Audio event callback ---------- */
 static void audio_event_handler(audio_event_type_t event, void *user_data)
 {
     switch (event) {
     case AUDIO_EVENT_WAKE_WORD_DETECTED:
+        if (s_music_playback_active) {
+            ESP_LOGI(TAG, "Wake word ignored during music playback");
+            break;
+        }
         ESP_LOGI(TAG, "Wake word detected event received");
         if (s_events) {
             xEventGroupSetBits(s_events, EVT_WAKE_WORD);
@@ -192,6 +213,7 @@ static void audio_event_handler(audio_event_type_t event, void *user_data)
         if (s_events) {
             int64_t now_ms = esp_timer_get_time() / 1000;
             bool barge_in = (s_state == VOICE_STATE_PLAYING)
+                            && !s_music_playback_active
                             && (now_ms - s_playback_started_ms > 800);
             bool in_followup_window = (s_followup_deadline_ms > now_ms);
             if (barge_in || in_followup_window) {
@@ -238,6 +260,24 @@ static void set_state(voice_state_t st)
     }
 }
 
+static const char *ws_error_type_to_str(esp_websocket_error_type_t type)
+{
+    switch (type) {
+    case WEBSOCKET_ERROR_TYPE_NONE:
+        return "none";
+    case WEBSOCKET_ERROR_TYPE_TCP_TRANSPORT:
+        return "tcp_transport";
+    case WEBSOCKET_ERROR_TYPE_PONG_TIMEOUT:
+        return "pong_timeout";
+    case WEBSOCKET_ERROR_TYPE_HANDSHAKE:
+        return "handshake";
+    case WEBSOCKET_ERROR_TYPE_SERVER_CLOSE:
+        return "server_close";
+    default:
+        return "unknown";
+    }
+}
+
 static void load_gateway_url(void)
 {
     nvs_handle_t nvs;
@@ -250,6 +290,9 @@ static void load_gateway_url(void)
                 strncpy(s_config.gateway_url, normalized, sizeof(s_config.gateway_url) - 1);
                 s_config.gateway_url[sizeof(s_config.gateway_url) - 1] = '\0';
                 ESP_LOGI(TAG, "Gateway URL from NVS: %s", s_config.gateway_url);
+                if (gateway_looks_like_http_stt_port(s_config.gateway_url)) {
+                    ESP_LOGW(TAG, "Voice GW 当前端口为 8091（HTTP STT），WebSocket 请配置 8090");
+                }
             } else {
                 ESP_LOGW(TAG, "Invalid gateway URL in NVS, keep current config: %s", raw);
             }
@@ -298,20 +341,21 @@ static esp_err_t ws_send_binary(const uint8_t *data, size_t len)
 
 static void audio_spk_write_all(const uint8_t *data, size_t len)
 {
-    size_t offset = 0;
-    while (offset < len) {
-        size_t written = 0;
-        esp_err_t ret = audio_spk_write(data + offset, len - offset, &written, 1000);
-        if (ret != ESP_OK) {
+    if (!data || len == 0) {
+        return;
+    }
+    /* 避免在 WS 事件线程长时间阻塞，防止心跳超时导致断连 */
+    size_t written = 0;
+    esp_err_t ret = audio_spk_write(data, len, &written, 5);
+    if (ret != ESP_OK) {
+        if (ret != ESP_ERR_TIMEOUT && ret != ESP_ERR_INVALID_STATE) {
             ESP_LOGW(TAG, "Speaker write failed: %s (written=%d/%d)",
-                     esp_err_to_name(ret), (int)offset, (int)len);
-            break;
+                     esp_err_to_name(ret), (int)written, (int)len);
         }
-        if (written == 0) {
-            ESP_LOGW(TAG, "Speaker write stalled (written=0)");
-            break;
-        }
-        offset += written;
+        return;
+    }
+    if (written < len) {
+        ESP_LOGD(TAG, "Speaker partial write: %d/%d (drop tail)", (int)written, (int)len);
     }
 }
 
@@ -342,14 +386,18 @@ static void handle_json_message(const char *data, int len)
 
     } else if (strcmp(type, "tts_start") == 0) {
         ESP_LOGI(TAG, "TTS stream starting");
+        s_music_playback_active = false;
         s_drop_playback_frames = false;
+        s_last_playback_frame_ms = esp_timer_get_time() / 1000;
         if (s_state == VOICE_STATE_PLAYING) {
             audio_spk_enable();
         }
 
     } else if (strcmp(type, "tts_end") == 0) {
         ESP_LOGI(TAG, "TTS stream ended");
+        s_music_playback_active = false;
         s_drop_playback_frames = false;
+        s_last_playback_frame_ms = 0;
         if (s_state == VOICE_STATE_PLAYING) {
             audio_spk_disable();
         }
@@ -357,14 +405,18 @@ static void handle_json_message(const char *data, int len)
 
     } else if (strcmp(type, "music_start") == 0 || strcmp(type, "media_start") == 0) {
         ESP_LOGI(TAG, "Music stream starting");
+        s_music_playback_active = true;
         s_drop_playback_frames = false;
+        s_last_playback_frame_ms = esp_timer_get_time() / 1000;
         if (s_state == VOICE_STATE_PLAYING) {
             audio_spk_enable();
         }
 
     } else if (strcmp(type, "music_end") == 0 || strcmp(type, "media_end") == 0) {
         ESP_LOGI(TAG, "Music stream ended");
+        s_music_playback_active = false;
         s_drop_playback_frames = false;
+        s_last_playback_frame_ms = 0;
         if (s_state == VOICE_STATE_PLAYING) {
             audio_spk_disable();
             s_playback_started_ms = 0;
@@ -374,6 +426,13 @@ static void handle_json_message(const char *data, int len)
     } else if (strcmp(type, "error") == 0) {
         const char *msg = cJSON_GetStringValue(cJSON_GetObjectItem(root, "message"));
         ESP_LOGE(TAG, "Gateway error: %s", msg ? msg : "unknown");
+        s_music_playback_active = false;
+        s_last_playback_frame_ms = 0;
+        if (s_state == VOICE_STATE_PLAYING) {
+            audio_spk_disable();
+            s_playback_started_ms = 0;
+            set_state(VOICE_STATE_IDLE);
+        }
         /* Unblock any waiters */
         xEventGroupSetBits(s_events, EVT_STT_DONE | EVT_TTS_DONE);
     }
@@ -392,12 +451,14 @@ static void ws_event_handler(void *arg, esp_event_base_t base, int32_t event_id,
         ESP_LOGI(TAG, "Voice WS connected");
         s_last_ws_connected_ms = esp_timer_get_time() / 1000;
         s_last_ws_recreate_ms = s_last_ws_connected_ms;
+        s_last_ws_disconnected_ms = 0;
         xEventGroupSetBits(s_events, EVT_WS_CONNECTED);
         set_state(VOICE_STATE_IDLE);
         break;
 
     case WEBSOCKET_EVENT_DISCONNECTED:
         ESP_LOGW(TAG, "Voice WS disconnected");
+        s_last_ws_disconnected_ms = esp_timer_get_time() / 1000;
         xEventGroupClearBits(s_events, EVT_WS_CONNECTED);
         s_followup_deadline_ms = 0;
         s_ws_recv_binary_frag = false;
@@ -425,6 +486,7 @@ static void ws_event_handler(void *arg, esp_event_base_t base, int32_t event_id,
         if (is_binary) {
             /* Binary frame: PCM audio chunk during TTS playback, including continuation frames */
             if (!s_drop_playback_frames && s_state == VOICE_STATE_PLAYING && evt->data_len > 0) {
+                s_last_playback_frame_ms = esp_timer_get_time() / 1000;
                 audio_spk_write_all((const uint8_t *)evt->data_ptr, evt->data_len);
             }
         } else if (is_text) {
@@ -457,8 +519,32 @@ static void ws_event_handler(void *arg, esp_event_base_t base, int32_t event_id,
         break;
 
     case WEBSOCKET_EVENT_ERROR:
-        ESP_LOGE(TAG, "Voice WS error");
+    {
+        bool is_tcp = (evt->error_handle.error_type == WEBSOCKET_ERROR_TYPE_TCP_TRANSPORT);
+        int sock_errno = is_tcp ? evt->error_handle.esp_transport_sock_errno : 0;
+        int tls_stack = is_tcp ? evt->error_handle.esp_tls_stack_err : 0;
+        ESP_LOGE(TAG,
+                 "Voice WS error: type=%s(%d) hs=%d errno=%d(%s) tls_last=%s(%d) tls_stack=%d gw=%s",
+                 ws_error_type_to_str(evt->error_handle.error_type),
+                 (int)evt->error_handle.error_type,
+                 evt->error_handle.esp_ws_handshake_status_code,
+                 sock_errno,
+                 sock_errno > 0
+                    ? strerror(sock_errno)
+                    : "n/a",
+                 esp_err_to_name(evt->error_handle.esp_tls_last_esp_err),
+                 (int)evt->error_handle.esp_tls_last_esp_err,
+                 tls_stack,
+                 s_config.gateway_url);
+
+        if (gateway_looks_like_http_stt_port(s_config.gateway_url)) {
+            ESP_LOGW(TAG, "Voice GW 似乎配置为 8091（HTTP STT 端口），WebSocket 应使用 ws://<ip>:8090/");
+        } else if (evt->error_handle.esp_ws_handshake_status_code == 0 &&
+                   evt->error_handle.error_type == WEBSOCKET_ERROR_TYPE_TCP_TRANSPORT) {
+            ESP_LOGW(TAG, "WS 握手未拿到状态码，请检查网关是否在 8090 监听 WebSocket，且 URL 协议为 ws:// 或 wss://");
+        }
         break;
+    }
 
     default:
         break;
@@ -490,11 +576,26 @@ static void voice_task(void *arg)
     ESP_LOGI(TAG, "Voice WS ready, listening for button or wake word");
 
     while (1) {
+        int64_t now_ms = esp_timer_get_time() / 1000;
+        if (s_state == VOICE_STATE_PLAYING &&
+            s_music_playback_active &&
+            s_last_playback_frame_ms > 0 &&
+            (now_ms - s_last_playback_frame_ms) > MUSIC_STALL_RECOVER_MS) {
+            ESP_LOGW(TAG, "Music playback stalled for %d ms, force recover",
+                     (int)(now_ms - s_last_playback_frame_ms));
+            s_drop_playback_frames = true;
+            ws_send_json("music_stop", NULL);
+            audio_spk_disable();
+            s_music_playback_active = false;
+            s_playback_started_ms = 0;
+            s_last_playback_frame_ms = 0;
+            set_state(VOICE_STATE_IDLE);
+        }
+
         if (!(xEventGroupGetBits(s_events) & EVT_WS_CONNECTED)) {
-            int64_t now_ms = esp_timer_get_time() / 1000;
-            int64_t disconnected_ms = (s_last_ws_connected_ms > 0)
-                                        ? (now_ms - s_last_ws_connected_ms)
-                                        : now_ms;
+            int64_t disconnected_ms = (s_last_ws_disconnected_ms > 0)
+                                        ? (now_ms - s_last_ws_disconnected_ms)
+                                        : 0;
             if (disconnected_ms >= WS_FORCE_RECONNECT_MS &&
                 now_ms - s_last_ws_recreate_ms >= WS_FORCE_RECONNECT_MS) {
                 s_last_ws_recreate_ms = now_ms;
@@ -541,9 +642,14 @@ static void voice_task(void *arg)
         if (s_state == VOICE_STATE_PLAYING) {
             ESP_LOGI(TAG, "Interrupt: stopping playback");
             s_drop_playback_frames = true;
-            ws_send_json("interrupt", NULL);
+            if (s_music_playback_active) {
+                ws_send_json("music_stop", NULL);
+            } else {
+                ws_send_json("interrupt", NULL);
+            }
             xEventGroupSetBits(s_events, EVT_TTS_DONE);
             audio_spk_disable();
+            s_music_playback_active = false;
             /* Fall through to start recording */
         } else if (s_state != VOICE_STATE_IDLE) {
             continue;
@@ -773,7 +879,7 @@ static esp_err_t ws_connect(void)
         .reconnect_timeout_ms = 5000,
         .network_timeout_ms = 10000,
         .ping_interval_sec = 20,
-        .pingpong_timeout_sec = 20,
+        .pingpong_timeout_sec = 60,
     };
 
     s_ws_client = esp_websocket_client_init(&ws_cfg);
@@ -878,6 +984,8 @@ void voice_channel_stop(void)
     s_json_cap = 0;
     s_followup_deadline_ms = 0;
     s_playback_started_ms = 0;
+    s_music_playback_active = false;
+    s_last_playback_frame_ms = 0;
     if (s_events) {
         vEventGroupDelete(s_events);
         s_events = NULL;
@@ -900,6 +1008,8 @@ esp_err_t voice_channel_speak(const char *text)
 
     set_state(VOICE_STATE_PLAYING);
     s_playback_started_ms = esp_timer_get_time() / 1000;
+    s_music_playback_active = false;
+    s_last_playback_frame_ms = s_playback_started_ms;
     ESP_LOGI(TAG, "TTS speak: \"%.*s\"", 200, text);
     display_show_message("assistant", text);
 
@@ -925,6 +1035,7 @@ esp_err_t voice_channel_speak(const char *text)
 
     s_followup_deadline_ms = (esp_timer_get_time() / 1000) + MIMI_VOICE_FOLLOWUP_WINDOW_MS;
     s_playback_started_ms = 0;
+    s_last_playback_frame_ms = 0;
     ESP_LOGI(TAG, "Follow-up window opened for %d ms", MIMI_VOICE_FOLLOWUP_WINDOW_MS);
     set_state(VOICE_STATE_IDLE);
     return ESP_OK;
@@ -946,6 +1057,8 @@ esp_err_t voice_channel_play_music(const char *query)
 
     set_state(VOICE_STATE_PLAYING);
     s_playback_started_ms = esp_timer_get_time() / 1000;
+    s_music_playback_active = true;
+    s_last_playback_frame_ms = s_playback_started_ms;
     s_drop_playback_frames = false;
     ESP_LOGI(TAG, "Music play: \"%.*s\"", 200, query);
     display_show_message("assistant", "播放音乐中...");
@@ -957,7 +1070,9 @@ esp_err_t voice_channel_play_music(const char *query)
     cJSON_Delete(extra);
     if (ret != ESP_OK) {
         audio_spk_disable();
+        s_music_playback_active = false;
         s_playback_started_ms = 0;
+        s_last_playback_frame_ms = 0;
         set_state(VOICE_STATE_IDLE);
     }
     return ret;
@@ -972,9 +1087,11 @@ esp_err_t voice_channel_stop_music(void)
     }
 
     esp_err_t ret = ws_send_json("music_stop", NULL);
+    s_music_playback_active = false;
     s_drop_playback_frames = true;
     audio_spk_disable();
     s_playback_started_ms = 0;
+    s_last_playback_frame_ms = 0;
     set_state(VOICE_STATE_IDLE);
     return ret;
 }
@@ -1003,6 +1120,9 @@ esp_err_t voice_channel_set_gateway(const char *url)
 
     strncpy(s_config.gateway_url, normalized, sizeof(s_config.gateway_url) - 1);
     s_config.gateway_url[sizeof(s_config.gateway_url) - 1] = '\0';
+    if (gateway_looks_like_http_stt_port(s_config.gateway_url)) {
+        ESP_LOGW(TAG, "配置的是 8091（HTTP STT）端口；语音 WebSocket 需使用 ws://<ip>:8090/");
+    }
 
     /* Persist to NVS */
     nvs_handle_t nvs;

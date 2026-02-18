@@ -39,6 +39,7 @@ import logging
 import os
 import posixpath
 import re
+import select
 import subprocess
 import tempfile
 import threading
@@ -197,9 +198,8 @@ def resolve_music_source(query: str) -> str:
         return q
 
     # Keyword search fallback via yt-dlp (optional runtime dependency)
-    # 先尝试更不容易触发风控的平台，再回退 YouTube。
+    # 注意：当前环境 ytmusicsearch 可能不支持，优先 bilibili/soundcloud。
     providers = [
-        ("ytmusicsearch1", "ytmusic"),
         ("bilisearch1", "bilibili"),
         ("scsearch1", "soundcloud"),
         ("ytsearch1", "youtube"),
@@ -213,8 +213,8 @@ def resolve_music_source(query: str) -> str:
             "yt-dlp",
             "--no-playlist",
             "--no-warnings",
-            "-f", "bestaudio",
-            "-g",
+            "--print", "id",
+            "--skip-download",
             f"{prefix}:{q}",
         ]
         if cookie_browser:
@@ -225,11 +225,9 @@ def resolve_music_source(query: str) -> str:
         try:
             out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=20)
             lines = out.decode("utf-8", errors="replace").strip().splitlines()
-            if lines:
-                url = lines[0].strip()
-                if url:
-                    log.info("Music resolve success provider=%s query=%.80s", provider, q)
-                    return url
+            if lines and lines[0].strip():
+                log.info("Music resolve success provider=%s query=%.80s", provider, q)
+                return f"ytdlp://{prefix}:{q}"
             errors.append(f"{provider}: empty")
         except FileNotFoundError:
             raise RuntimeError("yt-dlp not installed, cannot resolve music query")
@@ -1371,40 +1369,230 @@ async def stream_tts_pcm(ws, text: str, voice: str, rate: str, cancel_event: asy
 async def stream_music_pcm(ws, source: str, cancel_event: asyncio.Event):
     """Stream music source as PCM chunks over WebSocket using ffmpeg."""
     await ws.send(json.dumps({"type": "music_start"}))
+    ytdlp = None
+    frame_bytes = 640  # 20ms @ 16kHz, 16-bit mono
+    frame_duration_s = frame_bytes / 32000.0
+    silence_frame = b"\x00" * frame_bytes
+    prebuffer_frames = 25  # 约 500ms，吸收上游抖动
+    pcm_queue = asyncio.Queue(maxsize=250)  # 约 5s 缓冲
+    producer_done = asyncio.Event()
+    ffmpeg_in = "pipe:0" if source.startswith("ytdlp://") else source
+    ffmpeg_stdin = subprocess.PIPE if source.startswith("ytdlp://") else subprocess.DEVNULL
+
+    ffmpeg_cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error",
+    ]
+    if not source.startswith("ytdlp://"):
+        ffmpeg_cmd.extend(["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2"])
+    ffmpeg_cmd.extend([
+        "-i", ffmpeg_in,
+        "-f", "s16le", "-ar", "16000", "-ac", "1", "pipe:1",
+    ])
 
     ffmpeg = subprocess.Popen(
-        [
-            "ffmpeg", "-hide_banner", "-loglevel", "error",
-            "-reconnect", "1",
-            "-reconnect_streamed", "1",
-            "-reconnect_delay_max", "2",
-            "-i", source,
-            "-f", "s16le", "-ar", "16000", "-ac", "1", "pipe:1",
-        ],
-        stdin=subprocess.DEVNULL,
+        ffmpeg_cmd,
+        stdin=ffmpeg_stdin,
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
         bufsize=0,
     )
 
+    if source.startswith("ytdlp://"):
+        target = source[len("ytdlp://"):]
+        ytdlp_cmd = [
+            "yt-dlp",
+            "--no-playlist",
+            "--no-warnings",
+            "-f", "bestaudio/best",
+            "-o", "-",
+            target,
+        ]
+        cookie_path = os.environ.get("MIMI_YTDLP_COOKIES", "").strip()
+        cookie_browser = os.environ.get("MIMI_YTDLP_COOKIES_FROM_BROWSER", "").strip()
+        if cookie_browser:
+            ytdlp_cmd.extend(["--cookies-from-browser", cookie_browser])
+        elif cookie_path:
+            ytdlp_cmd.extend(["--cookies", cookie_path])
+        ytdlp = subprocess.Popen(
+            ytdlp_cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            bufsize=0,
+        )
+
     bytes_sent = 0
+    underrun_frames = 0
+    stream_error_msg = ""
     loop = asyncio.get_event_loop()
+    stream_started_ts = loop.time()
+    last_pcm_produced_ts = stream_started_ts
+    startup_timeout_s = 12.0
+    stall_timeout_s = 8.0
+
+    def read_pipe_chunk(pipe, size: int, timeout_s: float):
+        """非阻塞读取子进程管道，timeout 返回 None，EOF 返回 b''。"""
+        if pipe is None:
+            return b""
+        try:
+            fd = pipe.fileno()
+        except Exception:
+            return b""
+        try:
+            ready, _, _ = select.select([fd], [], [], timeout_s)
+        except Exception:
+            return b""
+        if not ready:
+            return None
+        try:
+            return os.read(fd, size)
+        except BlockingIOError:
+            return None
+        except Exception:
+            return b""
+
     try:
-        while True:
+        async def queue_put_with_cancel(frame: bytes) -> bool:
+            while not cancel_event.is_set():
+                try:
+                    await asyncio.wait_for(pcm_queue.put(frame), timeout=0.2)
+                    return True
+                except asyncio.TimeoutError:
+                    continue
+            return False
+
+        async def feed_ytdlp_to_ffmpeg():
+            if not ytdlp:
+                return
+            try:
+                while not cancel_event.is_set():
+                    if ytdlp.poll() is not None:
+                        break
+                    chunk = await loop.run_in_executor(None, read_pipe_chunk, ytdlp.stdout, 8192, 0.2)
+                    if chunk is None:
+                        continue
+                    if not chunk:
+                        break
+                    if not ffmpeg.stdin:
+                        break
+                    try:
+                        ffmpeg.stdin.write(chunk)
+                        ffmpeg.stdin.flush()
+                    except BrokenPipeError:
+                        break
+            finally:
+                try:
+                    if ffmpeg.stdin:
+                        ffmpeg.stdin.close()
+                except Exception:
+                    pass
+
+        feed_task = asyncio.create_task(feed_ytdlp_to_ffmpeg()) if ytdlp else None
+
+        async def produce_pcm_frames():
+            nonlocal last_pcm_produced_ts
+            pending = bytearray()
+            try:
+                while not cancel_event.is_set():
+                    if ffmpeg.poll() is not None:
+                        break
+                    try:
+                        pcm_chunk = await loop.run_in_executor(None, read_pipe_chunk, ffmpeg.stdout, 8192, 0.2)
+                    except Exception:
+                        break
+                    if pcm_chunk is None:
+                        continue
+                    if not pcm_chunk:
+                        break
+                    pending.extend(pcm_chunk)
+                    last_pcm_produced_ts = loop.time()
+                    while len(pending) >= frame_bytes:
+                        frame = bytes(pending[:frame_bytes])
+                        del pending[:frame_bytes]
+                        ok = await queue_put_with_cancel(frame)
+                        if not ok:
+                            return
+
+                if pending and not cancel_event.is_set():
+                    tail = bytes(pending)
+                    padded = tail + b"\x00" * (frame_bytes - len(tail))
+                    await queue_put_with_cancel(padded)
+            finally:
+                producer_done.set()
+
+        async def consume_pcm_frames():
+            nonlocal bytes_sent, underrun_frames, stream_error_msg
+            while (not producer_done.is_set()
+                   and pcm_queue.qsize() < prebuffer_frames
+                   and not cancel_event.is_set()):
+                now = loop.time()
+                if (now - stream_started_ts) >= startup_timeout_s and pcm_queue.empty():
+                    stream_error_msg = "music stream startup timeout"
+                    cancel_event.set()
+                    break
+                await asyncio.sleep(0.02)
+
+            next_send_ts = loop.time()
+            while not cancel_event.is_set():
+                try:
+                    frame = await asyncio.wait_for(pcm_queue.get(), timeout=0.15)
+                except asyncio.TimeoutError:
+                    if producer_done.is_set() and pcm_queue.empty():
+                        break
+                    now = loop.time()
+                    if bytes_sent == 0 and (now - stream_started_ts) >= startup_timeout_s:
+                        stream_error_msg = "music stream startup timeout"
+                        cancel_event.set()
+                        break
+                    if bytes_sent > 0 and (now - last_pcm_produced_ts) >= stall_timeout_s:
+                        stream_error_msg = "music stream stalled"
+                        cancel_event.set()
+                        break
+                    frame = silence_frame
+                    underrun_frames += 1
+
+                now = loop.time()
+                if now < next_send_ts:
+                    await asyncio.sleep(next_send_ts - now)
+                else:
+                    next_send_ts = now
+
+                try:
+                    await ws.send(frame)
+                    bytes_sent += len(frame)
+                except websockets.exceptions.ConnectionClosed:
+                    cancel_event.set()
+                    break
+
+                next_send_ts += frame_duration_s
+
+        producer_task = asyncio.create_task(produce_pcm_frames())
+        consumer_task = asyncio.create_task(consume_pcm_frames())
+        done, _ = await asyncio.wait(
+            {producer_task, consumer_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+
+        if consumer_task in done:
+            cancel_event.set()
+            if not producer_task.done():
+                producer_task.cancel()
+        await asyncio.gather(producer_task, consumer_task, return_exceptions=True)
+
+        if feed_task:
             if cancel_event.is_set():
-                break
-            try:
-                pcm_chunk = await loop.run_in_executor(None, ffmpeg.stdout.read, 4096)
-            except Exception:
-                break
-            if not pcm_chunk:
-                break
-            try:
-                await ws.send(pcm_chunk)
-                bytes_sent += len(pcm_chunk)
-            except websockets.exceptions.ConnectionClosed:
-                break
+                feed_task.cancel()
+            await asyncio.gather(feed_task, return_exceptions=True)
     finally:
+        if ytdlp:
+            try:
+                ytdlp.terminate()
+            except Exception:
+                pass
+            try:
+                ytdlp.wait(timeout=2)
+            except Exception:
+                pass
         try:
             ffmpeg.terminate()
         except Exception:
@@ -1414,14 +1602,21 @@ async def stream_music_pcm(ws, source: str, cancel_event: asyncio.Event):
         except Exception:
             pass
 
-    if not cancel_event.is_set():
+    if stream_error_msg:
+        try:
+            await ws.send(json.dumps({"type": "error", "message": stream_error_msg}))
+        except websockets.exceptions.ConnectionClosed:
+            pass
+
+    if (not cancel_event.is_set()) or stream_error_msg:
         try:
             await ws.send(json.dumps({"type": "music_end"}))
         except websockets.exceptions.ConnectionClosed:
             pass
 
-    log.info("Music: sent %d bytes PCM (%.1fs) source=%.120s",
-             bytes_sent, bytes_sent / 32000, source)
+    log.info("Music: sent %d bytes PCM (%.1fs), underrun=%d err=%s source=%.120s",
+             bytes_sent, bytes_sent / 32000, underrun_frames,
+             stream_error_msg if stream_error_msg else "-", source)
 
 
 async def handle_client(ws):
