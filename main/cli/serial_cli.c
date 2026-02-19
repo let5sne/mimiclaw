@@ -561,13 +561,13 @@ esp_err_t serial_cli_init(void)
     /* Register commands */
     esp_console_register_help_command();
 
-    /* wifi_set */
+    /* set_wifi */
     wifi_set_args.ssid = arg_str1(NULL, NULL, "<ssid>", "WiFi SSID");
     wifi_set_args.password = arg_str1(NULL, NULL, "<password>", "WiFi password");
     wifi_set_args.end = arg_end(2);
     esp_console_cmd_t wifi_set_cmd = {
-        .command = "wifi_set",
-        .help = "Set WiFi SSID and password",
+        .command = "set_wifi",
+        .help = "Set WiFi SSID and password (e.g. set_wifi MySSID MyPass)",
         .func = &cmd_wifi_set,
         .argtable = &wifi_set_args,
     };
