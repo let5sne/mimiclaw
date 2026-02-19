@@ -37,6 +37,16 @@ static i2s_std_slot_mask_t s_mic_slot_mask = I2S_STD_SLOT_LEFT;
 /* Task handles */
 static TaskHandle_t s_listen_task = NULL;
 static TaskHandle_t s_record_task = NULL;
+static volatile bool s_stop_listening_req = false;
+
+static void log_playback_path_state(const char *stage)
+{
+    ESP_LOGI(TAG, "Playback state[%s]: volume=%u muted=%d spk_enabled=%d pa_gpio=N/A pa_enabled=N/A",
+             stage ? stage : "unknown",
+             (unsigned)s_volume,
+             s_muted ? 1 : 0,
+             s_spk_channel_enabled ? 1 : 0);
+}
 
 /* Forward declarations */
 static void load_persisted_volume(void);
@@ -71,7 +81,15 @@ static esp_err_t write_pcm_with_volume(const uint8_t *data, size_t len,
 
     /* 设备播放链路当前固定为16-bit PCM，非对齐数据直接透传 */
     if ((len % sizeof(int16_t)) != 0 || s_volume >= 100) {
-        return i2s_channel_write(s_spk_handle, data, len, bytes_written, timeout_ticks);
+        esp_err_t ret = i2s_channel_write(s_spk_handle, data, len, bytes_written, timeout_ticks);
+        if (ret != ESP_OK || *bytes_written < len) {
+            bool underrun = (ret == ESP_OK) && (*bytes_written < len);
+            ESP_LOGW(TAG,
+                     "i2s write raw: ret=%s written=%d/%d underrun=%d timeout_ticks=%d",
+                     esp_err_to_name(ret), (int)(*bytes_written), (int)len,
+                     underrun ? 1 : 0, (int)timeout_ticks);
+        }
+        return ret;
     }
 
     const size_t total_samples = len / sizeof(int16_t);
@@ -103,9 +121,17 @@ static esp_err_t write_pcm_with_volume(const uint8_t *data, size_t len,
                                           &chunk_written, timeout_ticks);
         *bytes_written += chunk_written;
         if (ret != ESP_OK) {
+            ESP_LOGW(TAG,
+                     "i2s write scaled: ret=%s written=%d/%d underrun=0 timeout_ticks=%d",
+                     esp_err_to_name(ret), (int)chunk_written,
+                     (int)(chunk_samples * sizeof(int16_t)), (int)timeout_ticks);
             return ret;
         }
         if (chunk_written == 0) {
+            ESP_LOGW(TAG,
+                     "i2s write scaled: ret=%s written=0/%d underrun=1 timeout_ticks=%d",
+                     esp_err_to_name(ret), (int)(chunk_samples * sizeof(int16_t)),
+                     (int)timeout_ticks);
             break;
         }
         if ((chunk_written % sizeof(int16_t)) != 0) {
@@ -115,6 +141,10 @@ static esp_err_t write_pcm_with_volume(const uint8_t *data, size_t len,
 
         done_samples += chunk_written / sizeof(int16_t);
         if (chunk_written < chunk_samples * sizeof(int16_t)) {
+            ESP_LOGW(TAG,
+                     "i2s write scaled: ret=%s written=%d/%d underrun=1 timeout_ticks=%d",
+                     esp_err_to_name(ret), (int)chunk_written,
+                     (int)(chunk_samples * sizeof(int16_t)), (int)timeout_ticks);
             break;
         }
     }
@@ -299,8 +329,16 @@ esp_err_t audio_start_listening(void)
 void audio_stop_listening(void)
 {
     if (s_listen_task) {
-        vTaskDelete(s_listen_task);
-        s_listen_task = NULL;
+        s_stop_listening_req = true;
+        /* Wait up to 500ms for graceful exit before force-deleting */
+        for (int i = 0; i < 50 && s_listen_task != NULL; i++) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+        if (s_listen_task) {
+            vTaskDelete(s_listen_task);
+            s_listen_task = NULL;
+        }
+        s_stop_listening_req = false;
     }
 
     if (s_mic_handle) {
@@ -374,34 +412,50 @@ esp_err_t audio_spk_enable(void)
 {
     if (!s_initialized || !s_spk_handle) return ESP_ERR_INVALID_STATE;
     if (s_spk_channel_enabled) return ESP_OK;
+    log_playback_path_state("before_enable");
     esp_err_t ret = i2s_channel_enable(s_spk_handle);
     if (ret == ESP_OK || ret == ESP_ERR_INVALID_STATE) {
         s_spk_channel_enabled = true;
+        log_playback_path_state("after_enable");
         return ESP_OK;
     }
+    ESP_LOGW(TAG, "Speaker enable failed: %s", esp_err_to_name(ret));
     return ret;
 }
 
 void audio_spk_disable(void)
 {
     if (!s_spk_handle || !s_spk_channel_enabled) return;
+    log_playback_path_state("before_disable");
     s_spk_channel_enabled = false;
     esp_err_t ret = i2s_channel_disable(s_spk_handle);
     if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
         ESP_LOGW(TAG, "Speaker disable failed: %s", esp_err_to_name(ret));
     }
+    log_playback_path_state("after_disable");
 }
 
 esp_err_t audio_spk_write(const uint8_t *data, size_t len, size_t *bytes_written, uint32_t timeout_ms)
 {
     if (!s_initialized || !s_spk_handle) return ESP_ERR_INVALID_STATE;
     if (!data || !bytes_written) return ESP_ERR_INVALID_ARG;
-    if (s_muted) { *bytes_written = len; return ESP_OK; }
+    if (s_muted) {
+        *bytes_written = len;
+        ESP_LOGI(TAG, "i2s write skipped due to mute: written=%d/%d", (int)*bytes_written, (int)len);
+        return ESP_OK;
+    }
 
     TickType_t timeout_ticks = (timeout_ms == UINT32_MAX)
                              ? portMAX_DELAY
                              : pdMS_TO_TICKS(timeout_ms);
-    return write_pcm_with_volume(data, len, bytes_written, timeout_ticks);
+    esp_err_t ret = write_pcm_with_volume(data, len, bytes_written, timeout_ticks);
+    if (ret != ESP_OK || *bytes_written < len) {
+        bool underrun = (ret == ESP_OK) && (*bytes_written < len);
+        ESP_LOGW(TAG, "audio_spk_write: ret=%s written=%d/%d underrun=%d timeout_ms=%u",
+                 esp_err_to_name(ret), (int)(*bytes_written), (int)len,
+                 underrun ? 1 : 0, (unsigned)timeout_ms);
+    }
+    return ret;
 }
 
 void audio_set_volume(uint8_t volume)
@@ -697,8 +751,15 @@ static void listen_task(void *arg)
             continue;
         }
 
+        if (s_stop_listening_req) {
+            break;
+        }
+
         size_t bytes_read = 0;
-        esp_err_t ret = i2s_channel_read(s_mic_handle, buffer, buffer_bytes, &bytes_read, portMAX_DELAY);
+        esp_err_t ret = i2s_channel_read(s_mic_handle, buffer, buffer_bytes, &bytes_read, pdMS_TO_TICKS(200));
+        if (ret == ESP_ERR_TIMEOUT) {
+            continue;
+        }
         if (ret != ESP_OK || bytes_read != buffer_bytes) {
             ESP_LOGW(TAG, "I2S read failed ret=%s bytes=%d/%d",
                      esp_err_to_name(ret), (int)bytes_read, (int)buffer_bytes);
@@ -805,6 +866,7 @@ static void listen_task(void *arg)
     }
 
     free(buffer);
+    s_listen_task = NULL;
     vTaskDelete(NULL);
 }
 

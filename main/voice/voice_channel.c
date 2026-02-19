@@ -57,6 +57,7 @@ static volatile int64_t s_last_ws_disconnected_ms = 0;
 static volatile bool s_drop_playback_frames = false;
 static volatile bool s_music_playback_active = false;
 static volatile int64_t s_last_playback_frame_ms = 0;
+static volatile bool s_resume_wake_after_playback = false;
 
 static esp_err_t ws_connect(void);
 
@@ -233,6 +234,52 @@ static void audio_event_handler(audio_event_type_t event, void *user_data)
 
 /* ---------- Helpers ---------- */
 
+static void pause_wake_listening_for_playback(const char *reason)
+{
+    if (!audio_is_wake_word_enabled()) {
+        ESP_LOGI(TAG, "Playback guard: wake word disabled, skip pause (reason=%s)",
+                 reason ? reason : "unknown");
+        return;
+    }
+    if (!audio_is_listening()) {
+        ESP_LOGI(TAG, "Playback guard: wake listening already stopped (reason=%s)",
+                 reason ? reason : "unknown");
+        return;
+    }
+    audio_stop_listening();
+    s_resume_wake_after_playback = true;
+    ESP_LOGI(TAG, "Playback guard: paused wake listening (reason=%s)",
+             reason ? reason : "unknown");
+}
+
+static void resume_wake_listening_after_playback(const char *reason)
+{
+    if (!s_resume_wake_after_playback) {
+        return;
+    }
+    if (s_state == VOICE_STATE_RECORDING) {
+        ESP_LOGI(TAG, "Playback guard: skip resume while recording");
+        return;
+    }
+    s_resume_wake_after_playback = false;
+    if (!audio_is_wake_word_enabled()) {
+        ESP_LOGI(TAG, "Playback guard: wake word disabled, skip resume");
+        return;
+    }
+    if (audio_is_listening()) {
+        ESP_LOGI(TAG, "Playback guard: wake listening already active");
+        return;
+    }
+    esp_err_t ret = audio_start_listening();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Playback guard: resume wake listening failed: %s",
+                 esp_err_to_name(ret));
+        return;
+    }
+    ESP_LOGI(TAG, "Playback guard: resumed wake listening (reason=%s)",
+             reason ? reason : "unknown");
+}
+
 static void set_state(voice_state_t st)
 {
     s_state = st;
@@ -240,6 +287,7 @@ static void set_state(voice_state_t st)
     case VOICE_STATE_IDLE:
         display_set_status("MimiClaw Ready");
         display_set_display_status(DISPLAY_STATUS_IDLE);
+        resume_wake_listening_after_playback("state_idle");
         break;
     case VOICE_STATE_CONNECTING:
         display_set_status("Connecting...");
@@ -346,7 +394,7 @@ static void audio_spk_write_all(const uint8_t *data, size_t len)
     }
     /* 避免在 WS 事件线程长时间阻塞，防止心跳超时导致断连 */
     size_t written = 0;
-    esp_err_t ret = audio_spk_write(data, len, &written, 5);
+    esp_err_t ret = audio_spk_write(data, len, &written, 2000);
     if (ret != ESP_OK) {
         if (ret != ESP_ERR_TIMEOUT && ret != ESP_ERR_INVALID_STATE) {
             ESP_LOGW(TAG, "Speaker write failed: %s (written=%d/%d)",
@@ -389,6 +437,7 @@ static void handle_json_message(const char *data, int len)
         s_music_playback_active = false;
         s_drop_playback_frames = false;
         s_last_playback_frame_ms = esp_timer_get_time() / 1000;
+        pause_wake_listening_for_playback("tts_start");
         if (s_state == VOICE_STATE_PLAYING) {
             audio_spk_enable();
         }
@@ -401,6 +450,7 @@ static void handle_json_message(const char *data, int len)
         if (s_state == VOICE_STATE_PLAYING) {
             audio_spk_disable();
         }
+        resume_wake_listening_after_playback("tts_end");
         xEventGroupSetBits(s_events, EVT_TTS_DONE);
 
     } else if (strcmp(type, "music_start") == 0 || strcmp(type, "media_start") == 0) {
@@ -408,6 +458,7 @@ static void handle_json_message(const char *data, int len)
         s_music_playback_active = true;
         s_drop_playback_frames = false;
         s_last_playback_frame_ms = esp_timer_get_time() / 1000;
+        pause_wake_listening_for_playback("music_start");
         if (s_state == VOICE_STATE_PLAYING) {
             audio_spk_enable();
         }
@@ -422,6 +473,7 @@ static void handle_json_message(const char *data, int len)
             s_playback_started_ms = 0;
             set_state(VOICE_STATE_IDLE);
         }
+        resume_wake_listening_after_playback("music_end");
 
     } else if (strcmp(type, "error") == 0) {
         const char *msg = cJSON_GetStringValue(cJSON_GetObjectItem(root, "message"));
@@ -433,6 +485,7 @@ static void handle_json_message(const char *data, int len)
             s_playback_started_ms = 0;
             set_state(VOICE_STATE_IDLE);
         }
+        resume_wake_listening_after_playback("gateway_error");
         /* Unblock any waiters */
         xEventGroupSetBits(s_events, EVT_STT_DONE | EVT_TTS_DONE);
     }
@@ -910,6 +963,7 @@ esp_err_t voice_channel_init(const voice_channel_config_t *config)
         s_config.gateway_url[sizeof(s_config.gateway_url) - 1] = '\0';
     }
     load_gateway_url();
+    s_resume_wake_after_playback = false;
 
     if (s_config.gateway_url[0] == '\0') {
         ESP_LOGW(TAG, "No voice gateway URL configured");
@@ -986,6 +1040,7 @@ void voice_channel_stop(void)
     s_playback_started_ms = 0;
     s_music_playback_active = false;
     s_last_playback_frame_ms = 0;
+    s_resume_wake_after_playback = false;
     if (s_events) {
         vEventGroupDelete(s_events);
         s_events = NULL;
@@ -995,7 +1050,13 @@ void voice_channel_stop(void)
 
 esp_err_t voice_channel_speak(const char *text)
 {
+    if (!s_events) {
+        ESP_LOGE(TAG, "TTS speak rejected: voice channel events not ready");
+        set_state(VOICE_STATE_IDLE);
+        return ESP_ERR_INVALID_STATE;
+    }
     if (!text || text[0] == '\0') {
+        ESP_LOGW(TAG, "TTS speak rejected: empty text");
         set_state(VOICE_STATE_IDLE);
         return ESP_ERR_INVALID_ARG;
     }
@@ -1006,12 +1067,15 @@ esp_err_t voice_channel_speak(const char *text)
         return ESP_ERR_INVALID_STATE;
     }
 
-    set_state(VOICE_STATE_PLAYING);
+    ESP_LOGI(TAG, "TTS speak request received: len=%d state=%d",
+             (int)strlen(text), (int)s_state);
+    /* 快路径：先切换内部播放状态并发起TTS请求，避免显示刷新阻塞语音输出链路。 */
+    s_state = VOICE_STATE_PLAYING;
     s_playback_started_ms = esp_timer_get_time() / 1000;
     s_music_playback_active = false;
     s_last_playback_frame_ms = s_playback_started_ms;
+    pause_wake_listening_for_playback("tts_request");
     ESP_LOGI(TAG, "TTS speak: \"%.*s\"", 200, text);
-    display_show_message("assistant", text);
 
     /* Clear TTS done event */
     xEventGroupClearBits(s_events, EVT_TTS_DONE);
@@ -1021,8 +1085,18 @@ esp_err_t voice_channel_speak(const char *text)
     cJSON_AddStringToObject(extra, "text", text);
     cJSON_AddStringToObject(extra, "voice", "zh-CN-XiaoxiaoNeural");
     cJSON_AddStringToObject(extra, "rate", MIMI_VOICE_TTS_RATE);
-    ws_send_json("tts_request", extra);
+    esp_err_t send_ret = ws_send_json("tts_request", extra);
     cJSON_Delete(extra);
+    if (send_ret != ESP_OK) {
+        ESP_LOGE(TAG, "TTS request send failed: %s", esp_err_to_name(send_ret));
+        audio_spk_disable();
+        s_playback_started_ms = 0;
+        s_last_playback_frame_ms = 0;
+        set_state(VOICE_STATE_IDLE);
+        return send_ret;
+    }
+    display_show_message("assistant", text);
+    ESP_LOGI(TAG, "TTS request sent, waiting stream events");
 
     /* Wait for TTS to complete (tts_end or interrupt) */
     EventBits_t bits = xEventGroupWaitBits(
@@ -1031,6 +1105,8 @@ esp_err_t voice_channel_speak(const char *text)
     if (!(bits & EVT_TTS_DONE)) {
         ESP_LOGW(TAG, "TTS timeout");
         audio_spk_disable();
+    } else {
+        ESP_LOGI(TAG, "TTS completed via EVT_TTS_DONE");
     }
 
     s_followup_deadline_ms = (esp_timer_get_time() / 1000) + MIMI_VOICE_FOLLOWUP_WINDOW_MS;
@@ -1055,11 +1131,13 @@ esp_err_t voice_channel_play_music(const char *query)
         return ESP_ERR_INVALID_STATE;
     }
 
-    set_state(VOICE_STATE_PLAYING);
+    /* 快路径：避免在发起音乐请求前被显示刷新阻塞。 */
+    s_state = VOICE_STATE_PLAYING;
     s_playback_started_ms = esp_timer_get_time() / 1000;
     s_music_playback_active = true;
     s_last_playback_frame_ms = s_playback_started_ms;
     s_drop_playback_frames = false;
+    pause_wake_listening_for_playback("music_request");
     ESP_LOGI(TAG, "Music play: \"%.*s\"", 200, query);
     display_show_message("assistant", "播放音乐中...");
 

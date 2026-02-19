@@ -67,7 +67,9 @@ static esp_err_t outbound_send_once(const mimi_msg_t *msg, bool is_status)
             return ESP_OK;
         }
         ESP_LOGI(TAG, "Voice outbound: \"%.*s\"", 200, msg->content);
-        return voice_channel_speak(msg->content);
+        esp_err_t ret = voice_channel_speak(msg->content);
+        ESP_LOGI(TAG, "Voice outbound done: ret=%s", esp_err_to_name(ret));
+        return ret;
     }
 
     if (strcmp(msg->channel, MIMI_CHAN_SYSTEM) == 0) {

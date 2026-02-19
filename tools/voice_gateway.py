@@ -154,6 +154,44 @@ def normalize_music_query(text: str) -> str:
     return s.strip()
 
 
+_music_index: list[tuple[str, str]] = []  # (search_key, filepath)
+
+
+def _music_key(text: str) -> str:
+    """Extract searchable chars: CJK + alphanumeric, lowercased."""
+    return re.sub(r'[^\u4e00-\u9fff\w]', '', text.lower())
+
+
+def build_music_index(music_dir: str) -> int:
+    global _music_index
+    _music_index = []
+    exts = {'.mp3', '.flac', '.aac', '.m4a', '.ogg', '.wav'}
+    for root, _, files in os.walk(music_dir):
+        for fname in sorted(files):
+            if os.path.splitext(fname)[1].lower() in exts:
+                key = _music_key(os.path.splitext(fname)[0])
+                _music_index.append((key, os.path.join(root, fname)))
+    log.info("Music library: %d tracks indexed from %s", len(_music_index), music_dir)
+    return len(_music_index)
+
+
+def search_music_library(query: str) -> str | None:
+    if not _music_index:
+        return None
+    q = _music_key(query)
+    if not q:
+        return None
+    best_score, best_path = 0, None
+    for key, path in _music_index:
+        score = sum(1 for c in q if c in key)
+        if score > best_score:
+            best_score, best_path = score, path
+    if best_score >= max(1, len(q) * 0.4):
+        log.info("Music library hit: score=%d/%d path=%s", best_score, len(q), best_path)
+        return best_path
+    return None
+
+
 def load_music_aliases_from_env():
     """
     Load optional alias map from env:
@@ -197,6 +235,10 @@ def resolve_music_source(query: str) -> str:
     if os.path.exists(q):
         return q
 
+    local = search_music_library(q)
+    if local:
+        return local
+
     # Keyword search fallback via yt-dlp (optional runtime dependency)
     # 注意：当前环境 ytmusicsearch 可能不支持，优先 bilibili/soundcloud。
     providers = [
@@ -213,8 +255,8 @@ def resolve_music_source(query: str) -> str:
             "yt-dlp",
             "--no-playlist",
             "--no-warnings",
-            "--print", "id",
-            "--skip-download",
+            "--get-url",
+            "-f", "bestaudio/best",
             f"{prefix}:{q}",
         ]
         if cookie_browser:
@@ -225,10 +267,11 @@ def resolve_music_source(query: str) -> str:
         try:
             out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=20)
             lines = out.decode("utf-8", errors="replace").strip().splitlines()
-            if lines and lines[0].strip():
+            url = next((l.strip() for l in lines if l.strip().startswith("http")), None)
+            if url:
                 log.info("Music resolve success provider=%s query=%.80s", provider, q)
-                return f"ytdlp://{prefix}:{q}"
-            errors.append(f"{provider}: empty")
+                return url
+            errors.append(f"{provider}: no url")
         except FileNotFoundError:
             raise RuntimeError("yt-dlp not installed, cannot resolve music query")
         except subprocess.TimeoutExpired:
@@ -1355,7 +1398,8 @@ async def stream_tts_pcm(ws, text: str, voice: str, rate: str, cancel_event: asy
     await asyncio.gather(feed_task, read_task, return_exceptions=True)
 
     ffmpeg.terminate()
-    ffmpeg.wait()
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, ffmpeg.wait, 2)
 
     if not cancel_event.is_set():
         try:
@@ -1590,7 +1634,7 @@ async def stream_music_pcm(ws, source: str, cancel_event: asyncio.Event):
             except Exception:
                 pass
             try:
-                ytdlp.wait(timeout=2)
+                await loop.run_in_executor(None, ytdlp.wait, 2)
             except Exception:
                 pass
         try:
@@ -1598,7 +1642,7 @@ async def stream_music_pcm(ws, source: str, cancel_event: asyncio.Event):
         except Exception:
             pass
         try:
-            ffmpeg.wait(timeout=2)
+            await loop.run_in_executor(None, ffmpeg.wait, 2)
         except Exception:
             pass
 
@@ -1788,6 +1832,9 @@ async def health_handler(path, request_headers):
 
 async def run_server(host: str, port: int):
     """Start the WebSocket server."""
+    music_dir = os.environ.get("MIMI_MUSIC_DIR", "").strip()
+    if music_dir and os.path.isdir(music_dir):
+        build_music_index(music_dir)
     log.info("Starting voice gateway on ws://%s:%d", host, port)
     async with websockets.serve(
         handle_client, host, port,
