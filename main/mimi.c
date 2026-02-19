@@ -197,6 +197,7 @@ void app_main(void)
 {
     /* Silence noisy components */
     esp_log_level_set("esp-x509-crt-bundle", ESP_LOG_WARN);
+    esp_log_level_set("QRCODE", ESP_LOG_WARN);
 
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "  MimiClaw - ESP32-S3 AI Agent");
@@ -207,6 +208,16 @@ void app_main(void)
              (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     ESP_LOGI(TAG, "PSRAM free:    %d bytes",
              (int)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+
+    /* Display + input */
+    ESP_ERROR_CHECK(display_init());
+    display_show_banner();
+    ESP_ERROR_CHECK(rgb_init());
+    rgb_set(255, 0, 0);
+    button_Init();
+    config_screen_init();
+    imu_manager_init();
+    imu_manager_set_shake_callback(config_screen_toggle);
 
     /* Phase 1: Core infrastructure */
     ESP_ERROR_CHECK(init_nvs());
@@ -257,6 +268,7 @@ void app_main(void)
     /* Initialize subsystems */
     ESP_ERROR_CHECK(message_bus_init());
     ESP_ERROR_CHECK(memory_store_init());
+    ESP_ERROR_CHECK(skill_loader_init());
     ESP_ERROR_CHECK(session_mgr_init());
     ESP_ERROR_CHECK(wifi_manager_init());
     ESP_ERROR_CHECK(http_proxy_init());
@@ -264,6 +276,8 @@ void app_main(void)
     ESP_ERROR_CHECK(telegram_bot_init());
     ESP_ERROR_CHECK(llm_proxy_init());
     ESP_ERROR_CHECK(tool_registry_init());
+    ESP_ERROR_CHECK(cron_service_init());
+    ESP_ERROR_CHECK(heartbeat_init());
     ESP_ERROR_CHECK(agent_loop_init());
 
     /* Start Serial CLI first (works without WiFi) */
@@ -275,6 +289,8 @@ void app_main(void)
 
     esp_err_t wifi_err = wifi_manager_start();
     if (wifi_err == ESP_OK) {
+        ESP_LOGI(TAG, "Scanning nearby APs on boot...");
+        wifi_manager_scan_and_print();
         ESP_LOGI(TAG, "Waiting for WiFi connection...");
         if (wifi_manager_wait_connected(30000) == ESP_OK) {
             ESP_LOGI(TAG, "WiFi connected: %s", wifi_manager_get_ip());
@@ -322,7 +338,15 @@ void app_main(void)
             xTaskCreatePinnedToCore(
                 outbound_dispatch_task, "outbound",
                 MIMI_OUTBOUND_STACK, NULL,
-                MIMI_OUTBOUND_PRIO, NULL, MIMI_OUTBOUND_CORE);
+                MIMI_OUTBOUND_PRIO, NULL, MIMI_OUTBOUND_CORE) == pdPASS)
+                ? ESP_OK : ESP_FAIL);
+
+            /* Start network-dependent services */
+            ESP_ERROR_CHECK(agent_loop_start());
+            ESP_ERROR_CHECK(telegram_bot_start());
+            cron_service_start();
+            heartbeat_start();
+            ESP_ERROR_CHECK(ws_server_start());
 
             display_set_status("MimiClaw Ready");
             display_set_display_status(DISPLAY_STATUS_IDLE);

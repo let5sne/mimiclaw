@@ -16,6 +16,23 @@ static int s_retry_count = 0;
 static char s_ip_str[16] = "0.0.0.0";
 static bool s_connected = false;
 
+static const char *wifi_reason_to_str(wifi_err_reason_t reason)
+{
+    switch (reason) {
+    case WIFI_REASON_AUTH_EXPIRE: return "AUTH_EXPIRE";
+    case WIFI_REASON_AUTH_FAIL: return "AUTH_FAIL";
+    case WIFI_REASON_ASSOC_EXPIRE: return "ASSOC_EXPIRE";
+    case WIFI_REASON_ASSOC_FAIL: return "ASSOC_FAIL";
+    case WIFI_REASON_HANDSHAKE_TIMEOUT: return "HANDSHAKE_TIMEOUT";
+    case WIFI_REASON_NO_AP_FOUND: return "NO_AP_FOUND";
+    case WIFI_REASON_BEACON_TIMEOUT: return "BEACON_TIMEOUT";
+    case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT: return "4WAY_HANDSHAKE_TIMEOUT";
+    case WIFI_REASON_MIC_FAILURE: return "MIC_FAILURE";
+    case WIFI_REASON_CONNECTION_FAIL: return "CONNECTION_FAIL";
+    default: return "UNKNOWN";
+    }
+}
+
 static void event_handler(void *arg, esp_event_base_t event_base,
                           int32_t event_id, void *event_data)
 {
@@ -23,6 +40,10 @@ static void event_handler(void *arg, esp_event_base_t event_base,
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         s_connected = false;
+        wifi_event_sta_disconnected_t *disc = (wifi_event_sta_disconnected_t *)event_data;
+        if (disc) {
+            ESP_LOGW(TAG, "Disconnected (reason=%d:%s)", disc->reason, wifi_reason_to_str(disc->reason));
+        }
         if (s_retry_count < MIMI_WIFI_MAX_RETRY) {
             /* Exponential backoff: 1s, 2s, 4s, 8s, ... capped at 30s */
             uint32_t delay_ms = MIMI_WIFI_RETRY_BASE_MS << s_retry_count;
@@ -147,4 +168,67 @@ esp_err_t wifi_manager_set_credentials(const char *ssid, const char *password)
 EventGroupHandle_t wifi_manager_get_event_group(void)
 {
     return s_wifi_event_group;
+}
+
+void wifi_manager_scan_and_print(void)
+{
+    wifi_scan_config_t scan_cfg = {
+        .ssid = NULL,
+        .bssid = NULL,
+        .channel = 0,
+        .show_hidden = true,
+    };
+
+    ESP_LOGI(TAG, "Scanning nearby APs...");
+
+    /* Pause auto-connect to allow scan */
+    esp_wifi_disconnect();
+    vTaskDelay(pdMS_TO_TICKS(200));
+
+    esp_err_t err = esp_wifi_scan_start(&scan_cfg, true /* block */);
+    if (err == ESP_ERR_WIFI_STATE) {
+        /* Try a quick stop/start cycle and scan again */
+        esp_wifi_stop();
+        vTaskDelay(pdMS_TO_TICKS(200));
+        esp_wifi_start();
+        vTaskDelay(pdMS_TO_TICKS(200));
+        err = esp_wifi_scan_start(&scan_cfg, true /* block */);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Scan failed: %s", esp_err_to_name(err));
+        esp_wifi_connect();
+        return;
+    }
+
+    uint16_t ap_count = 0;
+    esp_wifi_scan_get_ap_num(&ap_count);
+    if (ap_count == 0) {
+        ESP_LOGW(TAG, "No APs found");
+        esp_wifi_connect();
+        return;
+    }
+
+    wifi_ap_record_t *ap_list = calloc(ap_count, sizeof(wifi_ap_record_t));
+    if (!ap_list) {
+        ESP_LOGE(TAG, "Out of memory for AP list");
+        return;
+    }
+
+    uint16_t ap_max = ap_count;
+    if (esp_wifi_scan_get_ap_records(&ap_max, ap_list) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to get AP records");
+        free(ap_list);
+        esp_wifi_connect();
+        return;
+    }
+
+    ESP_LOGI(TAG, "Found %u APs:", ap_max);
+    for (uint16_t i = 0; i < ap_max; i++) {
+        const wifi_ap_record_t *ap = &ap_list[i];
+        ESP_LOGI(TAG, "  [%u] SSID=%s RSSI=%d CH=%d Auth=%d",
+                 i + 1, (const char *)ap->ssid, ap->rssi, ap->primary, ap->authmode);
+    }
+
+    free(ap_list);
+    esp_wifi_connect();
 }

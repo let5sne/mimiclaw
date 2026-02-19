@@ -1,10 +1,7 @@
-#include "cron_service.h"
+#include "cron/cron_service.h"
 #include "mimi_config.h"
 #include "bus/message_bus.h"
 
-#include <ctype.h>
-#include <inttypes.h>
-#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,410 +9,432 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
-#include "nvs.h"
+#include "esp_random.h"
+#include "cJSON.h"
 
 static const char *TAG = "cron";
 
-static TaskHandle_t s_task = NULL;
-static bool s_inited = false;
-static bool s_started = false;
-static cron_stats_t s_stats = {0};
-static char s_task_text[MIMI_CRON_TASK_MAX_BYTES + 1] = {0};
-static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
+#define MAX_CRON_JOBS  MIMI_CRON_MAX_JOBS
 
-static void trim_line(char *s)
+static cron_job_t s_jobs[MAX_CRON_JOBS];
+static int s_job_count = 0;
+static TaskHandle_t s_cron_task = NULL;
+
+static esp_err_t cron_save_jobs(void);
+
+static bool cron_sanitize_destination(cron_job_t *job)
 {
-    if (!s) return;
-
-    char *start = s;
-    while (*start && isspace((unsigned char)*start)) start++;
-    if (start != s) {
-        memmove(s, start, strlen(start) + 1);
+    bool changed = false;
+    if (!job) {
+        return false;
     }
 
-    size_t len = strlen(s);
-    while (len > 0 && isspace((unsigned char)s[len - 1])) {
-        s[len - 1] = '\0';
-        len--;
+    if (job->channel[0] == '\0') {
+        strncpy(job->channel, MIMI_CHAN_SYSTEM, sizeof(job->channel) - 1);
+        changed = true;
     }
+
+    if (strcmp(job->channel, MIMI_CHAN_TELEGRAM) == 0) {
+        if (job->chat_id[0] == '\0' || strcmp(job->chat_id, "cron") == 0) {
+            ESP_LOGW(TAG, "Cron job %s has invalid telegram chat_id, fallback to system:cron",
+                     job->id[0] ? job->id : "<new>");
+            strncpy(job->channel, MIMI_CHAN_SYSTEM, sizeof(job->channel) - 1);
+            strncpy(job->chat_id, "cron", sizeof(job->chat_id) - 1);
+            changed = true;
+        }
+    } else if (job->chat_id[0] == '\0') {
+        strncpy(job->chat_id, "cron", sizeof(job->chat_id) - 1);
+        changed = true;
+    }
+
+    return changed;
 }
 
-static bool is_valid_interval(uint32_t interval_min)
+/* ── Persistence ──────────────────────────────────────────────── */
+
+static void cron_generate_id(char *id_buf)
 {
-    return interval_min >= MIMI_CRON_MIN_INTERVAL_MIN &&
-           interval_min <= MIMI_CRON_MAX_INTERVAL_MIN;
+    uint32_t r = esp_random();
+    snprintf(id_buf, 9, "%08x", (unsigned int)r);
 }
 
-static void append_line(char *out, size_t out_size, const char *line)
+static esp_err_t cron_load_jobs(void)
 {
-    if (!out || !line || out_size < 2) return;
-
-    size_t used = strlen(out);
-    size_t line_len = strlen(line);
-    if (line_len == 0) return;
-
-    if (used + line_len + 2 >= out_size) return;
-    memcpy(out + used, line, line_len);
-    used += line_len;
-    out[used++] = '\n';
-    out[used] = '\0';
-}
-
-static esp_err_t parse_cron_file(uint32_t *out_interval_min, char *out_task, size_t out_task_size)
-{
-    if (!out_interval_min || !out_task || out_task_size < 2) return ESP_ERR_INVALID_ARG;
-
     FILE *f = fopen(MIMI_CRON_FILE, "r");
-    if (!f) return ESP_ERR_NOT_FOUND;
+    if (!f) {
+        ESP_LOGI(TAG, "No cron file found, starting fresh");
+        s_job_count = 0;
+        return ESP_OK;
+    }
 
-    char *raw = calloc(1, MIMI_CRON_FILE_MAX_BYTES + 1);
-    char *task = calloc(1, MIMI_CRON_TASK_MAX_BYTES + 1);
-    if (!raw || !task) {
-        free(raw);
-        free(task);
+    /* Read entire file */
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    if (fsize <= 0 || fsize > 8192) {
+        ESP_LOGW(TAG, "Cron file invalid size: %ld", fsize);
+        fclose(f);
+        s_job_count = 0;
+        return ESP_OK;
+    }
+
+    char *buf = malloc(fsize + 1);
+    if (!buf) {
         fclose(f);
         return ESP_ERR_NO_MEM;
     }
 
-    size_t n = fread(raw, 1, MIMI_CRON_FILE_MAX_BYTES, f);
+    size_t n = fread(buf, 1, fsize, f);
+    buf[n] = '\0';
     fclose(f);
-    raw[n] = '\0';
 
-    if (n == 0) {
-        free(raw);
-        free(task);
-        return ESP_ERR_INVALID_SIZE;
+    /* Parse JSON */
+    cJSON *root = cJSON_Parse(buf);
+    free(buf);
+
+    if (!root) {
+        ESP_LOGW(TAG, "Failed to parse cron JSON");
+        s_job_count = 0;
+        return ESP_OK;
     }
 
-    uint32_t interval = MIMI_CRON_DEFAULT_INTERVAL_MIN;
-
-    char *saveptr = NULL;
-    char *line = strtok_r(raw, "\n", &saveptr);
-    while (line) {
-        trim_line(line);
-        if (line[0] == '\0' || line[0] == '#') {
-            line = strtok_r(NULL, "\n", &saveptr);
-            continue;
-        }
-
-        const char *k_interval = "every_minutes:";
-        const char *k_task = "task:";
-        if (strncmp(line, k_interval, strlen(k_interval)) == 0) {
-            const char *v = line + strlen(k_interval);
-            while (*v && isspace((unsigned char)*v)) v++;
-            int parsed = atoi(v);
-            if (parsed > 0) interval = (uint32_t)parsed;
-            line = strtok_r(NULL, "\n", &saveptr);
-            continue;
-        }
-
-        if (strncmp(line, k_task, strlen(k_task)) == 0) {
-            const char *v = line + strlen(k_task);
-            while (*v && isspace((unsigned char)*v)) v++;
-            append_line(task, sizeof(task), v);
-            line = strtok_r(NULL, "\n", &saveptr);
-            continue;
-        }
-
-        append_line(task, sizeof(task), line);
-        line = strtok_r(NULL, "\n", &saveptr);
+    cJSON *jobs_arr = cJSON_GetObjectItem(root, "jobs");
+    if (!jobs_arr || !cJSON_IsArray(jobs_arr)) {
+        cJSON_Delete(root);
+        s_job_count = 0;
+        return ESP_OK;
     }
 
-    trim_line(task);
-    if (!is_valid_interval(interval) || task[0] == '\0') {
-        free(raw);
-        free(task);
-        return ESP_ERR_INVALID_SIZE;
+    s_job_count = 0;
+    bool repaired = false;
+    cJSON *item;
+    cJSON_ArrayForEach(item, jobs_arr) {
+        if (s_job_count >= MAX_CRON_JOBS) break;
+
+        cron_job_t *job = &s_jobs[s_job_count];
+        memset(job, 0, sizeof(cron_job_t));
+
+        const char *id = cJSON_GetStringValue(cJSON_GetObjectItem(item, "id"));
+        const char *name = cJSON_GetStringValue(cJSON_GetObjectItem(item, "name"));
+        const char *kind_str = cJSON_GetStringValue(cJSON_GetObjectItem(item, "kind"));
+        const char *message = cJSON_GetStringValue(cJSON_GetObjectItem(item, "message"));
+        const char *channel = cJSON_GetStringValue(cJSON_GetObjectItem(item, "channel"));
+        const char *chat_id = cJSON_GetStringValue(cJSON_GetObjectItem(item, "chat_id"));
+
+        if (!id || !name || !kind_str || !message) continue;
+
+        strncpy(job->id, id, sizeof(job->id) - 1);
+        strncpy(job->name, name, sizeof(job->name) - 1);
+        strncpy(job->message, message, sizeof(job->message) - 1);
+        strncpy(job->channel, channel ? channel : MIMI_CHAN_SYSTEM,
+                sizeof(job->channel) - 1);
+        strncpy(job->chat_id, chat_id ? chat_id : "cron",
+                sizeof(job->chat_id) - 1);
+        if (cron_sanitize_destination(job)) {
+            repaired = true;
+        }
+
+        cJSON *enabled_j = cJSON_GetObjectItem(item, "enabled");
+        job->enabled = enabled_j ? cJSON_IsTrue(enabled_j) : true;
+
+        cJSON *delete_j = cJSON_GetObjectItem(item, "delete_after_run");
+        job->delete_after_run = delete_j ? cJSON_IsTrue(delete_j) : false;
+
+        if (strcmp(kind_str, "every") == 0) {
+            job->kind = CRON_KIND_EVERY;
+            cJSON *interval = cJSON_GetObjectItem(item, "interval_s");
+            job->interval_s = (interval && cJSON_IsNumber(interval))
+                              ? (uint32_t)interval->valuedouble : 0;
+        } else if (strcmp(kind_str, "at") == 0) {
+            job->kind = CRON_KIND_AT;
+            cJSON *at_epoch = cJSON_GetObjectItem(item, "at_epoch");
+            job->at_epoch = (at_epoch && cJSON_IsNumber(at_epoch))
+                            ? (int64_t)at_epoch->valuedouble : 0;
+        } else {
+            continue; /* Unknown kind, skip */
+        }
+
+        cJSON *last_run = cJSON_GetObjectItem(item, "last_run");
+        job->last_run = (last_run && cJSON_IsNumber(last_run))
+                        ? (int64_t)last_run->valuedouble : 0;
+
+        cJSON *next_run = cJSON_GetObjectItem(item, "next_run");
+        job->next_run = (next_run && cJSON_IsNumber(next_run))
+                        ? (int64_t)next_run->valuedouble : 0;
+
+        s_job_count++;
     }
 
-    *out_interval_min = interval;
-    strncpy(out_task, task, out_task_size - 1);
-    out_task[out_task_size - 1] = '\0';
-    free(raw);
-    free(task);
+    cJSON_Delete(root);
+    if (repaired) {
+        cron_save_jobs();
+    }
+    ESP_LOGI(TAG, "Loaded %d cron jobs", s_job_count);
     return ESP_OK;
 }
 
-static esp_err_t load_config_from_nvs(uint32_t *out_interval_min, char *out_task, size_t out_task_size)
+static esp_err_t cron_save_jobs(void)
 {
-    if (!out_interval_min || !out_task || out_task_size < 2) return ESP_ERR_INVALID_ARG;
+    cJSON *root = cJSON_CreateObject();
+    cJSON *jobs_arr = cJSON_CreateArray();
 
-    nvs_handle_t nvs;
-    if (nvs_open(MIMI_NVS_CRON, NVS_READONLY, &nvs) != ESP_OK) {
-        return ESP_ERR_NOT_FOUND;
-    }
+    for (int i = 0; i < s_job_count; i++) {
+        cron_job_t *job = &s_jobs[i];
+        cJSON *item = cJSON_CreateObject();
 
-    uint32_t interval = 0;
-    esp_err_t err_interval = nvs_get_u32(nvs, MIMI_NVS_KEY_CRON_INTERVAL, &interval);
+        cJSON_AddStringToObject(item, "id", job->id);
+        cJSON_AddStringToObject(item, "name", job->name);
+        cJSON_AddBoolToObject(item, "enabled", job->enabled);
+        cJSON_AddStringToObject(item, "kind",
+            job->kind == CRON_KIND_EVERY ? "every" : "at");
 
-    size_t len = out_task_size;
-    out_task[0] = '\0';
-    esp_err_t err_task = nvs_get_str(nvs, MIMI_NVS_KEY_CRON_TASK, out_task, &len);
-    nvs_close(nvs);
-
-    if (err_interval != ESP_OK || err_task != ESP_OK || !is_valid_interval(interval) || out_task[0] == '\0') {
-        return ESP_ERR_NOT_FOUND;
-    }
-
-    *out_interval_min = interval;
-    return ESP_OK;
-}
-
-static esp_err_t persist_config_to_nvs(uint32_t interval_min, const char *task)
-{
-    nvs_handle_t nvs;
-    esp_err_t err = nvs_open(MIMI_NVS_CRON, NVS_READWRITE, &nvs);
-    if (err != ESP_OK) return err;
-
-    err = nvs_set_u32(nvs, MIMI_NVS_KEY_CRON_INTERVAL, interval_min);
-    if (err == ESP_OK) err = nvs_set_str(nvs, MIMI_NVS_KEY_CRON_TASK, task);
-    if (err == ESP_OK) err = nvs_commit(nvs);
-    nvs_close(nvs);
-    return err;
-}
-
-static esp_err_t clear_config_from_nvs(void)
-{
-    nvs_handle_t nvs;
-    esp_err_t err = nvs_open(MIMI_NVS_CRON, NVS_READWRITE, &nvs);
-    if (err != ESP_OK) return err;
-
-    nvs_erase_key(nvs, MIMI_NVS_KEY_CRON_INTERVAL);
-    nvs_erase_key(nvs, MIMI_NVS_KEY_CRON_TASK);
-    err = nvs_commit(nvs);
-    nvs_close(nvs);
-    return err;
-}
-
-static void copy_state(bool *enabled, uint32_t *interval_min, char *task, size_t task_size)
-{
-    if (!enabled || !interval_min || !task || task_size < 2) return;
-
-    portENTER_CRITICAL(&s_lock);
-    *enabled = s_stats.enabled;
-    *interval_min = s_stats.interval_min;
-    strncpy(task, s_task_text, task_size - 1);
-    task[task_size - 1] = '\0';
-    portEXIT_CRITICAL(&s_lock);
-}
-
-static void set_state(bool enabled, uint32_t interval_min, const char *task)
-{
-    portENTER_CRITICAL(&s_lock);
-    s_stats.enabled = enabled;
-    s_stats.interval_min = interval_min;
-    if (task) {
-        strncpy(s_task_text, task, sizeof(s_task_text) - 1);
-        s_task_text[sizeof(s_task_text) - 1] = '\0';
-    } else {
-        s_task_text[0] = '\0';
-    }
-    portEXIT_CRITICAL(&s_lock);
-}
-
-static void run_once(const char *reason, uint32_t interval_min, const char *task)
-{
-    if (!task || task[0] == '\0' || !is_valid_interval(interval_min)) {
-        portENTER_CRITICAL(&s_lock);
-        s_stats.skipped_not_configured++;
-        portEXIT_CRITICAL(&s_lock);
-        return;
-    }
-
-    uint32_t now_unix = (uint32_t)time(NULL);
-    char time_buf[32] = {0};
-    time_t now_t = (time_t)now_unix;
-    struct tm tm_info;
-    if (localtime_r(&now_t, &tm_info)) {
-        strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", &tm_info);
-    } else {
-        snprintf(time_buf, sizeof(time_buf), "%" PRIu32, now_unix);
-    }
-
-    size_t payload_cap = strlen(task) + 224;
-    char *payload = calloc(1, payload_cap);
-    if (!payload) {
-        portENTER_CRITICAL(&s_lock);
-        s_stats.enqueue_failures++;
-        portEXIT_CRITICAL(&s_lock);
-        ESP_LOGE(TAG, "No memory for cron payload");
-        return;
-    }
-
-    snprintf(payload, payload_cap,
-             "Cron trigger (%s) at %s, interval=%" PRIu32 " min.\n"
-             "Execute the scheduled task below:\n%s",
-             reason ? reason : "interval", time_buf, interval_min, task);
-
-    mimi_msg_t msg = {0};
-    strncpy(msg.channel, MIMI_CHAN_SYSTEM, sizeof(msg.channel) - 1);
-    strncpy(msg.chat_id, "cron", sizeof(msg.chat_id) - 1);
-    strncpy(msg.media_type, "system", sizeof(msg.media_type) - 1);
-    msg.content = payload;
-
-    esp_err_t push_err = message_bus_push_inbound(&msg);
-
-    portENTER_CRITICAL(&s_lock);
-    s_stats.total_runs++;
-    s_stats.last_run_unix = now_unix;
-    if (push_err == ESP_OK) {
-        s_stats.triggered_runs++;
-        s_stats.enqueue_success++;
-    } else {
-        s_stats.enqueue_failures++;
-    }
-    portEXIT_CRITICAL(&s_lock);
-
-    if (push_err == ESP_OK) {
-        ESP_LOGI(TAG, "Cron triggered (%s), interval=%" PRIu32 " min, payload=%d bytes",
-                 reason ? reason : "interval", interval_min, (int)strlen(payload));
-    } else {
-        ESP_LOGW(TAG, "Cron enqueue failed: %s", esp_err_to_name(push_err));
-        free(payload);
-    }
-}
-
-static void cron_task(void *arg)
-{
-    ESP_LOGI(TAG, "Cron task started, fallback file=%s", MIMI_CRON_FILE);
-
-    while (1) {
-        bool enabled = false;
-        uint32_t interval_min = 0;
-        char task[MIMI_CRON_TASK_MAX_BYTES + 1] = {0};
-        copy_state(&enabled, &interval_min, task, sizeof(task));
-
-        uint32_t wait_sec = MIMI_CRON_DISABLED_POLL_S;
-        if (enabled && is_valid_interval(interval_min)) {
-            wait_sec = interval_min * 60;
+        if (job->kind == CRON_KIND_EVERY) {
+            cJSON_AddNumberToObject(item, "interval_s", job->interval_s);
+        } else {
+            cJSON_AddNumberToObject(item, "at_epoch", (double)job->at_epoch);
         }
 
-        uint32_t notified = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(wait_sec * 1000));
-        if (notified > 0) {
-            copy_state(&enabled, &interval_min, task, sizeof(task));
-            run_once("manual", interval_min, task);
-        } else if (enabled) {
-            run_once("interval", interval_min, task);
-        }
+        cJSON_AddStringToObject(item, "message", job->message);
+        cJSON_AddStringToObject(item, "channel", job->channel);
+        cJSON_AddStringToObject(item, "chat_id", job->chat_id);
+        cJSON_AddNumberToObject(item, "last_run", (double)job->last_run);
+        cJSON_AddNumberToObject(item, "next_run", (double)job->next_run);
+        cJSON_AddBoolToObject(item, "delete_after_run", job->delete_after_run);
+
+        cJSON_AddItemToArray(jobs_arr, item);
     }
-}
 
-esp_err_t cron_service_init(void)
-{
-    if (s_inited) return ESP_OK;
+    cJSON_AddItemToObject(root, "jobs", jobs_arr);
 
-    memset(&s_stats, 0, sizeof(s_stats));
-    s_task_text[0] = '\0';
+    char *json_str = cJSON_Print(root);
+    cJSON_Delete(root);
 
-    char *task = calloc(1, MIMI_CRON_TASK_MAX_BYTES + 1);
-    if (!task) {
+    if (!json_str) {
+        ESP_LOGE(TAG, "Failed to serialize cron jobs");
         return ESP_ERR_NO_MEM;
     }
 
-    uint32_t interval_min = 0;
-    esp_err_t err = load_config_from_nvs(&interval_min, task, MIMI_CRON_TASK_MAX_BYTES + 1);
-    if (err == ESP_OK) {
-        set_state(true, interval_min, task);
-        ESP_LOGI(TAG, "Cron loaded from NVS: every %" PRIu32 " min", interval_min);
-    } else if (parse_cron_file(&interval_min, task, MIMI_CRON_TASK_MAX_BYTES + 1) == ESP_OK) {
-        set_state(true, interval_min, task);
-        ESP_LOGI(TAG, "Cron loaded from file: every %" PRIu32 " min", interval_min);
-    } else {
-        set_state(false, 0, NULL);
-        ESP_LOGI(TAG, "Cron disabled (no valid config)");
+    FILE *f = fopen(MIMI_CRON_FILE, "w");
+    if (!f) {
+        ESP_LOGE(TAG, "Failed to open %s for writing", MIMI_CRON_FILE);
+        free(json_str);
+        return ESP_FAIL;
     }
 
-    free(task);
-    s_inited = true;
+    size_t len = strlen(json_str);
+    size_t written = fwrite(json_str, 1, len, f);
+    fclose(f);
+    free(json_str);
+
+    if (written != len) {
+        ESP_LOGE(TAG, "Cron save incomplete: %d/%d bytes", (int)written, (int)len);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Saved %d cron jobs to %s", s_job_count, MIMI_CRON_FILE);
     return ESP_OK;
+}
+
+/* ── Due-job processing ───────────────────────────────────────── */
+
+static void cron_process_due_jobs(void)
+{
+    time_t now = time(NULL);
+
+    bool changed = false;
+
+    for (int i = 0; i < s_job_count; i++) {
+        cron_job_t *job = &s_jobs[i];
+        if (!job->enabled) continue;
+        if (job->next_run <= 0) continue;
+        if (job->next_run > now) continue;
+
+        /* Job is due — fire it */
+        ESP_LOGI(TAG, "Cron job firing: %s (%s)", job->name, job->id);
+
+        /* Push message to inbound queue */
+        mimi_msg_t msg;
+        memset(&msg, 0, sizeof(msg));
+        strncpy(msg.channel, job->channel, sizeof(msg.channel) - 1);
+        strncpy(msg.chat_id, job->chat_id, sizeof(msg.chat_id) - 1);
+        msg.content = strdup(job->message);
+
+        if (msg.content) {
+            esp_err_t err = message_bus_push_inbound(&msg);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "Failed to push cron message: %s", esp_err_to_name(err));
+                free(msg.content);
+            }
+        }
+
+        /* Update state */
+        job->last_run = now;
+
+        if (job->kind == CRON_KIND_AT) {
+            /* One-shot: disable or delete */
+            if (job->delete_after_run) {
+                /* Remove by shifting array */
+                ESP_LOGI(TAG, "Deleting one-shot job: %s", job->name);
+                for (int j = i; j < s_job_count - 1; j++) {
+                    s_jobs[j] = s_jobs[j + 1];
+                }
+                s_job_count--;
+                i--; /* Re-check this index */
+            } else {
+                job->enabled = false;
+                job->next_run = 0;
+            }
+        } else {
+            /* Recurring: compute next run */
+            job->next_run = now + job->interval_s;
+        }
+
+        changed = true;
+    }
+
+    if (changed) {
+        cron_save_jobs();
+    }
+}
+
+static void cron_task_main(void *arg)
+{
+    (void)arg;
+
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(MIMI_CRON_CHECK_INTERVAL_MS));
+        cron_process_due_jobs();
+    }
+}
+
+/* ── Compute initial next_run for a new job ───────────────────── */
+
+static void compute_initial_next_run(cron_job_t *job)
+{
+    time_t now = time(NULL);
+
+    if (job->kind == CRON_KIND_EVERY) {
+        job->next_run = now + job->interval_s;
+    } else if (job->kind == CRON_KIND_AT) {
+        if (job->at_epoch > now) {
+            job->next_run = job->at_epoch;
+        } else {
+            /* Already in the past */
+            job->next_run = 0;
+            job->enabled = false;
+        }
+    }
+}
+
+/* ── Public API ───────────────────────────────────────────────── */
+
+esp_err_t cron_service_init(void)
+{
+    return cron_load_jobs();
 }
 
 esp_err_t cron_service_start(void)
 {
-    if (!s_inited) return ESP_ERR_INVALID_STATE;
-    if (s_started) return ESP_OK;
-
-    BaseType_t ret = xTaskCreatePinnedToCore(
-        cron_task, "cron",
-        MIMI_CRON_STACK, NULL, MIMI_CRON_PRIO, &s_task, MIMI_AGENT_CORE);
-    if (ret != pdPASS) return ESP_FAIL;
-
-    s_started = true;
-    return ESP_OK;
-}
-
-esp_err_t cron_service_trigger_now(void)
-{
-    if (!s_started || !s_task) return ESP_ERR_INVALID_STATE;
-
-    bool enabled = false;
-    uint32_t interval_min = 0;
-    char task[MIMI_CRON_TASK_MAX_BYTES + 1] = {0};
-    copy_state(&enabled, &interval_min, task, sizeof(task));
-    if (!enabled || !is_valid_interval(interval_min) || task[0] == '\0') {
-        return ESP_ERR_INVALID_STATE;
+    if (s_cron_task) {
+        ESP_LOGW(TAG, "Cron task already running");
+        return ESP_OK;
     }
 
-    xTaskNotifyGive(s_task);
-    return ESP_OK;
-}
-
-esp_err_t cron_service_set_schedule(uint32_t interval_min, const char *task)
-{
-    if (!task) return ESP_ERR_INVALID_ARG;
-    if (!is_valid_interval(interval_min)) return ESP_ERR_INVALID_ARG;
-
-    char task_copy[MIMI_CRON_TASK_MAX_BYTES + 1];
-    strncpy(task_copy, task, sizeof(task_copy) - 1);
-    task_copy[sizeof(task_copy) - 1] = '\0';
-    trim_line(task_copy);
-    if (task_copy[0] == '\0') return ESP_ERR_INVALID_ARG;
-
-    esp_err_t err = persist_config_to_nvs(interval_min, task_copy);
-    if (err != ESP_OK) return err;
-
-    set_state(true, interval_min, task_copy);
-    ESP_LOGI(TAG, "Cron schedule set: every %" PRIu32 " min", interval_min);
-
-    if (s_started && s_task) {
-        xTaskNotifyGive(s_task);
+    /* Recompute next_run for all enabled jobs that don't have one */
+    time_t now = time(NULL);
+    for (int i = 0; i < s_job_count; i++) {
+        cron_job_t *job = &s_jobs[i];
+        if (job->enabled && job->next_run <= 0) {
+            if (job->kind == CRON_KIND_EVERY) {
+                job->next_run = now + job->interval_s;
+            } else if (job->kind == CRON_KIND_AT && job->at_epoch > now) {
+                job->next_run = job->at_epoch;
+            }
+        }
     }
-    return ESP_OK;
-}
 
-esp_err_t cron_service_clear_schedule(void)
-{
-    esp_err_t err = clear_config_from_nvs();
-    if (err != ESP_OK) return err;
-
-    set_state(false, 0, NULL);
-    ESP_LOGI(TAG, "Cron schedule cleared");
-
-    if (s_started && s_task) {
-        xTaskNotifyGive(s_task);
+    BaseType_t ok = xTaskCreate(
+        cron_task_main,
+        "cron",
+        4096,
+        NULL,
+        4,
+        &s_cron_task
+    );
+    if (ok != pdPASS || !s_cron_task) {
+        ESP_LOGE(TAG, "Failed to create cron task");
+        return ESP_FAIL;
     }
+
+    ESP_LOGI(TAG, "Cron service started (%d jobs, check every %ds)",
+             s_job_count, MIMI_CRON_CHECK_INTERVAL_MS / 1000);
     return ESP_OK;
 }
 
-esp_err_t cron_service_get_stats(cron_stats_t *out_stats)
+void cron_service_stop(void)
 {
-    if (!out_stats) return ESP_ERR_INVALID_ARG;
-    if (!s_inited) return ESP_ERR_INVALID_STATE;
+    if (s_cron_task) {
+        vTaskDelete(s_cron_task);
+        s_cron_task = NULL;
+        ESP_LOGI(TAG, "Cron service stopped");
+    }
+}
 
-    portENTER_CRITICAL(&s_lock);
-    *out_stats = s_stats;
-    portEXIT_CRITICAL(&s_lock);
+esp_err_t cron_add_job(cron_job_t *job)
+{
+    if (s_job_count >= MAX_CRON_JOBS) {
+        ESP_LOGW(TAG, "Max cron jobs reached (%d)", MAX_CRON_JOBS);
+        return ESP_ERR_NO_MEM;
+    }
+
+    /* Generate ID */
+    cron_generate_id(job->id);
+
+    /* Validate/sanitize channel and chat_id before storing. */
+    cron_sanitize_destination(job);
+
+    /* Compute initial next_run */
+    job->enabled = true;
+    job->last_run = 0;
+    compute_initial_next_run(job);
+
+    /* Copy into static array */
+    s_jobs[s_job_count] = *job;
+    s_job_count++;
+
+    cron_save_jobs();
+
+    ESP_LOGI(TAG, "Added cron job: %s (%s) kind=%s next_run=%lld",
+             job->name, job->id,
+             job->kind == CRON_KIND_EVERY ? "every" : "at",
+             (long long)job->next_run);
     return ESP_OK;
 }
 
-esp_err_t cron_service_get_task(char *out_task, size_t out_size)
+esp_err_t cron_remove_job(const char *job_id)
 {
-    if (!out_task || out_size < 2) return ESP_ERR_INVALID_ARG;
-    if (!s_inited) return ESP_ERR_INVALID_STATE;
+    for (int i = 0; i < s_job_count; i++) {
+        if (strcmp(s_jobs[i].id, job_id) == 0) {
+            ESP_LOGI(TAG, "Removing cron job: %s (%s)", s_jobs[i].name, job_id);
 
-    portENTER_CRITICAL(&s_lock);
-    strncpy(out_task, s_task_text, out_size - 1);
-    out_task[out_size - 1] = '\0';
-    portEXIT_CRITICAL(&s_lock);
-    return ESP_OK;
+            /* Shift remaining jobs down */
+            for (int j = i; j < s_job_count - 1; j++) {
+                s_jobs[j] = s_jobs[j + 1];
+            }
+            s_job_count--;
+
+            cron_save_jobs();
+            return ESP_OK;
+        }
+    }
+
+    ESP_LOGW(TAG, "Cron job not found: %s", job_id);
+    return ESP_ERR_NOT_FOUND;
+}
+
+void cron_list_jobs(const cron_job_t **jobs, int *count)
+{
+    *jobs = s_jobs;
+    *count = s_job_count;
 }

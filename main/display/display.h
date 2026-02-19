@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include "esp_err.h"
 
 #ifdef __cplusplus
@@ -48,55 +49,28 @@ typedef enum {
     DISPLAY_STATUS_ERROR,
 } display_status_t;
 
-/**
- * Initialize display with given configuration
- */
+#define DISPLAY_WIDTH 320
+#define DISPLAY_HEIGHT 172
+
 esp_err_t display_init(const display_config_t *config);
-
-/**
- * Deinitialize display
- */
 void display_deinit(void);
-
-/**
- * Clear display
- */
 void display_clear(void);
-
-/**
- * Update display (flush buffer to screen)
- */
 void display_update(void);
-
-/**
- * Set status text (top line)
- */
 void display_set_status(const char *status);
-
-/**
- * Show notification (temporary message)
- */
 void display_show_notification(const char *text, int duration_ms);
-
-/**
- * Display a message (role: "user" or "assistant")
- */
 void display_show_message(const char *role, const char *content);
-
-/**
- * Set display status (changes icon/indicator)
- */
 void display_set_display_status(display_status_t status);
-
-/**
- * Set brightness (0-100)
- */
 void display_set_brightness(uint8_t brightness);
-
-/**
- * Turn display on/off
- */
 void display_set_power(bool on);
+void display_show_banner(void);
+void display_set_backlight_percent(uint8_t percent);
+uint8_t display_get_backlight_percent(void);
+void display_cycle_backlight(void);
+bool display_get_banner_center_rgb(uint8_t *r, uint8_t *g, uint8_t *b);
+void display_show_config_screen(const char *qr_text, const char *ip_text,
+                                const char **lines, size_t line_count, size_t scroll,
+                                size_t selected, int selected_offset_px);
+void display_show_message_card(const char *title, const char *body);
 
 #ifdef __cplusplus
 }

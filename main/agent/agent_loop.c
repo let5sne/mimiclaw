@@ -17,7 +17,6 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
-#include "esp_random.h"
 #include "cJSON.h"
 
 static const char *TAG = "agent";
@@ -185,6 +184,89 @@ static cJSON *build_assistant_content(const llm_response_t *resp)
     }
 
     return content;
+}
+
+static void json_set_string(cJSON *obj, const char *key, const char *value)
+{
+    if (!obj || !key || !value) {
+        return;
+    }
+    cJSON_DeleteItemFromObject(obj, key);
+    cJSON_AddStringToObject(obj, key, value);
+}
+
+static void append_turn_context_prompt(char *prompt, size_t size, const mimi_msg_t *msg)
+{
+    if (!prompt || size == 0 || !msg) {
+        return;
+    }
+
+    size_t off = strnlen(prompt, size - 1);
+    if (off >= size - 1) {
+        return;
+    }
+
+    int n = snprintf(
+        prompt + off, size - off,
+        "\n## Current Turn Context\n"
+        "- source_channel: %s\n"
+        "- source_chat_id: %s\n"
+        "- If using cron_add for Telegram in this turn, set channel='telegram' and chat_id to source_chat_id.\n"
+        "- Never use chat_id 'cron' for Telegram messages.\n",
+        msg->channel[0] ? msg->channel : "(unknown)",
+        msg->chat_id[0] ? msg->chat_id : "(empty)");
+
+    if (n < 0 || (size_t)n >= (size - off)) {
+        prompt[size - 1] = '\0';
+    }
+}
+
+static char *patch_tool_input_with_context(const llm_tool_call_t *call, const mimi_msg_t *msg)
+{
+    if (!call || !msg || strcmp(call->name, "cron_add") != 0) {
+        return NULL;
+    }
+
+    cJSON *root = cJSON_Parse(call->input ? call->input : "{}");
+    if (!root || !cJSON_IsObject(root)) {
+        cJSON_Delete(root);
+        root = cJSON_CreateObject();
+    }
+    if (!root) {
+        return NULL;
+    }
+
+    bool changed = false;
+
+    cJSON *channel_item = cJSON_GetObjectItem(root, "channel");
+    const char *channel = cJSON_IsString(channel_item) ? channel_item->valuestring : NULL;
+
+    if ((!channel || channel[0] == '\0') && msg->channel[0] != '\0') {
+        json_set_string(root, "channel", msg->channel);
+        channel = msg->channel;
+        changed = true;
+    }
+
+    if (channel && strcmp(channel, MIMI_CHAN_TELEGRAM) == 0 &&
+        strcmp(msg->channel, MIMI_CHAN_TELEGRAM) == 0 && msg->chat_id[0] != '\0') {
+        cJSON *chat_item = cJSON_GetObjectItem(root, "chat_id");
+        const char *chat_id = cJSON_IsString(chat_item) ? chat_item->valuestring : NULL;
+        if (!chat_id || chat_id[0] == '\0' || strcmp(chat_id, "cron") == 0) {
+            json_set_string(root, "chat_id", msg->chat_id);
+            changed = true;
+        }
+    }
+
+    char *patched = NULL;
+    if (changed) {
+        patched = cJSON_PrintUnformatted(root);
+        if (patched) {
+            ESP_LOGI(TAG, "Patched cron_add target to %s:%s", msg->channel, msg->chat_id);
+        }
+    }
+
+    cJSON_Delete(root);
+    return patched;
 }
 
 /* Build the user message with tool_result blocks */
@@ -695,6 +777,11 @@ static cJSON *build_tool_results(const llm_response_t *resp, char *tool_output,
 
     for (int i = 0; i < resp->call_count; i++) {
         const llm_tool_call_t *call = &resp->calls[i];
+        const char *tool_input = call->input ? call->input : "{}";
+        char *patched_input = patch_tool_input_with_context(call, msg);
+        if (patched_input) {
+            tool_input = patched_input;
+        }
 
         if (exhausted) {
             snprintf(tool_output, tool_output_size, "%s", TOOL_BUDGET_EXCEEDED_MSG);
@@ -840,6 +927,8 @@ static void agent_loop_task(void *arg)
 
         /* 1. Build system prompt */
         context_build_system_prompt(system_prompt, MIMI_CONTEXT_BUF_SIZE);
+        append_turn_context_prompt(system_prompt, MIMI_CONTEXT_BUF_SIZE, &msg);
+        ESP_LOGI(TAG, "LLM turn context: channel=%s chat_id=%s", msg.channel, msg.chat_id);
 
         /* 2. Load session history into cJSON array */
         session_get_history_json(msg.chat_id, history_json,
@@ -864,6 +953,7 @@ static void agent_loop_task(void *arg)
         /* 4. ReAct loop */
         char *final_text = NULL;
         int iteration = 0;
+        bool sent_working_status = false;
 
         while (iteration < MIMI_AGENT_MAX_TOOL_ITER) {
             size_t context_bytes = 0;
@@ -890,15 +980,8 @@ static void agent_loop_task(void *arg)
             }
 
             /* Send "working" indicator before each API call */
-            {
-                static const char *working_phrases[] = {
-                    "mimi\xF0\x9F\x98\x97is working...",
-                    "mimi\xF0\x9F\x90\xBE is thinking...",
-                    "mimi\xF0\x9F\x92\xAD is pondering...",
-                    "mimi\xF0\x9F\x8C\x99 is on it...",
-                    "mimi\xE2\x9C\xA8 is cooking...",
-                };
-                const int phrase_count = sizeof(working_phrases) / sizeof(working_phrases[0]);
+#if MIMI_AGENT_SEND_WORKING_STATUS
+            if (!sent_working_status && strcmp(msg.channel, MIMI_CHAN_SYSTEM) != 0) {
                 mimi_msg_t status = {0};
                 strncpy(status.channel, msg.channel, sizeof(status.channel) - 1);
                 strncpy(status.chat_id, msg.chat_id, sizeof(status.chat_id) - 1);
@@ -907,6 +990,7 @@ static void agent_loop_task(void *arg)
                     message_bus_msg_free(&status);
                 }
             }
+#endif
 
             display_set_display_status(DISPLAY_STATUS_THINKING);
 
@@ -1048,12 +1132,34 @@ esp_err_t agent_loop_init(void)
 
 esp_err_t agent_loop_start(void)
 {
-    BaseType_t ret = xTaskCreatePinnedToCore(
-        agent_loop_task, "agent_loop",
-        MIMI_AGENT_STACK, NULL,
-        MIMI_AGENT_PRIO, NULL, MIMI_AGENT_CORE);
+    const uint32_t stack_candidates[] = {
+        MIMI_AGENT_STACK,
+        20 * 1024,
+        16 * 1024,
+        14 * 1024,
+        12 * 1024,
+    };
 
-    return (ret == pdPASS) ? ESP_OK : ESP_FAIL;
+    for (size_t i = 0; i < (sizeof(stack_candidates) / sizeof(stack_candidates[0])); i++) {
+        uint32_t stack_size = stack_candidates[i];
+        BaseType_t ret = xTaskCreatePinnedToCore(
+            agent_loop_task, "agent_loop",
+            stack_size, NULL,
+            MIMI_AGENT_PRIO, NULL, MIMI_AGENT_CORE);
+
+        if (ret == pdPASS) {
+            ESP_LOGI(TAG, "agent_loop task created with stack=%u bytes", (unsigned)stack_size);
+            return ESP_OK;
+        }
+
+        ESP_LOGW(TAG,
+                 "agent_loop create failed (stack=%u, free_internal=%u, largest_internal=%u), retrying...",
+                 (unsigned)stack_size,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+    }
+
+    return ESP_FAIL;
 }
 
 esp_err_t agent_loop_get_stats(agent_stats_t *out_stats)

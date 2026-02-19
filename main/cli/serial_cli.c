@@ -7,6 +7,7 @@
 #include "memory/memory_store.h"
 #include "memory/session_mgr.h"
 #include "proxy/http_proxy.h"
+#include "tools/tool_registry.h"
 #include "tools/tool_web_search.h"
 #include "security/access_control.h"
 #include "heartbeat/heartbeat_service.h"
@@ -14,12 +15,15 @@
 #include "audio/audio.h"
 #include "voice/voice_channel.h"
 #include "control/control_plane.h"
+#include "skills/skill_loader.h"
 
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <inttypes.h>
 #include <math.h>
+#include <ctype.h>
+#include <dirent.h>
 #include "esp_log.h"
 #include "esp_console.h"
 #include "esp_system.h"
@@ -109,6 +113,24 @@ static int cmd_set_model(int argc, char **argv)
     }
     llm_set_model(model_args.model->sval[0]);
     printf("Model set.\n");
+    return 0;
+}
+
+/* --- set_model_provider command --- */
+static struct {
+    struct arg_str *provider;
+    struct arg_end *end;
+} provider_args;
+
+static int cmd_set_model_provider(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&provider_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, provider_args.end, argv[0]);
+        return 1;
+    }
+    llm_set_provider(provider_args.provider->sval[0]);
+    printf("Model provider set.\n");
     return 0;
 }
 
@@ -501,6 +523,179 @@ static int cmd_clear_ws_token(int argc, char **argv)
     }
 
     printf("WS token cleared (open mode).\n");
+/* --- wifi_scan command --- */
+static int cmd_wifi_scan(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    wifi_manager_scan_and_print();
+    return 0;
+}
+
+/* --- skill_list command --- */
+static int cmd_skill_list(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    char *buf = malloc(4096);
+    if (!buf) {
+        printf("Out of memory.\n");
+        return 1;
+    }
+
+    size_t n = skill_loader_build_summary(buf, 4096);
+    if (n == 0) {
+        printf("No skills found under /spiffs/skills/.\n");
+    } else {
+        printf("=== Skills ===\n%s", buf);
+    }
+    free(buf);
+    return 0;
+}
+
+/* --- skill_show command --- */
+static struct {
+    struct arg_str *name;
+    struct arg_end *end;
+} skill_show_args;
+
+static bool has_md_suffix(const char *name)
+{
+    size_t len = strlen(name);
+    return (len >= 3) && strcmp(name + len - 3, ".md") == 0;
+}
+
+static bool build_skill_path(const char *name, char *out, size_t out_size)
+{
+    if (!name || !name[0]) return false;
+    if (strstr(name, "..") != NULL) return false;
+    if (strchr(name, '/') != NULL || strchr(name, '\\') != NULL) return false;
+
+    if (has_md_suffix(name)) {
+        snprintf(out, out_size, "/spiffs/skills/%s", name);
+    } else {
+        snprintf(out, out_size, "/spiffs/skills/%s.md", name);
+    }
+    return true;
+}
+
+static int cmd_skill_show(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&skill_show_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, skill_show_args.end, argv[0]);
+        return 1;
+    }
+
+    char path[128];
+    if (!build_skill_path(skill_show_args.name->sval[0], path, sizeof(path))) {
+        printf("Invalid skill name.\n");
+        return 1;
+    }
+
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        printf("Skill not found: %s\n", path);
+        return 1;
+    }
+
+    printf("=== %s ===\n", path);
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        fputs(line, stdout);
+    }
+    fclose(f);
+    printf("\n============\n");
+    return 0;
+}
+
+/* --- skill_search command --- */
+static struct {
+    struct arg_str *keyword;
+    struct arg_end *end;
+} skill_search_args;
+
+static bool contains_nocase(const char *text, const char *keyword)
+{
+    if (!text || !keyword || !keyword[0]) return false;
+
+    size_t key_len = strlen(keyword);
+    for (const char *p = text; *p; p++) {
+        size_t i = 0;
+        while (i < key_len && p[i] &&
+               tolower((unsigned char)p[i]) == tolower((unsigned char)keyword[i])) {
+            i++;
+        }
+        if (i == key_len) return true;
+    }
+    return false;
+}
+
+static int cmd_skill_search(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&skill_search_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, skill_search_args.end, argv[0]);
+        return 1;
+    }
+
+    const char *keyword = skill_search_args.keyword->sval[0];
+    DIR *dir = opendir("/spiffs");
+    if (!dir) {
+        printf("Cannot open /spiffs.\n");
+        return 1;
+    }
+
+    const char *prefix = "skills/";
+    const size_t prefix_len = strlen(prefix);
+    int matches = 0;
+
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL) {
+        const char *name = ent->d_name;
+        size_t name_len = strlen(name);
+
+        if (strncmp(name, prefix, prefix_len) != 0) continue;
+        if (name_len < prefix_len + 4) continue;
+        if (strcmp(name + name_len - 3, ".md") != 0) continue;
+
+        char full_path[296];
+        snprintf(full_path, sizeof(full_path), "/spiffs/%s", name);
+
+        bool file_matched = contains_nocase(name, keyword);
+        int matched_line = 0;
+
+        FILE *f = fopen(full_path, "r");
+        if (!f) continue;
+
+        char line[256];
+        int line_no = 0;
+        while (!file_matched && fgets(line, sizeof(line), f)) {
+            line_no++;
+            if (contains_nocase(line, keyword)) {
+                file_matched = true;
+                matched_line = line_no;
+            }
+        }
+        fclose(f);
+
+        if (file_matched) {
+            matches++;
+            if (matched_line > 0) {
+                printf("- %s (matched at line %d)\n", full_path, matched_line);
+            } else {
+                printf("- %s (matched in filename)\n", full_path);
+            }
+        }
+    }
+
+    closedir(dir);
+    if (matches == 0) {
+        printf("No skills matched keyword: %s\n", keyword);
+    } else {
+        printf("Total matches: %d\n", matches);
+    }
     return 0;
 }
 
@@ -544,6 +739,7 @@ static int cmd_config_show(int argc, char **argv)
     print_config("TG Token",   MIMI_NVS_TG,     MIMI_NVS_KEY_TG_TOKEN, MIMI_SECRET_TG_TOKEN,   true);
     print_config("API Key",    MIMI_NVS_LLM,    MIMI_NVS_KEY_API_KEY,  MIMI_SECRET_API_KEY,    true);
     print_config("Model",      MIMI_NVS_LLM,    MIMI_NVS_KEY_MODEL,    MIMI_SECRET_MODEL,      false);
+    print_config("Provider",   MIMI_NVS_LLM,    MIMI_NVS_KEY_PROVIDER, MIMI_SECRET_MODEL_PROVIDER, false);
     print_config("Proxy Host", MIMI_NVS_PROXY,  MIMI_NVS_KEY_PROXY_HOST, MIMI_SECRET_PROXY_HOST, false);
     print_config("Proxy Port", MIMI_NVS_PROXY,  MIMI_NVS_KEY_PROXY_PORT, MIMI_SECRET_PROXY_PORT, false);
     print_config("Search Key", MIMI_NVS_SEARCH, MIMI_NVS_KEY_API_KEY,  MIMI_SECRET_SEARCH_KEY, true);
@@ -573,6 +769,54 @@ static int cmd_config_reset(int argc, char **argv)
     }
     printf("All NVS config cleared. Build-time defaults will be used on restart.\n");
     return 0;
+}
+
+/* --- heartbeat_trigger command --- */
+static int cmd_heartbeat_trigger(int argc, char **argv)
+{
+    printf("Checking HEARTBEAT.md...\n");
+    if (heartbeat_trigger()) {
+        printf("Heartbeat: agent prompted with pending tasks.\n");
+    } else {
+        printf("Heartbeat: no actionable tasks found.\n");
+    }
+    return 0;
+}
+
+/* --- cron_start command --- */
+static int cmd_cron_start(int argc, char **argv)
+{
+    esp_err_t err = cron_service_start();
+    if (err == ESP_OK) {
+        printf("Cron service started.\n");
+        return 0;
+    }
+
+    printf("Failed to start cron service: %s\n", esp_err_to_name(err));
+    return 1;
+}
+
+static int cmd_tool_exec(int argc, char **argv)
+{
+    if (argc < 2) {
+        printf("Usage: tool_exec <name> [json]\n");
+        return 1;
+    }
+
+    const char *tool_name = argv[1];
+    const char *input_json = (argc >= 3) ? argv[2] : "{}";
+
+    char *output = calloc(1, 4096);
+    if (!output) {
+        printf("Out of memory.\n");
+        return 1;
+    }
+
+    esp_err_t err = tool_registry_execute(tool_name, input_json, output, 4096);
+    printf("tool_exec status: %s\n", esp_err_to_name(err));
+    printf("%s\n", output[0] ? output : "(empty)");
+    free(output);
+    return (err == ESP_OK) ? 0 : 1;
 }
 
 /* --- restart command --- */
@@ -882,22 +1126,22 @@ esp_err_t serial_cli_init(void)
     repl_config.prompt = "mimi> ";
     repl_config.max_cmdline_length = 256;
 
-    /* USB Serial JTAG */
-    esp_console_dev_usb_serial_jtag_config_t hw_config =
-        ESP_CONSOLE_DEV_USB_SERIAL_JTAG_CONFIG_DEFAULT();
+    /* UART console (primary), USB Serial/JTAG available as secondary */
+    esp_console_dev_uart_config_t hw_config =
+        ESP_CONSOLE_DEV_UART_CONFIG_DEFAULT();
 
-    ESP_ERROR_CHECK(esp_console_new_repl_usb_serial_jtag(&hw_config, &repl_config, &repl));
+    ESP_ERROR_CHECK(esp_console_new_repl_uart(&hw_config, &repl_config, &repl));
 
     /* Register commands */
     esp_console_register_help_command();
 
-    /* wifi_set */
+    /* set_wifi */
     wifi_set_args.ssid = arg_str1(NULL, NULL, "<ssid>", "WiFi SSID");
     wifi_set_args.password = arg_str1(NULL, NULL, "<password>", "WiFi password");
     wifi_set_args.end = arg_end(2);
     esp_console_cmd_t wifi_set_cmd = {
-        .command = "wifi_set",
-        .help = "Set WiFi SSID and password",
+        .command = "set_wifi",
+        .help = "Set WiFi SSID and password (e.g. set_wifi MySSID MyPass)",
         .func = &cmd_wifi_set,
         .argtable = &wifi_set_args,
     };
@@ -911,6 +1155,14 @@ esp_err_t serial_cli_init(void)
     };
     esp_console_cmd_register(&wifi_status_cmd);
 
+    /* wifi_scan */
+    esp_console_cmd_t wifi_scan_cmd = {
+        .command = "wifi_scan",
+        .help = "Scan and list nearby WiFi APs",
+        .func = &cmd_wifi_scan,
+    };
+    esp_console_cmd_register(&wifi_scan_cmd);
+
     /* set_tg_token */
     tg_token_args.token = arg_str1(NULL, NULL, "<token>", "Telegram bot token");
     tg_token_args.end = arg_end(1);
@@ -923,11 +1175,11 @@ esp_err_t serial_cli_init(void)
     esp_console_cmd_register(&tg_token_cmd);
 
     /* set_api_key */
-    api_key_args.key = arg_str1(NULL, NULL, "<key>", "Anthropic API key");
+    api_key_args.key = arg_str1(NULL, NULL, "<key>", "LLM API key");
     api_key_args.end = arg_end(1);
     esp_console_cmd_t api_key_cmd = {
         .command = "set_api_key",
-        .help = "Set Claude API key",
+        .help = "Set LLM API key",
         .func = &cmd_set_api_key,
         .argtable = &api_key_args,
     };
@@ -943,6 +1195,47 @@ esp_err_t serial_cli_init(void)
         .argtable = &model_args,
     };
     esp_console_cmd_register(&model_cmd);
+
+    /* set_model_provider */
+    provider_args.provider = arg_str1(NULL, NULL, "<provider>", "Model provider (anthropic|openai)");
+    provider_args.end = arg_end(1);
+    esp_console_cmd_t provider_cmd = {
+        .command = "set_model_provider",
+        .help = "Set LLM model provider (default: " MIMI_LLM_PROVIDER_DEFAULT ")",
+        .func = &cmd_set_model_provider,
+        .argtable = &provider_args,
+    };
+    esp_console_cmd_register(&provider_cmd);
+
+    /* skill_list */
+    esp_console_cmd_t skill_list_cmd = {
+        .command = "skill_list",
+        .help = "List installed skills from /spiffs/skills/",
+        .func = &cmd_skill_list,
+    };
+    esp_console_cmd_register(&skill_list_cmd);
+
+    /* skill_show */
+    skill_show_args.name = arg_str1(NULL, NULL, "<name>", "Skill name (e.g. weather or weather.md)");
+    skill_show_args.end = arg_end(1);
+    esp_console_cmd_t skill_show_cmd = {
+        .command = "skill_show",
+        .help = "Print full content of one skill file",
+        .func = &cmd_skill_show,
+        .argtable = &skill_show_args,
+    };
+    esp_console_cmd_register(&skill_show_cmd);
+
+    /* skill_search */
+    skill_search_args.keyword = arg_str1(NULL, NULL, "<keyword>", "Keyword to search in skills");
+    skill_search_args.end = arg_end(1);
+    esp_console_cmd_t skill_search_cmd = {
+        .command = "skill_search",
+        .help = "Search skill files by keyword (filename + content)",
+        .func = &cmd_skill_search,
+        .argtable = &skill_search_args,
+    };
+    esp_console_cmd_register(&skill_search_cmd);
 
     /* memory_read */
     esp_console_cmd_t mem_read_cmd = {
@@ -1134,6 +1427,30 @@ esp_err_t serial_cli_init(void)
         .func = &cmd_config_reset,
     };
     esp_console_cmd_register(&config_reset_cmd);
+
+    /* heartbeat_trigger */
+    esp_console_cmd_t heartbeat_cmd = {
+        .command = "heartbeat_trigger",
+        .help = "Manually trigger a heartbeat check",
+        .func = &cmd_heartbeat_trigger,
+    };
+    esp_console_cmd_register(&heartbeat_cmd);
+
+    /* cron_start */
+    esp_console_cmd_t cron_start_cmd = {
+        .command = "cron_start",
+        .help = "Start cron scheduler timer now",
+        .func = &cmd_cron_start,
+    };
+    esp_console_cmd_register(&cron_start_cmd);
+
+    /* tool_exec */
+    esp_console_cmd_t tool_exec_cmd = {
+        .command = "tool_exec",
+        .help = "Execute a registered tool: tool_exec <name> '{...json...}'",
+        .func = &cmd_tool_exec,
+    };
+    esp_console_cmd_register(&tool_exec_cmd);
 
     /* restart */
     esp_console_cmd_t restart_cmd = {

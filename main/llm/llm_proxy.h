@@ -13,9 +13,14 @@
 esp_err_t llm_proxy_init(void);
 
 /**
- * Save the Anthropic API key to NVS.
+ * Save the LLM API key to NVS.
  */
 esp_err_t llm_set_api_key(const char *api_key);
+
+/**
+ * Save the LLM provider to NVS. (e.g. "anthropic", "openai")
+ */
+esp_err_t llm_set_provider(const char *provider);
 
 /**
  * Save the model identifier to NVS.
@@ -23,7 +28,7 @@ esp_err_t llm_set_api_key(const char *api_key);
 esp_err_t llm_set_model(const char *model);
 
 /**
- * Send a chat completion request to Anthropic Messages API (streaming).
+ * Send a chat completion request to the configured LLM API (non-streaming).
  *
  * @param system_prompt  System prompt string
  * @param messages_json  JSON array of messages: [{"role":"user","content":"..."},...]
@@ -54,7 +59,7 @@ typedef struct {
 void llm_response_free(llm_response_t *resp);
 
 /**
- * Send a chat completion request with tools to Anthropic Messages API (streaming).
+ * Send a chat completion request with tools to the configured LLM API (non-streaming).
  *
  * @param system_prompt  System prompt string
  * @param messages       cJSON array of messages (caller owns)

@@ -15,6 +15,7 @@ managed_components/
 main/assets/lang_config.h
 main/mmap_generate_emoji.h
 mmap_generate_*.h
+mimi_secrets.h
 
 # IDE / Editor
 .vscode/
@@ -37,6 +38,10 @@ main/mimi_secrets.h
 # Reference repos
 nanobot/
 
+# MCP / Memov
+.mcp.json
+.mem/
+.memignore
 # OS
 .DS_Store
 Thumbs.db
@@ -45,3 +50,4 @@ Thumbs.db
 
 # Local agent metadata
 .serena/
+references/

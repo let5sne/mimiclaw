@@ -25,6 +25,9 @@
 #ifndef MIMI_SECRET_API_ENDPOINT
 #define MIMI_SECRET_API_ENDPOINT    ""
 #endif
+#ifndef MIMI_SECRET_MODEL_PROVIDER
+#define MIMI_SECRET_MODEL_PROVIDER  "anthropic"
+#endif
 #ifndef MIMI_SECRET_PROXY_HOST
 #define MIMI_SECRET_PROXY_HOST      ""
 #endif
@@ -56,9 +59,11 @@
 #define MIMI_TG_STT_TIMEOUT_MS       30000
 #define MIMI_TG_VISION_TIMEOUT_MS    45000
 #define MIMI_TG_DOC_TIMEOUT_MS       45000
+#define MIMI_TG_CARD_SHOW_MS         3000
+#define MIMI_TG_CARD_BODY_SCALE      3
 
 /* Agent Loop */
-#define MIMI_AGENT_STACK             (12 * 1024)
+#define MIMI_AGENT_STACK             (24 * 1024)
 #define MIMI_AGENT_PRIO              6
 #define MIMI_AGENT_CORE              1
 #define MIMI_AGENT_MAX_HISTORY       20
@@ -78,23 +83,28 @@
 #define MIMI_CONTROL_MAX_ALARMS            8
 #define MIMI_CONTROL_MAX_TEMP_RULES        8
 #define MIMI_CONTROL_TEMP_RULE_COOLDOWN_MS 10000
+#define MIMI_AGENT_SEND_WORKING_STATUS 1
 
 /* Timezone (POSIX TZ format) */
 #define MIMI_TIMEZONE                "PST8PDT,M3.2.0,M11.1.0"
 
 /* LLM */
 #define MIMI_LLM_DEFAULT_MODEL       "claude-opus-4-5"
+#define MIMI_LLM_PROVIDER_DEFAULT    "anthropic"
 #define MIMI_LLM_MAX_TOKENS          4096
 #define MIMI_LLM_API_URL             "https://api.anthropic.com/v1/messages"
+#define MIMI_OPENAI_API_URL          "https://api.openai.com/v1/chat/completions"
 #define MIMI_LLM_API_VERSION         "2023-06-01"
 #define MIMI_LLM_STREAM_BUF_SIZE     (32 * 1024)
 #define MIMI_LLM_RETRY_MAX           3
 #define MIMI_LLM_RETRY_BASE_MS       800
 #define MIMI_LLM_RETRY_MAX_DELAY_MS  8000
+#define MIMI_LLM_LOG_VERBOSE_PAYLOAD 0
+#define MIMI_LLM_LOG_PREVIEW_BYTES   160
 
 /* Message Bus */
-#define MIMI_BUS_QUEUE_LEN           8
-#define MIMI_OUTBOUND_STACK          (8 * 1024)
+#define MIMI_BUS_QUEUE_LEN           16
+#define MIMI_OUTBOUND_STACK          (12 * 1024)
 #define MIMI_OUTBOUND_PRIO           5
 #define MIMI_OUTBOUND_CORE           0
 #define MIMI_OUTBOUND_FINAL_WAIT_MS       1200
@@ -123,6 +133,16 @@
 #endif
 #define MIMI_CONTEXT_BUF_SIZE        (16 * 1024)
 #define MIMI_SESSION_MAX_MSGS        20
+
+/* Cron / Heartbeat */
+#define MIMI_CRON_FILE               "/spiffs/cron.json"
+#define MIMI_CRON_MAX_JOBS           16
+#define MIMI_CRON_CHECK_INTERVAL_MS  (60 * 1000)
+#define MIMI_HEARTBEAT_FILE          "/spiffs/HEARTBEAT.md"
+#define MIMI_HEARTBEAT_INTERVAL_MS   (30 * 60 * 1000)
+
+/* Skills */
+#define MIMI_SKILLS_PREFIX           "/spiffs/skills/"
 
 /* WebSocket Gateway */
 #define MIMI_WS_PORT                 18789
@@ -173,6 +193,7 @@
 #define MIMI_NVS_KEY_TG_TOKEN        "bot_token"
 #define MIMI_NVS_KEY_API_KEY         "api_key"
 #define MIMI_NVS_KEY_MODEL           "model"
+#define MIMI_NVS_KEY_PROVIDER        "provider"
 #define MIMI_NVS_KEY_PROXY_HOST      "host"
 #define MIMI_NVS_KEY_PROXY_PORT      "port"
 #define MIMI_NVS_KEY_ALLOW_FROM      "allow_from"

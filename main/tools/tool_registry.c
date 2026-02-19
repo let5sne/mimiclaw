@@ -4,6 +4,7 @@
 #include "tools/tool_files.h"
 #include "tools/tool_memory.h"
 #include "tools/tool_audio.h"
+#include "tools/tool_cron.h"
 
 #include <string.h>
 #include "esp_log.h"
@@ -172,6 +173,30 @@ esp_err_t tool_registry_init(void)
     mimi_tool_t gv = {
         .name = "get_volume",
         .description = "Get current speaker volume percentage.",
+    /* Register cron_add */
+    mimi_tool_t ca = {
+        .name = "cron_add",
+        .description = "Schedule a recurring or one-shot task. The message will trigger an agent turn when the job fires.",
+        .input_schema_json =
+            "{\"type\":\"object\","
+            "\"properties\":{"
+            "\"name\":{\"type\":\"string\",\"description\":\"Short name for the job\"},"
+            "\"schedule_type\":{\"type\":\"string\",\"description\":\"'every' for recurring interval or 'at' for one-shot at a unix timestamp\"},"
+            "\"interval_s\":{\"type\":\"integer\",\"description\":\"Interval in seconds (required for 'every')\"},"
+            "\"at_epoch\":{\"type\":\"integer\",\"description\":\"Unix timestamp to fire at (required for 'at')\"},"
+            "\"message\":{\"type\":\"string\",\"description\":\"Message to inject when the job fires, triggering an agent turn\"},"
+            "\"channel\":{\"type\":\"string\",\"description\":\"Optional reply channel (e.g. 'telegram'). If omitted, current turn channel is used when available\"},"
+            "\"chat_id\":{\"type\":\"string\",\"description\":\"Optional reply chat_id. Required when channel='telegram'. If omitted during a Telegram turn, current chat_id is used\"}"
+            "},"
+            "\"required\":[\"name\",\"schedule_type\",\"message\"]}",
+        .execute = tool_cron_add_execute,
+    };
+    register_tool(&ca);
+
+    /* Register cron_list */
+    mimi_tool_t cl = {
+        .name = "cron_list",
+        .description = "List all scheduled cron jobs with their status, schedule, and IDs.",
         .input_schema_json =
             "{\"type\":\"object\","
             "\"properties\":{},"
@@ -179,6 +204,21 @@ esp_err_t tool_registry_init(void)
         .execute = tool_get_volume_execute,
     };
     register_tool(&gv);
+        .execute = tool_cron_list_execute,
+    };
+    register_tool(&cl);
+
+    /* Register cron_remove */
+    mimi_tool_t cr = {
+        .name = "cron_remove",
+        .description = "Remove a scheduled cron job by its ID.",
+        .input_schema_json =
+            "{\"type\":\"object\","
+            "\"properties\":{\"job_id\":{\"type\":\"string\",\"description\":\"The 8-character job ID to remove\"}},"
+            "\"required\":[\"job_id\"]}",
+        .execute = tool_cron_remove_execute,
+    };
+    register_tool(&cr);
 
     build_tools_json();
 
