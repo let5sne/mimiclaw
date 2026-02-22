@@ -251,7 +251,7 @@ MimiClawにはcronスケジューラが内蔵されており、AIが自律的に
 
 ## Contributing
 
-Please read **[docs/CONTRIBUTE.md](docs/CONTRIBUTE.md)** before opening issues or pull requests.
+Issue や Pull Request を作成する前に、**[CONTRIBUTING.md](CONTRIBUTING.md)** をご確認ください。
 
 ## ライセンス
 

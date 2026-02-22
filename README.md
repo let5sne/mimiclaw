@@ -251,7 +251,7 @@ Technical details live in the `docs/` folder:
 
 ## Contributing
 
-Please read **[docs/CONTRIBUTE.md](docs/CONTRIBUTE.md)** before opening issues or pull requests.
+Please read **[CONTRIBUTING.md](CONTRIBUTING.md)** before opening issues or pull requests.
 
 ## License
 
