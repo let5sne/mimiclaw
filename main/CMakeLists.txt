@@ -1,15 +1,11 @@
 idf_component_register(
     SRCS
         "mimi.c"
-        "display/display.c"
-        "display/Vernon_ST7789T/Vernon_ST7789T.c"
-        "rgb/rgb.c"
         "buttons/multi_button.c"
         "buttons/button_driver.c"
         "imu/I2C_Driver.c"
         "imu/QMI8658.c"
         "imu/imu_manager.c"
-        "ui/config_screen.c"
         "bus/message_bus.c"
         "wifi/wifi_manager.c"
         "telegram/telegram_bot.c"
@@ -21,7 +17,6 @@ idf_component_register(
         "memory/session_mgr.c"
         "gateway/ws_server.c"
         "cli/serial_cli.c"
-        "ota/ota_manager.c"
         "proxy/http_proxy.c"
         "security/access_control.c"
         "heartbeat/heartbeat_service.c"
@@ -42,8 +37,6 @@ idf_component_register(
         "skills/skill_loader.c"
     INCLUDE_DIRS
         "."
-    EMBED_FILES
-        "../assets/banner_320x172.rgb565"
     REQUIRES
         nvs_flash esp_wifi esp_netif esp_http_client esp_http_server
         esp_https_ota esp_event json spiffs console vfs app_update esp-tls driver

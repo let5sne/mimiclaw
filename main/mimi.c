@@ -197,7 +197,6 @@ void app_main(void)
 {
     /* Silence noisy components */
     esp_log_level_set("esp-x509-crt-bundle", ESP_LOG_WARN);
-    esp_log_level_set("QRCODE", ESP_LOG_WARN);
 
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "  MimiClaw - ESP32-S3 AI Agent");
@@ -209,15 +208,10 @@ void app_main(void)
     ESP_LOGI(TAG, "PSRAM free:    %d bytes",
              (int)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
-    /* Display + input */
-    ESP_ERROR_CHECK(display_init());
-    display_show_banner();
-    ESP_ERROR_CHECK(rgb_init());
-    rgb_set(255, 0, 0);
+    /* Input */
     button_Init();
-    config_screen_init();
     imu_manager_init();
-    imu_manager_set_shake_callback(config_screen_toggle);
+    imu_manager_set_shake_callback(NULL);
 
     /* Phase 1: Core infrastructure */
     ESP_ERROR_CHECK(init_nvs());

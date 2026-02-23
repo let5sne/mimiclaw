@@ -126,9 +126,6 @@ static esp_err_t fetch_time_direct(char *out, size_t out_size)
     }
 
     /* Get Date header */
-    char date_val[64] = {0};
-    err = esp_http_client_get_header(client, "Date", (char **)&date_val);
-    /* esp_http_client_get_header returns pointer, not copy */
     char *date_ptr = NULL;
     esp_http_client_get_header(client, "Date", &date_ptr);
     esp_http_client_cleanup(client);
