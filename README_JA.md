@@ -253,6 +253,14 @@ MimiClawにはcronスケジューラが内蔵されており、AIが自律的に
 
 Issue や Pull Request を作成する前に、**[CONTRIBUTING.md](CONTRIBUTING.md)** をご確認ください。
 
+## コントリビューター
+
+MimiClaw に貢献してくれた皆さんに感謝します。
+
+<a href="https://github.com/memovai/mimiclaw/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=memovai/mimiclaw" alt="MimiClaw contributors" />
+</a>
+
 ## ライセンス
 
 MIT
