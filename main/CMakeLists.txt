@@ -42,9 +42,3 @@ idf_component_register(
         esp_https_ota esp_event json spiffs console vfs app_update esp-tls driver
         esp_websocket_client esp_lcd esp_timer led_strip qrcode
 )
-
-# 将 spiffs_data 打包到 spiffs 分区，并在 `idf.py flash` 时自动烧录
-set(MIMI_SPIFFS_IMAGE_DIR "${CMAKE_SOURCE_DIR}/spiffs_data")
-if (EXISTS "${MIMI_SPIFFS_IMAGE_DIR}")
-    spiffs_create_partition_image(spiffs "${MIMI_SPIFFS_IMAGE_DIR}" FLASH_IN_PROJECT)
-endif()

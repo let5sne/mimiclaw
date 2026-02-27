@@ -72,6 +72,7 @@
 #define MIMI_AGENT_MAX_HISTORY       20
 #define MIMI_AGENT_MAX_TOOL_ITER     10
 #define MIMI_MAX_TOOL_CALLS          4
+#define MIMI_TOOL_REGISTRY_MAX       16
 #define MIMI_AGENT_TURN_TIMEOUT_MS   45000
 #define MIMI_AGENT_MAX_CONTEXT_BYTES (24 * 1024)
 #define MIMI_AGENT_TOOL_RESULT_MAX_BYTES   2048
@@ -138,11 +139,12 @@
 #define MIMI_SESSION_MAX_MSGS        20
 
 /* Cron / Heartbeat */
-#define MIMI_CRON_FILE               MIMI_SPIFFS_BASE "/cron.json"
+#define MIMI_CRON_FILE               MIMI_SPIFFS_CONFIG_DIR "/cron.json"
 #define MIMI_CRON_MAX_JOBS           16
 #define MIMI_CRON_CHECK_INTERVAL_MS  (60 * 1000)
-#define MIMI_HEARTBEAT_FILE          MIMI_SPIFFS_BASE "/HEARTBEAT.md"
+#define MIMI_HEARTBEAT_FILE          MIMI_SPIFFS_CONFIG_DIR "/HEARTBEAT.md"
 #define MIMI_HEARTBEAT_INTERVAL_MS   (30 * 60 * 1000)
+#define MIMI_CRON_TEMPLATE_FILE      MIMI_SPIFFS_CONFIG_DIR "/CRON.md"
 
 /* Skills */
 #define MIMI_SKILLS_PREFIX           MIMI_SPIFFS_BASE "/skills/"
@@ -156,7 +158,6 @@
 #define MIMI_HEARTBEAT_ENABLED       1
 #endif
 #define MIMI_HEARTBEAT_INTERVAL_S    1800
-#define MIMI_HEARTBEAT_FILE          "/spiffs/config/HEARTBEAT.md"
 #define MIMI_HEARTBEAT_MAX_BYTES     1024
 #define MIMI_HEARTBEAT_STACK         3072
 #define MIMI_HEARTBEAT_PRIO          2
@@ -165,7 +166,6 @@
 #ifndef MIMI_CRON_ENABLED
 #define MIMI_CRON_ENABLED            1
 #endif
-#define MIMI_CRON_FILE               "/spiffs/config/CRON.md"
 #define MIMI_CRON_FILE_MAX_BYTES     1024
 #define MIMI_CRON_TASK_MAX_BYTES     768
 #define MIMI_CRON_DEFAULT_INTERVAL_MIN 0

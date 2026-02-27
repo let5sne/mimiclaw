@@ -17,9 +17,15 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "esp_random.h"
 #include "cJSON.h"
 
 static const char *TAG = "agent";
+static const char *const WORKING_PHRASES[] = {
+    "我在处理，请稍等一下…",
+    "收到，正在帮你查…",
+    "正在执行中，马上给你结果…",
+};
 
 #define TOOL_OUTPUT_SIZE  (8 * 1024)
 #define TOOL_BUDGET_EXCEEDED_MSG "Error: tool result budget exceeded on device"
@@ -768,8 +774,9 @@ static char *build_user_content_with_meta(const mimi_msg_t *msg)
     return buf;
 }
 
-static cJSON *build_tool_results(const llm_response_t *resp, char *tool_output,
-                                 size_t tool_output_size, bool *budget_exceeded)
+static cJSON *build_tool_results(const llm_response_t *resp, const mimi_msg_t *msg,
+                                 char *tool_output, size_t tool_output_size,
+                                 bool *budget_exceeded)
 {
     cJSON *content = cJSON_CreateArray();
     size_t total_bytes = 0;
@@ -788,7 +795,7 @@ static cJSON *build_tool_results(const llm_response_t *resp, char *tool_output,
         } else {
             /* Execute tool */
             tool_output[0] = '\0';
-            tool_registry_execute(call->name, call->input, tool_output, tool_output_size);
+            tool_registry_execute(call->name, tool_input, tool_output, tool_output_size);
             truncate_tool_output_if_needed(tool_output, tool_output_size);
 
             size_t cur_len = strlen(tool_output);
@@ -808,6 +815,8 @@ static cJSON *build_tool_results(const llm_response_t *resp, char *tool_output,
         cJSON_AddStringToObject(result_block, "tool_use_id", call->id);
         cJSON_AddStringToObject(result_block, "content", tool_output);
         cJSON_AddItemToArray(content, result_block);
+
+        free(patched_input);
     }
 
     if (budget_exceeded) {
@@ -985,9 +994,12 @@ static void agent_loop_task(void *arg)
                 mimi_msg_t status = {0};
                 strncpy(status.channel, msg.channel, sizeof(status.channel) - 1);
                 strncpy(status.chat_id, msg.chat_id, sizeof(status.chat_id) - 1);
-                status.content = strdup(working_phrases[esp_random() % phrase_count]);
+                size_t phrase_count = sizeof(WORKING_PHRASES) / sizeof(WORKING_PHRASES[0]);
+                status.content = strdup(WORKING_PHRASES[esp_random() % phrase_count]);
                 if (status.content && message_bus_push_outbound(&status) != ESP_OK) {
                     message_bus_msg_free(&status);
+                } else {
+                    sent_working_status = true;
                 }
             }
 #endif
@@ -1029,7 +1041,7 @@ static void agent_loop_task(void *arg)
             /* Execute tools and append results */
             bool tool_budget_exceeded = false;
             TickType_t tools_stage_start = xTaskGetTickCount();
-            cJSON *tool_results = build_tool_results(&resp, tool_output, TOOL_OUTPUT_SIZE,
+            cJSON *tool_results = build_tool_results(&resp, &msg, tool_output, TOOL_OUTPUT_SIZE,
                                                      &tool_budget_exceeded);
             tools_ms += elapsed_ms(tools_stage_start, xTaskGetTickCount());
             cJSON *result_msg = cJSON_CreateObject();

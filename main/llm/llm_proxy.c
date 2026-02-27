@@ -196,7 +196,7 @@ esp_err_t llm_proxy_init(void)
     if (s_api_key[0]) {
         ESP_LOGI(TAG, "LLM proxy initialized (provider: %s, model: %s)", s_provider, s_model);
     } else {
-        ESP_LOGW(TAG, "No API key. Use CLI: set_api_key <KEY>");
+        ESP_LOGI(TAG, "No API key configured. Use CLI: set_api_key <KEY>");
     }
     return ESP_OK;
 }

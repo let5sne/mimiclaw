@@ -2,9 +2,48 @@
 #include "mimi_config.h"
 #include "esp_log.h"
 #include "driver/i2s_std.h"
+#include <stdint.h>
+#if __has_include("esp_wn_iface.h") && __has_include("esp_wn_models.h") && __has_include("model_path.h")
 #include "esp_wn_iface.h"
 #include "esp_wn_models.h"
 #include "model_path.h"
+#define MIMI_AUDIO_WAKENET_BACKEND 1
+#else
+#define MIMI_AUDIO_WAKENET_BACKEND 0
+#define MODEL_NAME_MAX_LENGTH 64
+#define ESP_WN_PREFIX "wn"
+#define DET_MODE_95 0
+typedef struct srmodel_list_t srmodel_list_t;
+typedef void model_iface_data_t;
+typedef struct {
+    model_iface_data_t *(*create)(const char *model_name, int mode);
+    void (*destroy)(model_iface_data_t *data);
+    int (*get_samp_chunksize)(model_iface_data_t *data);
+    int (*set_det_threshold)(model_iface_data_t *data, float threshold, int stage);
+    int (*detect)(model_iface_data_t *data, int16_t *buffer);
+    const char *(*get_word_name)(model_iface_data_t *data, int index);
+} esp_wn_iface_t;
+static inline srmodel_list_t *esp_srmodel_init(const char *path) { (void)path; return NULL; }
+static inline void esp_srmodel_deinit(srmodel_list_t *models) { (void)models; }
+static inline char *esp_srmodel_filter(srmodel_list_t *models, const char *prefix, const char *keyword)
+{
+    (void)models;
+    (void)prefix;
+    (void)keyword;
+    return NULL;
+}
+static inline char *esp_srmodel_get_wake_words(srmodel_list_t *models, const char *model_name)
+{
+    (void)models;
+    (void)model_name;
+    return NULL;
+}
+static inline const esp_wn_iface_t *esp_wn_handle_from_name(const char *model_name)
+{
+    (void)model_name;
+    return NULL;
+}
+#endif
 #include "nvs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -301,6 +340,10 @@ esp_err_t audio_start_listening(void)
     }
 
     esp_err_t ret = audio_wakenet_init();
+    if (ret == ESP_ERR_NOT_FOUND) {
+        ESP_LOGI(TAG, "WakeNet model unavailable, skip wake-word listening");
+        return ESP_ERR_NOT_SUPPORTED;
+    }
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "WakeNet init failed");
         return ret;
@@ -607,10 +650,10 @@ static esp_err_t audio_wakenet_init(void)
     }
 
     s_sr_models = esp_srmodel_init("model");
-    if (!s_sr_models || s_sr_models->num <= 0) {
-        ESP_LOGE(TAG, "No WakeNet model found in \"model\" partition");
+    if (!s_sr_models) {
+        ESP_LOGI(TAG, "No WakeNet model found in \"model\" partition");
         audio_wakenet_deinit();
-        return ESP_FAIL;
+        return ESP_ERR_NOT_FOUND;
     }
 
     char keyword_buf[64] = {0};

@@ -4,6 +4,7 @@
 #include "telegram/telegram_bot.h"
 #include "llm/llm_proxy.h"
 #include "agent/agent_loop.h"
+#include "bus/message_bus.h"
 #include "memory/memory_store.h"
 #include "memory/session_mgr.h"
 #include "proxy/http_proxy.h"
@@ -305,6 +306,31 @@ static struct {
     struct arg_end *end;
 } cron_set_args;
 
+static int cron_remove_all_jobs(void)
+{
+    const cron_job_t *jobs = NULL;
+    int count = 0;
+    cron_list_jobs(&jobs, &count);
+    if (!jobs || count <= 0) {
+        return 0;
+    }
+
+    char ids[16][9];
+    int copy_count = (count > 16) ? 16 : count;
+    for (int i = 0; i < copy_count; i++) {
+        strncpy(ids[i], jobs[i].id, sizeof(ids[i]) - 1);
+        ids[i][sizeof(ids[i]) - 1] = '\0';
+    }
+
+    int removed = 0;
+    for (int i = 0; i < copy_count; i++) {
+        if (ids[i][0] && cron_remove_job(ids[i]) == ESP_OK) {
+            removed++;
+        }
+    }
+    return removed;
+}
+
 static int cmd_cron_set(int argc, char **argv)
 {
 #if MIMI_CRON_ENABLED
@@ -322,13 +348,24 @@ static int cmd_cron_set(int argc, char **argv)
         return 1;
     }
 
-    esp_err_t err = cron_service_set_schedule((uint32_t)minutes, task);
+    cron_remove_all_jobs();
+
+    cron_job_t job = {0};
+    strncpy(job.name, "cli-schedule", sizeof(job.name) - 1);
+    job.enabled = true;
+    job.kind = CRON_KIND_EVERY;
+    job.interval_s = (uint32_t)minutes * 60U;
+    strncpy(job.message, task, sizeof(job.message) - 1);
+    strncpy(job.channel, MIMI_CHAN_SYSTEM, sizeof(job.channel) - 1);
+    strncpy(job.chat_id, "cron", sizeof(job.chat_id) - 1);
+
+    esp_err_t err = cron_add_job(&job);
     if (err != ESP_OK) {
-        printf("Failed to set cron schedule: %s\n", esp_err_to_name(err));
+        printf("Failed to add cron job: %s\n", esp_err_to_name(err));
         return 1;
     }
 
-    printf("Cron schedule set: every %d min.\n", minutes);
+    printf("Cron schedule set: every %d min, id=%s\n", minutes, job.id);
     return 0;
 #else
     printf("Cron is disabled. Set MIMI_CRON_ENABLED=1 in mimi_config.h\n");
@@ -340,12 +377,8 @@ static int cmd_cron_set(int argc, char **argv)
 static int cmd_cron_clear(int argc, char **argv)
 {
 #if MIMI_CRON_ENABLED
-    esp_err_t err = cron_service_clear_schedule();
-    if (err != ESP_OK) {
-        printf("Failed to clear cron schedule: %s\n", esp_err_to_name(err));
-        return 1;
-    }
-    printf("Cron schedule cleared.\n");
+    int removed = cron_remove_all_jobs();
+    printf("Cron jobs cleared: %d\n", removed);
     return 0;
 #else
     printf("Cron is disabled. Set MIMI_CRON_ENABLED=1 in mimi_config.h\n");
@@ -357,31 +390,27 @@ static int cmd_cron_clear(int argc, char **argv)
 static int cmd_cron_status(int argc, char **argv)
 {
 #if MIMI_CRON_ENABLED
-    cron_stats_t stats;
-    esp_err_t err = cron_service_get_stats(&stats);
-    if (err != ESP_OK) {
-        printf("Cron not ready: %s\n", esp_err_to_name(err));
-        return 1;
+    const cron_job_t *jobs = NULL;
+    int count = 0;
+    cron_list_jobs(&jobs, &count);
+    printf("=== Cron Jobs ===\n");
+    printf("count: %d\n", count);
+    for (int i = 0; i < count; i++) {
+        const cron_job_t *job = &jobs[i];
+        printf("[%d] id=%s name=%s enabled=%s kind=%s interval_s=%" PRIu32
+               " next=%" PRId64 " channel=%s chat_id=%s message=%.80s\n",
+               i,
+               job->id,
+               job->name[0] ? job->name : "-",
+               job->enabled ? "yes" : "no",
+               (job->kind == CRON_KIND_AT) ? "at" : "every",
+               job->interval_s,
+               job->next_run,
+               job->channel[0] ? job->channel : "-",
+               job->chat_id[0] ? job->chat_id : "-",
+               job->message);
     }
-
-    char task[MIMI_CRON_TASK_MAX_BYTES + 1];
-    err = cron_service_get_task(task, sizeof(task));
-    if (err != ESP_OK) {
-        printf("Cron task read failed: %s\n", esp_err_to_name(err));
-        return 1;
-    }
-
-    printf("=== Cron Status ===\n");
-    printf("  Enabled           : %s\n", stats.enabled ? "yes" : "no");
-    printf("  Interval (min)    : %" PRIu32 "\n", stats.interval_min);
-    printf("  Total Runs        : %" PRIu32 "\n", stats.total_runs);
-    printf("  Triggered Runs    : %" PRIu32 "\n", stats.triggered_runs);
-    printf("  Enqueue Success   : %" PRIu32 "\n", stats.enqueue_success);
-    printf("  Enqueue Failures  : %" PRIu32 "\n", stats.enqueue_failures);
-    printf("  Skip Not Config   : %" PRIu32 "\n", stats.skipped_not_configured);
-    printf("  Last Run (unix)   : %" PRIu32 "\n", stats.last_run_unix);
-    printf("  Task              : %s\n", task[0] ? task : "(empty)");
-    printf("===================\n");
+    printf("=================\n");
     return 0;
 #else
     printf("Cron is disabled. Set MIMI_CRON_ENABLED=1 in mimi_config.h\n");
@@ -393,13 +422,37 @@ static int cmd_cron_status(int argc, char **argv)
 static int cmd_cron_now(int argc, char **argv)
 {
 #if MIMI_CRON_ENABLED
-    esp_err_t err = cron_service_trigger_now();
+    const cron_job_t *jobs = NULL;
+    int count = 0;
+    cron_list_jobs(&jobs, &count);
+    if (!jobs || count <= 0) {
+        printf("No cron jobs configured.\n");
+        return 1;
+    }
+
+    const cron_job_t *job = &jobs[0];
+    if (!job->message[0]) {
+        printf("First cron job has empty message.\n");
+        return 1;
+    }
+
+    mimi_msg_t in = {0};
+    strncpy(in.channel, job->channel[0] ? job->channel : MIMI_CHAN_SYSTEM, sizeof(in.channel) - 1);
+    strncpy(in.chat_id, job->chat_id[0] ? job->chat_id : "cron", sizeof(in.chat_id) - 1);
+    in.content = strdup(job->message);
+    if (!in.content) {
+        printf("Out of memory.\n");
+        return 1;
+    }
+
+    esp_err_t err = message_bus_push_inbound(&in);
     if (err != ESP_OK) {
+        message_bus_msg_free(&in);
         printf("Cron trigger failed: %s\n", esp_err_to_name(err));
         return 1;
     }
 
-    printf("Cron trigger requested.\n");
+    printf("Cron trigger requested from job id=%s.\n", job->id);
     return 0;
 #else
     printf("Cron is disabled. Set MIMI_CRON_ENABLED=1 in mimi_config.h\n");
@@ -526,6 +579,8 @@ static int cmd_set_ws_token(int argc, char **argv)
 /* --- clear_ws_token command --- */
 static int cmd_clear_ws_token(int argc, char **argv)
 {
+    (void)argc;
+    (void)argv;
     esp_err_t err = access_control_clear_ws_token();
     if (err != ESP_OK) {
         printf("Failed to clear WS token: %s\n", esp_err_to_name(err));
@@ -533,6 +588,9 @@ static int cmd_clear_ws_token(int argc, char **argv)
     }
 
     printf("WS token cleared (open mode).\n");
+    return 0;
+}
+
 /* --- wifi_scan command --- */
 static int cmd_wifi_scan(int argc, char **argv)
 {
@@ -784,13 +842,16 @@ static int cmd_config_reset(int argc, char **argv)
 /* --- heartbeat_trigger command --- */
 static int cmd_heartbeat_trigger(int argc, char **argv)
 {
+    (void)argc;
+    (void)argv;
     printf("Checking HEARTBEAT.md...\n");
-    if (heartbeat_trigger()) {
-        printf("Heartbeat: agent prompted with pending tasks.\n");
-    } else {
-        printf("Heartbeat: no actionable tasks found.\n");
+    esp_err_t err = heartbeat_service_trigger_now();
+    if (err == ESP_OK) {
+        printf("Heartbeat trigger requested.\n");
+        return 0;
     }
-    return 0;
+    printf("Heartbeat trigger failed: %s\n", esp_err_to_name(err));
+    return 1;
 }
 
 /* --- cron_start command --- */

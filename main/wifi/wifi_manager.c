@@ -118,7 +118,7 @@ esp_err_t wifi_manager_start(void)
     }
 
     if (!found) {
-        ESP_LOGW(TAG, "No WiFi credentials. Use CLI: wifi_set <SSID> <PASS>");
+        ESP_LOGI(TAG, "No WiFi credentials configured. Use CLI: wifi_set <SSID> <PASS>");
         return ESP_ERR_NOT_FOUND;
     }
 

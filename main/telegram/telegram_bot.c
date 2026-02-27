@@ -30,12 +30,8 @@ static int64_t s_last_saved_offset = -1;
 static int64_t s_last_offset_save_us = 0;
 
 #define TG_OFFSET_NVS_KEY            "update_offset"
-#define TG_DEDUP_CACHE_SIZE          64
 #define TG_OFFSET_SAVE_INTERVAL_US   (5LL * 1000 * 1000)
 #define TG_OFFSET_SAVE_STEP          10
-
-static uint64_t s_seen_msg_keys[TG_DEDUP_CACHE_SIZE] = {0};
-static size_t s_seen_msg_idx = 0;
 
 #define TG_VISION_CACHE_SLOTS 8
 #define TG_VISION_TEXT_MAX    768
@@ -55,41 +51,6 @@ typedef struct {
     size_t len;
     size_t cap;
 } http_resp_t;
-
-static uint64_t fnv1a64(const char *s)
-{
-    uint64_t h = 1469598103934665603ULL;
-    if (!s) {
-        return h;
-    }
-    while (*s) {
-        h ^= (unsigned char)(*s++);
-        h *= 1099511628211ULL;
-    }
-    return h;
-}
-
-static uint64_t make_msg_key(const char *chat_id, int msg_id)
-{
-    uint64_t h = fnv1a64(chat_id);
-    return (h << 16) ^ (uint64_t)(msg_id & 0xFFFF) ^ ((uint64_t)msg_id << 32);
-}
-
-static bool seen_msg_contains(uint64_t key)
-{
-    for (size_t i = 0; i < TG_DEDUP_CACHE_SIZE; i++) {
-        if (s_seen_msg_keys[i] == key) {
-            return true;
-        }
-    }
-    return false;
-}
-
-static void seen_msg_insert(uint64_t key)
-{
-    s_seen_msg_keys[s_seen_msg_idx] = key;
-    s_seen_msg_idx = (s_seen_msg_idx + 1) % TG_DEDUP_CACHE_SIZE;
-}
 
 static void save_update_offset_if_needed(bool force)
 {
@@ -1559,7 +1520,7 @@ esp_err_t telegram_bot_init(void)
     if (s_bot_token[0]) {
         ESP_LOGI(TAG, "Telegram bot token loaded (len=%d)", (int)strlen(s_bot_token));
     } else {
-        ESP_LOGW(TAG, "No Telegram bot token. Use CLI: set_tg_token <TOKEN>");
+        ESP_LOGI(TAG, "No Telegram bot token configured. Use CLI: set_tg_token <TOKEN>");
     }
     return ESP_OK;
 }
@@ -1572,6 +1533,34 @@ esp_err_t telegram_bot_start(void)
         MIMI_TG_POLL_PRIO, NULL, MIMI_TG_POLL_CORE);
 
     return (ret == pdPASS) ? ESP_OK : ESP_FAIL;
+}
+
+static int tg_response_is_ok(const char *resp_json, const char **out_desc)
+{
+    static char s_desc_buf[160];
+    s_desc_buf[0] = '\0';
+    if (out_desc) {
+        *out_desc = NULL;
+    }
+    if (!resp_json) {
+        return 0;
+    }
+
+    cJSON *root = cJSON_Parse(resp_json);
+    if (!root) {
+        return 0;
+    }
+
+    cJSON *ok = cJSON_GetObjectItem(root, "ok");
+    cJSON *desc = cJSON_GetObjectItem(root, "description");
+    int ret = cJSON_IsTrue(ok) ? 1 : 0;
+    if (out_desc && cJSON_IsString(desc) && desc->valuestring) {
+        strncpy(s_desc_buf, desc->valuestring, sizeof(s_desc_buf) - 1);
+        s_desc_buf[sizeof(s_desc_buf) - 1] = '\0';
+        *out_desc = s_desc_buf;
+    }
+    cJSON_Delete(root);
+    return ret;
 }
 
 esp_err_t telegram_send_message(const char *chat_id, const char *text)
