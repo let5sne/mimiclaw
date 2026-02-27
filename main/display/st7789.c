@@ -31,6 +31,10 @@ static const int ST7789_FILL_LINES = 20;
 static const bool ST7789_MIRROR_X = false;
 static const bool ST7789_MIRROR_Y = false;
 
+static void st7789_fill_rect_internal(int x_start, int y_start, int x_end, int y_end, uint16_t color);
+static void st7789_draw_glyph_to_buffer(char c, int scale, uint16_t fg, uint16_t bg,
+                                        uint16_t *dst, int dst_w, int dst_x);
+
 static bool st7789_color_trans_done(esp_lcd_panel_io_handle_t panel_io,
                                     esp_lcd_panel_io_event_data_t *edata,
                                     void *user_ctx)
@@ -166,7 +170,7 @@ static const uint8_t font8x8[96][8] = {
     {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // DEL
 };
 
-static void st7789_fill_color(uint16_t color)
+static void st7789_fill_rect_internal(int x_start, int y_start, int x_end, int y_end, uint16_t color)
 {
     if (!s_panel || s_width <= 0 || s_height <= 0) {
         return;
@@ -177,19 +181,33 @@ static void st7789_fill_color(uint16_t color)
         return;
     }
 
+    if (x_start < 0) x_start = 0;
+    if (y_start < 0) y_start = 0;
+    if (x_end > s_width) x_end = s_width;
+    if (y_end > s_height) y_end = s_height;
+    if (x_start >= x_end || y_start >= y_end) {
+        return;
+    }
+
     const int lines = ST7789_FILL_LINES;
-    const int chunk_pixels = s_width * lines;
+    const int draw_w = x_end - x_start;
+    const int chunk_pixels = draw_w * lines;
     for (int i = 0; i < chunk_pixels; ++i) {
         s_fill_buf[i] = color;
     }
 
-    for (int y = 0; y < s_height; y += lines) {
+    for (int y = y_start; y < y_end; y += lines) {
         int y2 = y + lines;
-        if (y2 > s_height) {
-            y2 = s_height;
+        if (y2 > y_end) {
+            y2 = y_end;
         }
-        st7789_draw_bitmap_sync(0, y, s_width, y2, s_fill_buf);
+        st7789_draw_bitmap_sync(x_start, y, x_end, y2, s_fill_buf);
     }
+}
+
+static void st7789_fill_color(uint16_t color)
+{
+    st7789_fill_rect_internal(0, 0, s_width, s_height, color);
 }
 
 esp_err_t st7789_init(const display_config_t *config)
@@ -337,34 +355,96 @@ void st7789_set_power(bool on)
     }
 }
 
-/* Draw a single ASCII char at (x,y) with scale, fg/bg colors */
-static void st7789_draw_char(int x, int y, char c, int scale,
-                             uint16_t fg, uint16_t bg)
+static void st7789_draw_glyph_to_buffer(char c, int scale, uint16_t fg, uint16_t bg,
+                                        uint16_t *dst, int dst_w, int dst_x)
 {
-    if (!s_panel || !s_fill_buf) return;
+    if (!dst || dst_w <= 0 || scale <= 0) return;
     if (c < 32 || c > 127) c = '?';
 
     const uint8_t *glyph = font8x8[c - 32];
-    const int cw = 8 * scale;
-    const int ch = 8 * scale;
-
-    /* Clip to screen */
-    if (x + cw > s_width || y + ch > s_height || x < 0 || y < 0) return;
-
-    /* Reuse s_fill_buf (big enough: 240*20 = 4800 pixels, char max = 8*3*8*3 = 576) */
     for (int row = 0; row < 8; row++) {
         for (int col = 0; col < 8; col++) {
             uint16_t color = (glyph[row] & (1 << col)) ? fg : bg;
             for (int sy = 0; sy < scale; sy++) {
                 for (int sx = 0; sx < scale; sx++) {
-                    int px = col * scale + sx;
+                    int px = dst_x + col * scale + sx;
                     int py = row * scale + sy;
-                    s_fill_buf[py * cw + px] = color;
+                    dst[py * dst_w + px] = color;
                 }
             }
         }
     }
+}
+
+/* Draw a single ASCII char at (x,y) with scale, fg/bg colors */
+static void st7789_draw_char(int x, int y, char c, int scale,
+                             uint16_t fg, uint16_t bg)
+{
+    if (!s_panel || !s_fill_buf || scale <= 0) return;
+
+    const int cw = 8 * scale;
+    const int ch = 8 * scale;
+    if (x + cw > s_width || y + ch > s_height || x < 0 || y < 0) return;
+
+    for (int i = 0; i < cw * ch; ++i) {
+        s_fill_buf[i] = bg;
+    }
+    st7789_draw_glyph_to_buffer(c, scale, fg, bg, s_fill_buf, cw, 0);
     st7789_draw_bitmap_sync(x, y, x + cw, y + ch, s_fill_buf);
+}
+
+void st7789_fill_rect(int x, int y, int w, int h, uint16_t color)
+{
+    if (w <= 0 || h <= 0) return;
+    st7789_fill_rect_internal(x, y, x + w, y + h, color);
+}
+
+void st7789_draw_status_line(const char *icon, uint16_t icon_color,
+                             const char *text, uint16_t text_color,
+                             uint16_t bg_color)
+{
+    if (!s_panel || !s_fill_buf || !text) return;
+
+    const char icon_char = (icon && icon[0] != '\0') ? icon[0] : ' ';
+    const int x = 4;
+    const int margin_r = 4;
+    int scale = 2;
+    const int text_len = (int)strlen(text);
+    const int max_w = s_width - x - margin_r;
+
+    if ((text_len + 2) * 8 * scale > max_w) {
+        scale = 1;
+    }
+
+    const int char_w = 8 * scale;
+    const int char_h = 8 * scale;
+    int max_chars = max_w / char_w;
+    if (max_chars < 2) return;
+
+    int draw_text_chars = text_len;
+    if (draw_text_chars > max_chars - 2) {
+        draw_text_chars = max_chars - 2;
+    }
+
+    const int line_chars = 2 + draw_text_chars;
+    const int draw_w = line_chars * char_w;
+    const int draw_h = char_h;
+    const int draw_pixels = draw_w * draw_h;
+    if (draw_pixels <= 0 || draw_pixels > s_width * ST7789_FILL_LINES) return;
+
+    for (int i = 0; i < draw_pixels; ++i) {
+        s_fill_buf[i] = bg_color;
+    }
+
+    st7789_draw_glyph_to_buffer(icon_char, scale, icon_color, bg_color, s_fill_buf, draw_w, 0);
+    st7789_draw_glyph_to_buffer(' ', scale, text_color, bg_color, s_fill_buf, draw_w, char_w);
+    for (int i = 0; i < draw_text_chars; ++i) {
+        st7789_draw_glyph_to_buffer(text[i], scale, text_color, bg_color,
+                                    s_fill_buf, draw_w, (i + 2) * char_w);
+    }
+
+    const int y = (scale == 2) ? 4 : 8;
+    st7789_draw_bitmap_sync(x, y, x + draw_w, y + draw_h, s_fill_buf);
 }
 
 /* Draw ASCII string at (x,y) with scale */
@@ -394,6 +474,6 @@ void st7789_draw_text(int x, int y, const char *text, int scale,
 
 void st7789_render_status(display_status_t status)
 {
-    /* Black background */
-    st7789_fill_color(0x0000);
+    (void)status;
+    st7789_fill_rect(0, 0, s_width, 32, 0x0000);
 }
