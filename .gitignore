@@ -45,4 +45,9 @@ nanobot/
 # OS
 .DS_Store
 Thumbs.db
+
+.codeartsdoer
+
+# Local agent metadata
+.serena/
 references/

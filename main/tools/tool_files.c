@@ -30,6 +30,53 @@ static bool validate_path(const char *path)
     return true;
 }
 
+static bool path_in_dir(const char *path, const char *dir)
+{
+    size_t dir_len = strlen(dir);
+    if (strncmp(path, dir, dir_len) != 0) return false;
+    return path[dir_len] == '\0' || path[dir_len] == '/';
+}
+
+static bool validate_write_path(const char *path)
+{
+    if (!validate_path(path)) return false;
+
+    if (path_in_dir(path, MIMI_SPIFFS_MEMORY_DIR)) {
+        return true;
+    }
+#if MIMI_FILE_WRITE_ALLOW_CONFIG_DIR
+    if (path_in_dir(path, MIMI_SPIFFS_CONFIG_DIR)) {
+        return true;
+    }
+#endif
+#if MIMI_FILE_WRITE_ALLOW_SESSION_DIR
+    if (path_in_dir(path, MIMI_SPIFFS_SESSION_DIR)) {
+        return true;
+    }
+#endif
+    return false;
+}
+
+static void write_path_reject_message(char *output, size_t output_size)
+{
+    size_t off = snprintf(output, output_size,
+                          "Error: write/edit path is restricted. Allowed base dirs: %s",
+                          MIMI_SPIFFS_MEMORY_DIR);
+#if MIMI_FILE_WRITE_ALLOW_CONFIG_DIR
+    if (off < output_size) {
+        off += snprintf(output + off, output_size - off, ", %s", MIMI_SPIFFS_CONFIG_DIR);
+    }
+#endif
+#if MIMI_FILE_WRITE_ALLOW_SESSION_DIR
+    if (off < output_size) {
+        off += snprintf(output + off, output_size - off, ", %s", MIMI_SPIFFS_SESSION_DIR);
+    }
+#endif
+    if (off < output_size) {
+        snprintf(output + off, output_size - off, ". Path must not contain '..'");
+    }
+}
+
 /* ── read_file ─────────────────────────────────────────────── */
 
 esp_err_t tool_read_file_execute(const char *input_json, char *output, size_t output_size)
@@ -84,6 +131,11 @@ esp_err_t tool_write_file_execute(const char *input_json, char *output, size_t o
         cJSON_Delete(root);
         return ESP_ERR_INVALID_ARG;
     }
+    if (!validate_write_path(path)) {
+        write_path_reject_message(output, output_size);
+        cJSON_Delete(root);
+        return ESP_ERR_INVALID_ARG;
+    }
     if (!content) {
         snprintf(output, output_size, "Error: missing 'content' field");
         cJSON_Delete(root);
@@ -129,6 +181,11 @@ esp_err_t tool_edit_file_execute(const char *input_json, char *output, size_t ou
 
     if (!validate_path(path)) {
         snprintf(output, output_size, "Error: path must start with %s/ and must not contain '..'", MIMI_SPIFFS_BASE);
+        cJSON_Delete(root);
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!validate_write_path(path)) {
+        write_path_reject_message(output, output_size);
         cJSON_Delete(root);
         return ESP_ERR_INVALID_ARG;
     }

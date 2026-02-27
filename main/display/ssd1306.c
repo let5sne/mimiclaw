@@ -1,0 +1,506 @@
+#include "ssd1306.h"
+#include "font_cjk.h"
+#include "driver/i2c.h"
+#include "esp_log.h"
+#include <string.h>
+#include <stdlib.h>
+
+static const char *TAG = "ssd1306";
+
+/* Display buffer */
+static uint8_t *s_buffer = NULL;
+static int s_width = 128;
+static int s_height = 64;
+static int s_i2c_port = 0;
+static uint8_t s_i2c_addr = 0x3C;
+
+/* 8x8 font (ASCII 32-127) */
+static const uint8_t font8x8_basic[96][8] = {
+    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, // Space
+    {0x18, 0x3C, 0x3C, 0x18, 0x18, 0x00, 0x18, 0x00}, // !
+    {0x36, 0x36, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, // "
+    {0x36, 0x36, 0x7F, 0x36, 0x7F, 0x36, 0x36, 0x00}, // #
+    {0x0C, 0x3E, 0x03, 0x1E, 0x30, 0x1F, 0x0C, 0x00}, // $
+    {0x00, 0x63, 0x33, 0x18, 0x0C, 0x66, 0x63, 0x00}, // %
+    {0x1C, 0x36, 0x1C, 0x6E, 0x3B, 0x33, 0x6E, 0x00}, // &
+    {0x06, 0x06, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00}, // '
+    {0x18, 0x0C, 0x06, 0x06, 0x06, 0x0C, 0x18, 0x00}, // (
+    {0x06, 0x0C, 0x18, 0x18, 0x18, 0x0C, 0x06, 0x00}, // )
+    {0x00, 0x66, 0x3C, 0xFF, 0x3C, 0x66, 0x00, 0x00}, // *
+    {0x00, 0x0C, 0x0C, 0x3F, 0x0C, 0x0C, 0x00, 0x00}, // +
+    {0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C, 0x06}, // ,
+    {0x00, 0x00, 0x00, 0x3F, 0x00, 0x00, 0x00, 0x00}, // -
+    {0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C, 0x00}, // .
+    {0x60, 0x30, 0x18, 0x0C, 0x06, 0x03, 0x01, 0x00}, // /
+    {0x3E, 0x63, 0x73, 0x7B, 0x6F, 0x67, 0x3E, 0x00}, // 0
+    {0x0C, 0x0E, 0x0C, 0x0C, 0x0C, 0x0C, 0x3F, 0x00}, // 1
+    {0x1E, 0x33, 0x30, 0x1C, 0x06, 0x33, 0x3F, 0x00}, // 2
+    {0x1E, 0x33, 0x30, 0x1C, 0x30, 0x33, 0x1E, 0x00}, // 3
+    {0x38, 0x3C, 0x36, 0x33, 0x7F, 0x30, 0x78, 0x00}, // 4
+    {0x3F, 0x03, 0x1F, 0x30, 0x30, 0x33, 0x1E, 0x00}, // 5
+    {0x1C, 0x06, 0x03, 0x1F, 0x33, 0x33, 0x1E, 0x00}, // 6
+    {0x3F, 0x33, 0x30, 0x18, 0x0C, 0x0C, 0x0C, 0x00}, // 7
+    {0x1E, 0x33, 0x33, 0x1E, 0x33, 0x33, 0x1E, 0x00}, // 8
+    {0x1E, 0x33, 0x33, 0x3E, 0x30, 0x18, 0x0E, 0x00}, // 9
+    {0x00, 0x0C, 0x0C, 0x00, 0x00, 0x0C, 0x0C, 0x00}, // :
+    {0x00, 0x0C, 0x0C, 0x00, 0x00, 0x0C, 0x0C, 0x06}, // ;
+    {0x18, 0x0C, 0x06, 0x03, 0x06, 0x0C, 0x18, 0x00}, // <
+    {0x00, 0x00, 0x3F, 0x00, 0x00, 0x3F, 0x00, 0x00}, // =
+    {0x06, 0x0C, 0x18, 0x30, 0x18, 0x0C, 0x06, 0x00}, // >
+    {0x1E, 0x33, 0x30, 0x18, 0x0C, 0x00, 0x0C, 0x00}, // ?
+    {0x3E, 0x63, 0x7B, 0x7B, 0x7B, 0x03, 0x1E, 0x00}, // @
+    {0x0C, 0x1E, 0x33, 0x33, 0x3F, 0x33, 0x33, 0x00}, // A
+    {0x3F, 0x66, 0x66, 0x3E, 0x66, 0x66, 0x3F, 0x00}, // B
+    {0x3C, 0x66, 0x03, 0x03, 0x03, 0x66, 0x3C, 0x00}, // C
+    {0x1F, 0x36, 0x66, 0x66, 0x66, 0x36, 0x1F, 0x00}, // D
+    {0x7F, 0x46, 0x16, 0x1E, 0x16, 0x46, 0x7F, 0x00}, // E
+    {0x7F, 0x46, 0x16, 0x1E, 0x16, 0x06, 0x0F, 0x00}, // F
+    {0x3C, 0x66, 0x03, 0x03, 0x73, 0x66, 0x7C, 0x00}, // G
+    {0x33, 0x33, 0x33, 0x3F, 0x33, 0x33, 0x33, 0x00}, // H
+    {0x1E, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x1E, 0x00}, // I
+    {0x78, 0x30, 0x30, 0x30, 0x33, 0x33, 0x1E, 0x00}, // J
+    {0x67, 0x66, 0x36, 0x1E, 0x36, 0x66, 0x67, 0x00}, // K
+    {0x0F, 0x06, 0x06, 0x06, 0x46, 0x66, 0x7F, 0x00}, // L
+    {0x63, 0x77, 0x7F, 0x7F, 0x6B, 0x63, 0x63, 0x00}, // M
+    {0x63, 0x67, 0x6F, 0x7B, 0x73, 0x63, 0x63, 0x00}, // N
+    {0x1C, 0x36, 0x63, 0x63, 0x63, 0x36, 0x1C, 0x00}, // O
+    {0x3F, 0x66, 0x66, 0x3E, 0x06, 0x06, 0x0F, 0x00}, // P
+    {0x1E, 0x33, 0x33, 0x33, 0x3B, 0x1E, 0x38, 0x00}, // Q
+    {0x3F, 0x66, 0x66, 0x3E, 0x36, 0x66, 0x67, 0x00}, // R
+    {0x1E, 0x33, 0x07, 0x0E, 0x38, 0x33, 0x1E, 0x00}, // S
+    {0x3F, 0x2D, 0x0C, 0x0C, 0x0C, 0x0C, 0x1E, 0x00}, // T
+    {0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x3F, 0x00}, // U
+    {0x33, 0x33, 0x33, 0x33, 0x33, 0x1E, 0x0C, 0x00}, // V
+    {0x63, 0x63, 0x63, 0x6B, 0x7F, 0x77, 0x63, 0x00}, // W
+    {0x63, 0x63, 0x36, 0x1C, 0x1C, 0x36, 0x63, 0x00}, // X
+    {0x33, 0x33, 0x33, 0x1E, 0x0C, 0x0C, 0x1E, 0x00}, // Y
+    {0x7F, 0x63, 0x31, 0x18, 0x4C, 0x66, 0x7F, 0x00}, // Z
+    {0x1E, 0x06, 0x06, 0x06, 0x06, 0x06, 0x1E, 0x00}, // [
+    {0x03, 0x06, 0x0C, 0x18, 0x30, 0x60, 0x40, 0x00}, // backslash
+    {0x1E, 0x18, 0x18, 0x18, 0x18, 0x18, 0x1E, 0x00}, // ]
+    {0x08, 0x1C, 0x36, 0x63, 0x00, 0x00, 0x00, 0x00}, // ^
+    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF}, // _
+    {0x0C, 0x0C, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00}, // `
+    {0x00, 0x00, 0x1E, 0x30, 0x3E, 0x33, 0x6E, 0x00}, // a
+    {0x07, 0x06, 0x06, 0x3E, 0x66, 0x66, 0x3B, 0x00}, // b
+    {0x00, 0x00, 0x1E, 0x33, 0x03, 0x33, 0x1E, 0x00}, // c
+    {0x38, 0x30, 0x30, 0x3e, 0x33, 0x33, 0x6E, 0x00}, // d
+    {0x00, 0x00, 0x1E, 0x33, 0x3f, 0x03, 0x1E, 0x00}, // e
+    {0x1C, 0x36, 0x06, 0x0f, 0x06, 0x06, 0x0F, 0x00}, // f
+    {0x00, 0x00, 0x6E, 0x33, 0x33, 0x3E, 0x30, 0x1F}, // g
+    {0x07, 0x06, 0x36, 0x6E, 0x66, 0x66, 0x67, 0x00}, // h
+    {0x0C, 0x00, 0x0E, 0x0C, 0x0C, 0x0C, 0x1E, 0x00}, // i
+    {0x30, 0x00, 0x30, 0x30, 0x30, 0x33, 0x33, 0x1E}, // j
+    {0x07, 0x06, 0x66, 0x36, 0x1E, 0x36, 0x67, 0x00}, // k
+    {0x0E, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x1E, 0x00}, // l
+    {0x00, 0x00, 0x33, 0x7F, 0x7F, 0x6B, 0x63, 0x00}, // m
+    {0x00, 0x00, 0x1F, 0x33, 0x33, 0x33, 0x33, 0x00}, // n
+    {0x00, 0x00, 0x1E, 0x33, 0x33, 0x33, 0x1E, 0x00}, // o
+    {0x00, 0x00, 0x3B, 0x66, 0x66, 0x3E, 0x06, 0x0F}, // p
+    {0x00, 0x00, 0x6E, 0x33, 0x33, 0x3E, 0x30, 0x78}, // q
+    {0x00, 0x00, 0x3B, 0x6E, 0x66, 0x06, 0x0F, 0x00}, // r
+    {0x00, 0x00, 0x3E, 0x03, 0x1E, 0x30, 0x1F, 0x00}, // s
+    {0x08, 0x0C, 0x3E, 0x0C, 0x0C, 0x2C, 0x18, 0x00}, // t
+    {0x00, 0x00, 0x33, 0x33, 0x33, 0x33, 0x6E, 0x00}, // u
+    {0x00, 0x00, 0x33, 0x33, 0x33, 0x1E, 0x0C, 0x00}, // v
+    {0x00, 0x00, 0x63, 0x6B, 0x7F, 0x7F, 0x36, 0x00}, // w
+    {0x00, 0x00, 0x63, 0x36, 0x1C, 0x36, 0x63, 0x00}, // x
+    {0x00, 0x00, 0x33, 0x33, 0x33, 0x3E, 0x30, 0x1F}, // y
+    {0x00, 0x00, 0x3F, 0x19, 0x0C, 0x26, 0x3F, 0x00}, // z
+    {0x38, 0x0C, 0x0C, 0x07, 0x0C, 0x0C, 0x38, 0x00}, // {
+    {0x18, 0x18, 0x18, 0x00, 0x18, 0x18, 0x18, 0x00}, // |
+    {0x07, 0x0C, 0x0C, 0x38, 0x0C, 0x0C, 0x07, 0x00}, // }
+    {0x6E, 0x3B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, // ~
+    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}  // DEL
+};
+
+/* I2C write command */
+static esp_err_t i2c_write_cmd(uint8_t cmd)
+{
+    uint8_t data[2] = {0x00, cmd};
+    return i2c_master_write_to_device(s_i2c_port, s_i2c_addr, data, 2, pdMS_TO_TICKS(1000));
+}
+
+/* I2C write data */
+static esp_err_t i2c_write_data(const uint8_t *data, size_t len)
+{
+    uint8_t *buf = malloc(len + 1);
+    if (!buf) return ESP_ERR_NO_MEM;
+
+    buf[0] = 0x40; // Data mode
+    memcpy(buf + 1, data, len);
+
+    esp_err_t ret = i2c_master_write_to_device(s_i2c_port, s_i2c_addr, buf, len + 1, pdMS_TO_TICKS(1000));
+    free(buf);
+    return ret;
+}
+
+esp_err_t ssd1306_init(const display_config_t *config)
+{
+    s_width = config->width;
+    s_height = config->height;
+    s_i2c_port = config->i2c_port;
+    s_i2c_addr = config->i2c_addr;
+
+    /* Allocate buffer */
+    size_t buffer_size = (s_width * s_height) / 8;
+    s_buffer = calloc(1, buffer_size);
+    if (!s_buffer) {
+        ESP_LOGE(TAG, "Failed to allocate display buffer");
+        return ESP_ERR_NO_MEM;
+    }
+
+    /* Initialize I2C */
+    i2c_config_t i2c_conf = {
+        .mode = I2C_MODE_MASTER,
+        .sda_io_num = config->sda_pin,
+        .scl_io_num = config->scl_pin,
+        .sda_pullup_en = GPIO_PULLUP_ENABLE,
+        .scl_pullup_en = GPIO_PULLUP_ENABLE,
+        .master.clk_speed = 400000,
+    };
+
+    esp_err_t ret = i2c_param_config(s_i2c_port, &i2c_conf);
+    if (ret != ESP_OK) {
+        free(s_buffer);
+        return ret;
+    }
+
+    ret = i2c_driver_install(s_i2c_port, I2C_MODE_MASTER, 0, 0, 0);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to install I2C driver: %s", esp_err_to_name(ret));
+        free(s_buffer);
+        return ret;
+    }
+
+    /* Probe I2C device */
+    ESP_LOGI(TAG, "Probing I2C addr 0x%02X on SDA=%d SCL=%d",
+             s_i2c_addr, config->sda_pin, config->scl_pin);
+
+    /* Scan I2C bus to find connected devices */
+    ESP_LOGI(TAG, "Scanning I2C bus...");
+    bool found = false;
+    for (uint8_t addr = 0x03; addr < 0x78; addr++) {
+        i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+        i2c_master_start(cmd);
+        i2c_master_write_byte(cmd, (addr << 1) | I2C_MASTER_WRITE, true);
+        i2c_master_stop(cmd);
+        esp_err_t probe_ret = i2c_master_cmd_begin(s_i2c_port, cmd, pdMS_TO_TICKS(50));
+        i2c_cmd_link_delete(cmd);
+        if (probe_ret == ESP_OK) {
+            ESP_LOGI(TAG, "I2C device found at addr 0x%02X", addr);
+            if (!found) {
+                s_i2c_addr = addr;  /* Use first found device */
+                found = true;
+            }
+        }
+    }
+
+    if (!found) {
+        ESP_LOGE(TAG, "No I2C device found! Check wiring: SDA=%d SCL=%d",
+                 config->sda_pin, config->scl_pin);
+        ESP_LOGE(TAG, "Try swapping SDA and SCL pins");
+        free(s_buffer);
+        i2c_driver_delete(s_i2c_port);
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    ESP_LOGI(TAG, "Using I2C addr 0x%02X", s_i2c_addr);
+
+    /* Initialize display */
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    i2c_write_cmd(SSD1306_CMD_DISPLAY_OFF);
+    i2c_write_cmd(SSD1306_CMD_SET_DISPLAY_CLK_DIV);
+    i2c_write_cmd(0x80);
+    i2c_write_cmd(SSD1306_CMD_SET_MULTIPLEX);
+    i2c_write_cmd(s_height - 1);
+    i2c_write_cmd(SSD1306_CMD_SET_DISPLAY_OFFSET);
+    i2c_write_cmd(0x00);
+    i2c_write_cmd(SSD1306_CMD_SET_START_LINE | 0x00);
+    i2c_write_cmd(SSD1306_CMD_CHARGE_PUMP);
+    i2c_write_cmd(0x14);
+    i2c_write_cmd(SSD1306_CMD_MEMORY_MODE);
+    i2c_write_cmd(0x00);
+    i2c_write_cmd(SSD1306_CMD_SEG_REMAP | 0x01);
+    i2c_write_cmd(SSD1306_CMD_COM_SCAN_DEC);
+    i2c_write_cmd(SSD1306_CMD_SET_COM_PINS);
+    i2c_write_cmd(s_height == 64 ? 0x12 : 0x02);
+    i2c_write_cmd(SSD1306_CMD_SET_CONTRAST);
+    i2c_write_cmd(0xCF);
+    i2c_write_cmd(SSD1306_CMD_SET_PRECHARGE);
+    i2c_write_cmd(0xF1);
+    i2c_write_cmd(SSD1306_CMD_SET_VCOM_DETECT);
+    i2c_write_cmd(0x40);
+    i2c_write_cmd(0xA4);  /* Resume to RAM content display (not all-on) */
+    i2c_write_cmd(SSD1306_CMD_DISPLAY_NORMAL);
+    i2c_write_cmd(SSD1306_CMD_DEACTIVATE_SCROLL);
+    i2c_write_cmd(SSD1306_CMD_DISPLAY_ON);
+
+    ESP_LOGI(TAG, "SSD1306 initialized: %dx%d", s_width, s_height);
+
+    /* Draw a test pattern to verify display works */
+    memset(s_buffer, 0, (s_width * s_height) / 8);
+
+    /* Draw "MimiClaw" text */
+    ssd1306_draw_text(16, 4, "MimiClaw", 2);
+
+    /* Flush to screen */
+    ssd1306_update();
+
+    return ESP_OK;
+}
+
+void ssd1306_deinit(void)
+{
+    if (s_buffer) {
+        free(s_buffer);
+        s_buffer = NULL;
+    }
+    i2c_driver_delete(s_i2c_port);
+}
+
+void ssd1306_clear(void)
+{
+    if (s_buffer) {
+        memset(s_buffer, 0, (s_width * s_height) / 8);
+    }
+}
+
+void ssd1306_update(void)
+{
+    if (!s_buffer) return;
+
+    i2c_write_cmd(SSD1306_CMD_COLUMN_ADDR);
+    i2c_write_cmd(0);
+    i2c_write_cmd(s_width - 1);
+    i2c_write_cmd(SSD1306_CMD_PAGE_ADDR);
+    i2c_write_cmd(0);
+    i2c_write_cmd((s_height / 8) - 1);
+
+    i2c_write_data(s_buffer, (s_width * s_height) / 8);
+}
+
+void ssd1306_draw_pixel(int x, int y, bool on)
+{
+    if (!s_buffer || x < 0 || x >= s_width || y < 0 || y >= s_height) return;
+
+    int byte_idx = x + (y / 8) * s_width;
+    int bit_idx = y % 8;
+
+    if (on) {
+        s_buffer[byte_idx] |= (1 << bit_idx);
+    } else {
+        s_buffer[byte_idx] &= ~(1 << bit_idx);
+    }
+}
+
+void ssd1306_draw_line(int x0, int y0, int x1, int y1)
+{
+    int dx = abs(x1 - x0);
+    int dy = abs(y1 - y0);
+    int sx = x0 < x1 ? 1 : -1;
+    int sy = y0 < y1 ? 1 : -1;
+    int err = dx - dy;
+
+    while (1) {
+        ssd1306_draw_pixel(x0, y0, true);
+
+        if (x0 == x1 && y0 == y1) break;
+
+        int e2 = 2 * err;
+        if (e2 > -dy) {
+            err -= dy;
+            x0 += sx;
+        }
+        if (e2 < dx) {
+            err += dx;
+            y0 += sy;
+        }
+    }
+}
+
+void ssd1306_draw_rect(int x, int y, int w, int h, bool fill)
+{
+    if (fill) {
+        for (int i = 0; i < h; i++) {
+            for (int j = 0; j < w; j++) {
+                ssd1306_draw_pixel(x + j, y + i, true);
+            }
+        }
+    } else {
+        ssd1306_draw_line(x, y, x + w - 1, y);
+        ssd1306_draw_line(x + w - 1, y, x + w - 1, y + h - 1);
+        ssd1306_draw_line(x + w - 1, y + h - 1, x, y + h - 1);
+        ssd1306_draw_line(x, y + h - 1, x, y);
+    }
+}
+
+/* Decode one UTF-8 character, advance *pp past it. Returns Unicode codepoint, 0 on error. */
+static uint32_t utf8_decode(const char **pp)
+{
+    const uint8_t *p = (const uint8_t *)*pp;
+    uint32_t cp;
+    int extra;
+
+    if (*p < 0x80) {
+        cp = *p++;
+        extra = 0;
+    } else if ((*p & 0xE0) == 0xC0) {
+        cp = *p++ & 0x1F;
+        extra = 1;
+    } else if ((*p & 0xF0) == 0xE0) {
+        cp = *p++ & 0x0F;
+        extra = 2;
+    } else if ((*p & 0xF8) == 0xF0) {
+        cp = *p++ & 0x07;
+        extra = 3;
+    } else {
+        /* Invalid lead byte – skip it */
+        *pp = (const char *)(p + 1);
+        return 0xFFFD;
+    }
+
+    for (int i = 0; i < extra; i++) {
+        if ((*p & 0xC0) != 0x80) { *pp = (const char *)p; return 0xFFFD; }
+        cp = (cp << 6) | (*p++ & 0x3F);
+    }
+
+    *pp = (const char *)p;
+    return cp;
+}
+
+/* Draw a 16x16 glyph bitmap (row-major, 2 bytes/row, MSB-left) */
+static void draw_glyph_16x16(int x, int y, const uint8_t *bitmap)
+{
+    for (int row = 0; row < 16; row++) {
+        uint8_t hi = bitmap[row * 2];
+        uint8_t lo = bitmap[row * 2 + 1];
+        for (int col = 0; col < 8; col++) {
+            if (hi & (0x80 >> col))
+                ssd1306_draw_pixel(x + col, y + row, true);
+        }
+        for (int col = 0; col < 8; col++) {
+            if (lo & (0x80 >> col))
+                ssd1306_draw_pixel(x + 8 + col, y + row, true);
+        }
+    }
+}
+
+/* Draw a single 8x8 ASCII glyph at scale */
+static void draw_ascii_glyph(int x, int y, uint8_t c, int scale)
+{
+    if (c < 32 || c > 127) c = 32;
+    const uint8_t *glyph = font8x8_basic[c - 32];
+    for (int row = 0; row < 8; row++) {
+        for (int col = 0; col < 8; col++) {
+            if (glyph[row] & (1 << col)) {
+                for (int sy = 0; sy < scale; sy++) {
+                    for (int sx = 0; sx < scale; sx++) {
+                        ssd1306_draw_pixel(x + col * scale + sx,
+                                         y + row * scale + sy, true);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/* Check if codepoint is CJK (U+2E80..U+9FFF, U+F900..U+FAFF, U+FE30..U+FE4F,
+   fullwidth punctuation U+3000..U+303F, U+FF00..U+FFEF) */
+static bool is_cjk(uint32_t cp)
+{
+    return (cp >= 0x2E80 && cp <= 0x9FFF) ||
+           (cp >= 0x3000 && cp <= 0x303F) ||
+           (cp >= 0xF900 && cp <= 0xFAFF) ||
+           (cp >= 0xFE30 && cp <= 0xFE4F) ||
+           (cp >= 0xFF00 && cp <= 0xFFEF);
+}
+
+void ssd1306_draw_text(int x, int y, const char *text, int scale)
+{
+    if (!text) return;
+
+    int cursor_x = x;
+
+    while (*text) {
+        uint32_t cp = utf8_decode(&text);
+        if (cp == 0) break;
+
+        if (is_cjk(cp)) {
+            const uint8_t *bmp = font_cjk_get_glyph(cp);
+            if (bmp) {
+                draw_glyph_16x16(cursor_x, y, bmp);
+            }
+            cursor_x += 16;
+        } else {
+            draw_ascii_glyph(cursor_x, y, (uint8_t)cp, scale);
+            cursor_x += 8 * scale;
+        }
+
+        if (cursor_x >= s_width) break;
+    }
+}
+
+void ssd1306_draw_text_wrapped(int x, int y, const char *text, int scale, int max_width_px)
+{
+    if (!text) return;
+
+    int cursor_x = x;
+    int cursor_y = y;
+    int line_height = 16;  /* Uniform 16px line height for mixed text */
+
+    while (*text) {
+        if (*text == '\n') {
+            text++;
+            cursor_x = x;
+            cursor_y += line_height;
+            if (cursor_y + line_height > s_height) break;
+            continue;
+        }
+
+        uint32_t cp = utf8_decode(&text);
+        if (cp == 0) break;
+
+        int glyph_w;
+        bool cjk = is_cjk(cp);
+        if (cjk) {
+            glyph_w = 16;
+        } else {
+            glyph_w = 8 * scale;
+        }
+
+        /* Wrap if this glyph won't fit on current line */
+        if (cursor_x + glyph_w > x + max_width_px) {
+            cursor_x = x;
+            cursor_y += line_height;
+            if (cursor_y + line_height > s_height) break;
+
+            /* Skip leading space after wrap */
+            if (cp == ' ') continue;
+        }
+
+        if (cjk) {
+            const uint8_t *bmp = font_cjk_get_glyph(cp);
+            if (bmp) {
+                draw_glyph_16x16(cursor_x, cursor_y, bmp);
+            }
+        } else {
+            /* Vertically center 8px ASCII glyph within 16px line */
+            draw_ascii_glyph(cursor_x, cursor_y + 4, (uint8_t)cp, scale);
+        }
+
+        cursor_x += glyph_w;
+    }
+}
+
+void ssd1306_set_contrast(uint8_t contrast)
+{
+    i2c_write_cmd(SSD1306_CMD_SET_CONTRAST);
+    i2c_write_cmd(contrast);
+}
+
+void ssd1306_set_power(bool on)
+{
+    i2c_write_cmd(on ? SSD1306_CMD_DISPLAY_ON : SSD1306_CMD_DISPLAY_OFF);
+}

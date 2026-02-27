@@ -4,7 +4,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
-#include <sys/stat.h>
 #include "esp_log.h"
 
 static const char *TAG = "memory";
@@ -17,6 +16,11 @@ static void get_date_str(char *buf, size_t size, int days_ago)
     struct tm tm;
     localtime_r(&now, &tm);
     strftime(buf, size, "%Y-%m-%d", &tm);
+}
+
+static void get_daily_path(char *buf, size_t size, const char *date_str)
+{
+    snprintf(buf, size, "%s/daily/%s.md", MIMI_SPIFFS_MEMORY_DIR, date_str);
 }
 
 esp_err_t memory_store_init(void)
@@ -59,8 +63,8 @@ esp_err_t memory_append_today(const char *note)
     char date_str[16];
     get_date_str(date_str, sizeof(date_str), 0);
 
-    char path[64];
-    snprintf(path, sizeof(path), "%s/%s.md", MIMI_SPIFFS_MEMORY_DIR, date_str);
+    char path[96];
+    get_daily_path(path, sizeof(path), date_str);
 
     FILE *f = fopen(path, "a");
     if (!f) {
@@ -87,8 +91,8 @@ esp_err_t memory_read_recent(char *buf, size_t size, int days)
         char date_str[16];
         get_date_str(date_str, sizeof(date_str), i);
 
-        char path[64];
-        snprintf(path, sizeof(path), "%s/%s.md", MIMI_SPIFFS_MEMORY_DIR, date_str);
+        char path[96];
+        get_daily_path(path, sizeof(path), date_str);
 
         FILE *f = fopen(path, "r");
         if (!f) continue;

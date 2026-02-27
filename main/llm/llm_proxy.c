@@ -4,6 +4,9 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <inttypes.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
@@ -312,6 +315,93 @@ static esp_err_t llm_http_call(const char *post_data, resp_buf_t *rb, int *out_s
     }
 }
 
+static bool llm_status_retryable(int status)
+{
+    return status == 0 || status == 408 || status == 409 ||
+           status == 425 || status == 429 || (status >= 500 && status <= 599);
+}
+
+static uint32_t llm_retry_delay_ms(int attempt)
+{
+    uint32_t delay = MIMI_LLM_RETRY_BASE_MS;
+    for (int i = 1; i < attempt; i++) {
+        if (delay >= MIMI_LLM_RETRY_MAX_DELAY_MS) break;
+        delay <<= 1;
+        if (delay > MIMI_LLM_RETRY_MAX_DELAY_MS) {
+            delay = MIMI_LLM_RETRY_MAX_DELAY_MS;
+            break;
+        }
+    }
+    return delay;
+}
+
+/* 返回值与 llm_http_call 保持一致；会在瞬时错误时自动重试。 */
+static esp_err_t llm_http_call_with_retry(const char *post_data, resp_buf_t *rb, int *out_status)
+{
+    esp_err_t last_err = ESP_FAIL;
+    int last_status = 0;
+
+    for (int attempt = 1; attempt <= MIMI_LLM_RETRY_MAX; attempt++) {
+        rb->len = 0;
+        if (rb->data && rb->cap > 0) rb->data[0] = '\0';
+
+        last_err = llm_http_call(post_data, rb, &last_status);
+        bool should_retry = (last_err != ESP_OK) || llm_status_retryable(last_status);
+        if (!should_retry) {
+            *out_status = last_status;
+            return ESP_OK;
+        }
+
+        if (attempt < MIMI_LLM_RETRY_MAX) {
+            uint32_t delay_ms = llm_retry_delay_ms(attempt);
+            ESP_LOGW(TAG, "Transient LLM failure (attempt %d/%d, err=%s, status=%d), retry in %" PRIu32 " ms",
+                     attempt, MIMI_LLM_RETRY_MAX, esp_err_to_name(last_err), last_status, delay_ms);
+            vTaskDelay(pdMS_TO_TICKS(delay_ms));
+        }
+    }
+
+    *out_status = last_status;
+    return last_err;
+}
+
+/* ── Parse text from JSON response ────────────────────────────── */
+
+static void extract_text_anthropic(cJSON *root, char *buf, size_t size)
+{
+    buf[0] = '\0';
+    cJSON *content = cJSON_GetObjectItem(root, "content");
+    if (!content || !cJSON_IsArray(content)) return;
+
+    size_t off = 0;
+    cJSON *block;
+    cJSON_ArrayForEach(block, content) {
+        cJSON *btype = cJSON_GetObjectItem(block, "type");
+        if (!btype || strcmp(btype->valuestring, "text") != 0) continue;
+        cJSON *text = cJSON_GetObjectItem(block, "text");
+        if (!text || !cJSON_IsString(text)) continue;
+        size_t tlen = strlen(text->valuestring);
+        size_t copy = (tlen < size - off - 1) ? tlen : size - off - 1;
+        memcpy(buf + off, text->valuestring, copy);
+        off += copy;
+    }
+    buf[off] = '\0';
+}
+
+static void extract_text_openai(cJSON *root, char *buf, size_t size)
+{
+    buf[0] = '\0';
+    cJSON *choices = cJSON_GetObjectItem(root, "choices");
+    if (!choices || !cJSON_IsArray(choices)) return;
+    cJSON *choice0 = cJSON_GetArrayItem(choices, 0);
+    if (!choice0) return;
+    cJSON *message = cJSON_GetObjectItem(choice0, "message");
+    if (!message) return;
+    cJSON *content = cJSON_GetObjectItem(message, "content");
+    if (!content || !cJSON_IsString(content)) return;
+    strncpy(buf, content->valuestring, size - 1);
+    buf[size - 1] = '\0';
+}
+
 static cJSON *convert_tools_openai(const char *tools_json)
 {
     if (!tools_json) return NULL;
@@ -481,6 +571,118 @@ static cJSON *convert_messages_openai(const char *system_prompt, cJSON *messages
     return out;
 }
 
+/* ── Public: simple chat (backward compat) ────────────────────── */
+
+esp_err_t llm_chat(const char *system_prompt, const char *messages_json,
+                   char *response_buf, size_t buf_size)
+{
+    if (s_api_key[0] == '\0') {
+        snprintf(response_buf, buf_size, "Error: No API key configured");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* Build request body (non-streaming) */
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddStringToObject(body, "model", s_model);
+    if (provider_is_openai()) {
+        cJSON_AddNumberToObject(body, "max_completion_tokens", MIMI_LLM_MAX_TOKENS);
+    } else {
+        cJSON_AddNumberToObject(body, "max_tokens", MIMI_LLM_MAX_TOKENS);
+    }
+
+    if (provider_is_openai()) {
+        cJSON *messages = cJSON_Parse(messages_json);
+        if (!messages) {
+            messages = cJSON_CreateArray();
+            cJSON *msg = cJSON_CreateObject();
+            cJSON_AddStringToObject(msg, "role", "user");
+            cJSON_AddStringToObject(msg, "content", messages_json);
+            cJSON_AddItemToArray(messages, msg);
+        }
+        cJSON *openai_msgs = convert_messages_openai(system_prompt, messages);
+        cJSON_Delete(messages);
+        cJSON_AddItemToObject(body, "messages", openai_msgs);
+    } else {
+        cJSON_AddStringToObject(body, "system", system_prompt);
+        cJSON *messages = cJSON_Parse(messages_json);
+        if (messages) {
+            cJSON_AddItemToObject(body, "messages", messages);
+        } else {
+            cJSON *arr = cJSON_CreateArray();
+            cJSON *msg = cJSON_CreateObject();
+            cJSON_AddStringToObject(msg, "role", "user");
+            cJSON_AddStringToObject(msg, "content", messages_json);
+            cJSON_AddItemToArray(arr, msg);
+            cJSON_AddItemToObject(body, "messages", arr);
+        }
+    }
+
+    char *post_data = cJSON_PrintUnformatted(body);
+    cJSON_Delete(body);
+    if (!post_data) {
+        snprintf(response_buf, buf_size, "Error: Failed to build request");
+        return ESP_ERR_NO_MEM;
+    }
+
+    ESP_LOGI(TAG, "Calling LLM API (provider: %s, model: %s, body: %d bytes)",
+             s_provider, s_model, (int)strlen(post_data));
+    llm_log_payload("LLM request", post_data);
+
+    resp_buf_t rb;
+    if (resp_buf_init(&rb, MIMI_LLM_STREAM_BUF_SIZE) != ESP_OK) {
+        free(post_data);
+        snprintf(response_buf, buf_size, "Error: Out of memory");
+        return ESP_ERR_NO_MEM;
+    }
+
+    int status = 0;
+    esp_err_t err = llm_http_call_with_retry(post_data, &rb, &status);
+    free(post_data);
+
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "HTTP request failed: %s", esp_err_to_name(err));
+        llm_log_payload("LLM partial response", rb.data);
+        resp_buf_free(&rb);
+        snprintf(response_buf, buf_size, "Error: HTTP request failed (%s)",
+                 esp_err_to_name(err));
+        return err;
+    }
+
+    llm_log_payload("LLM raw response", rb.data);
+
+    if (status != 200) {
+        ESP_LOGE(TAG, "API returned status %d", status);
+        snprintf(response_buf, buf_size, "API error (HTTP %d): %.200s",
+                 status, rb.data ? rb.data : "");
+        resp_buf_free(&rb);
+        return ESP_FAIL;
+    }
+
+    /* Parse JSON response */
+    cJSON *root = cJSON_Parse(rb.data);
+    resp_buf_free(&rb);
+
+    if (!root) {
+        snprintf(response_buf, buf_size, "Error: Failed to parse response");
+        return ESP_FAIL;
+    }
+
+    if (provider_is_openai()) {
+        extract_text_openai(root, response_buf, buf_size);
+    } else {
+        extract_text_anthropic(root, response_buf, buf_size);
+    }
+    cJSON_Delete(root);
+
+    if (response_buf[0] == '\0') {
+        snprintf(response_buf, buf_size, "No response from LLM API");
+    } else {
+        ESP_LOGI(TAG, "LLM response: %d bytes", (int)strlen(response_buf));
+    }
+
+    return ESP_OK;
+}
+
 /* ── Public: chat with tools (non-streaming) ──────────────────── */
 
 void llm_response_free(llm_response_t *resp)
@@ -557,7 +759,7 @@ esp_err_t llm_chat_tools(const char *system_prompt,
     }
 
     int status = 0;
-    esp_err_t err = llm_http_call(post_data, &rb, &status);
+    esp_err_t err = llm_http_call_with_retry(post_data, &rb, &status);
     free(post_data);
 
     if (err != ESP_OK) {
