@@ -58,8 +58,16 @@
 #define MIMI_MAX_TOOL_CALLS          4
 #define MIMI_AGENT_SEND_WORKING_STATUS 1
 
-/* Timezone (POSIX TZ format) */
-#define MIMI_TIMEZONE                "PST8PDT,M3.2.0,M11.1.0"
+/* Timezone (POSIX TZ format).
+ * Default is UTC so daily memory filenames are consistent for all users.
+ * Override at runtime with the `set_timezone` CLI command, e.g.:
+ *   set_timezone CST-8          (China Standard Time)
+ *   set_timezone EST5EDT,...    (US Eastern with DST)
+ * The value is persisted in NVS and applied on every boot.
+ */
+#define MIMI_TIMEZONE                "UTC0"
+#define MIMI_NVS_NAMESPACE           "mimi_cfg"
+#define MIMI_NVS_KEY_TIMEZONE        "timezone"
 
 /* LLM */
 #define MIMI_LLM_DEFAULT_MODEL       "claude-opus-4-5"

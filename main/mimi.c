@@ -8,6 +8,7 @@
 #include "esp_heap_caps.h"
 #include "esp_spiffs.h"
 #include "nvs_flash.h"
+#include "nvs.h"
 
 #include "mimi_config.h"
 #include "bus/message_bus.h"
@@ -132,6 +133,22 @@ void app_main(void)
 
     /* Phase 1: Core infrastructure */
     ESP_ERROR_CHECK(init_nvs());
+
+    /* Load timezone from NVS (falls back to MIMI_TIMEZONE default) */
+    {
+        nvs_handle_t nvs;
+        char tz_buf[64] = MIMI_TIMEZONE;
+        if (nvs_open(MIMI_NVS_NAMESPACE, NVS_READONLY, &nvs) == ESP_OK) {
+            size_t tz_len = sizeof(tz_buf);
+            if (nvs_get_str(nvs, MIMI_NVS_KEY_TIMEZONE, tz_buf, &tz_len) != ESP_OK) {
+                strncpy(tz_buf, MIMI_TIMEZONE, sizeof(tz_buf) - 1);
+            }
+            nvs_close(nvs);
+        }
+        setenv("TZ", tz_buf, 1);
+        tzset();
+        ESP_LOGI(TAG, "Timezone: %s", tz_buf);
+    }
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     ESP_ERROR_CHECK(init_spiffs());
 

@@ -764,6 +764,70 @@ esp_err_t serial_cli_init(void)
     };
     esp_console_cmd_register(&heartbeat_cmd);
 
+    /* --- set_timezone command --- */
+static struct {
+    struct arg_str *tz;
+    struct arg_end *end;
+} timezone_args;
+
+static int cmd_set_timezone(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&timezone_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, timezone_args.end, argv[0]);
+        return 1;
+    }
+    const char *tz = timezone_args.tz->sval[0];
+
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open(MIMI_NVS_NAMESPACE, NVS_READWRITE, &nvs);
+    if (err != ESP_OK) {
+        printf("NVS open failed: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+    err = nvs_set_str(nvs, MIMI_NVS_KEY_TIMEZONE, tz);
+    nvs_commit(nvs);
+    nvs_close(nvs);
+
+    if (err != ESP_OK) {
+        printf("Failed to save timezone: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    /* Apply immediately without reboot */
+    setenv("TZ", tz, 1);
+    tzset();
+    printf("Timezone set to: %s (applied immediately)\n", tz);
+    return 0;
+}
+
+/* --- get_timezone command --- */
+static int cmd_get_timezone(int argc, char **argv)
+{
+    const char *current = getenv("TZ");
+    printf("Current timezone: %s\n", current ? current : MIMI_TIMEZONE);
+    return 0;
+}
+
+
+    /* set_timezone */
+    timezone_args.tz = arg_str1(NULL, NULL, "<tz>", "POSIX TZ string, e.g. CST-8 or UTC0");
+    timezone_args.end = arg_end(1);
+    esp_console_cmd_t tz_set_cmd = {
+        .command = "set_timezone",
+        .help = "Set timezone (POSIX TZ format, e.g. CST-8, EST5EDT). Persisted in NVS.",
+        .func = &cmd_set_timezone,
+    };
+    esp_console_cmd_register(&tz_set_cmd);
+
+    /* get_timezone */
+    esp_console_cmd_t tz_get_cmd = {
+        .command = "get_timezone",
+        .help = "Show current timezone setting",
+        .func = &cmd_get_timezone,
+    };
+    esp_console_cmd_register(&tz_get_cmd);
+
     /* cron_start */
     esp_console_cmd_t cron_start_cmd = {
         .command = "cron_start",
