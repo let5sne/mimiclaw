@@ -30,12 +30,8 @@ static int64_t s_last_saved_offset = -1;
 static int64_t s_last_offset_save_us = 0;
 
 #define TG_OFFSET_NVS_KEY            "update_offset"
-#define TG_DEDUP_CACHE_SIZE          64
 #define TG_OFFSET_SAVE_INTERVAL_US   (5LL * 1000 * 1000)
 #define TG_OFFSET_SAVE_STEP          10
-
-static uint64_t s_seen_msg_keys[TG_DEDUP_CACHE_SIZE] = {0};
-static size_t s_seen_msg_idx = 0;
 
 #define TG_VISION_CACHE_SLOTS 8
 #define TG_VISION_TEXT_MAX    768
@@ -55,41 +51,6 @@ typedef struct {
     size_t len;
     size_t cap;
 } http_resp_t;
-
-static uint64_t fnv1a64(const char *s)
-{
-    uint64_t h = 1469598103934665603ULL;
-    if (!s) {
-        return h;
-    }
-    while (*s) {
-        h ^= (unsigned char)(*s++);
-        h *= 1099511628211ULL;
-    }
-    return h;
-}
-
-static uint64_t make_msg_key(const char *chat_id, int msg_id)
-{
-    uint64_t h = fnv1a64(chat_id);
-    return (h << 16) ^ (uint64_t)(msg_id & 0xFFFF) ^ ((uint64_t)msg_id << 32);
-}
-
-static bool seen_msg_contains(uint64_t key)
-{
-    for (size_t i = 0; i < TG_DEDUP_CACHE_SIZE; i++) {
-        if (s_seen_msg_keys[i] == key) {
-            return true;
-        }
-    }
-    return false;
-}
-
-static void seen_msg_insert(uint64_t key)
-{
-    s_seen_msg_keys[s_seen_msg_idx] = key;
-    s_seen_msg_idx = (s_seen_msg_idx + 1) % TG_DEDUP_CACHE_SIZE;
-}
 
 static void save_update_offset_if_needed(bool force)
 {
@@ -269,6 +230,20 @@ static char *tg_api_call(const char *method, const char *post_data)
         return tg_api_call_via_proxy(method, post_data);
     }
     return tg_api_call_direct(method, post_data);
+}
+
+static int tg_response_is_ok(const char *resp, const char **out_desc)
+{
+    if (!resp) return 0;
+    cJSON *root = cJSON_Parse(resp);
+    if (!root) return 0;
+    int ok = cJSON_IsTrue(cJSON_GetObjectItem(root, "ok")) ? 1 : 0;
+    if (!ok && out_desc) {
+        cJSON *desc = cJSON_GetObjectItem(root, "description");
+        *out_desc = cJSON_IsString(desc) ? desc->valuestring : NULL;
+    }
+    cJSON_Delete(root);
+    return ok;
 }
 
 static int tg_find_http_header_end(const uint8_t *buf, size_t len)

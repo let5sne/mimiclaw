@@ -2,9 +2,14 @@
 #include "mimi_config.h"
 #include "esp_log.h"
 #include "driver/i2s_std.h"
+#if __has_include("esp_wn_iface.h") && __has_include("esp_wn_models.h") && __has_include("model_path.h")
+#define MIMI_AUDIO_WAKENET_AVAILABLE 1
 #include "esp_wn_iface.h"
 #include "esp_wn_models.h"
 #include "model_path.h"
+#else
+#define MIMI_AUDIO_WAKENET_AVAILABLE 0
+#endif
 #include "nvs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -27,11 +32,13 @@ static uint8_t s_volume = 80;
 static bool s_muted = false;
 
 /* WakeNet state */
+#if MIMI_AUDIO_WAKENET_AVAILABLE
 static srmodel_list_t *s_sr_models = NULL;
 static const esp_wn_iface_t *s_wakenet = NULL;
 static model_iface_data_t *s_wakenet_data = NULL;
 static int s_wakenet_chunk_samples = 0;
 static char s_wakenet_model_name[MODEL_NAME_MAX_LENGTH] = {0};
+#endif
 static i2s_std_slot_mask_t s_mic_slot_mask = I2S_STD_SLOT_LEFT;
 
 /* Task handles */
@@ -51,12 +58,14 @@ static void log_playback_path_state(const char *stage)
 /* Forward declarations */
 static void load_persisted_volume(void);
 static void persist_volume(uint8_t volume);
+#if MIMI_AUDIO_WAKENET_AVAILABLE
 static const char *wake_word_keyword_from_config(const char *wake_word,
                                                  char *out, size_t out_size);
 static esp_err_t audio_wakenet_init(void);
-static void audio_wakenet_deinit(void);
 static esp_err_t audio_set_mic_slot_mask(i2s_std_slot_mask_t slot_mask);
 static void listen_task(void *arg);
+#endif
+static void audio_wakenet_deinit(void);
 static void record_task(void *arg) __attribute__((unused));
 
 static inline int16_t apply_gain_q15(int16_t sample, uint16_t gain_q15)
@@ -242,6 +251,7 @@ esp_err_t audio_init(const audio_config_t *config)
 
     /* WakeNet threshold is a probability in [0.4, 0.9999]. */
     if (s_config.enable_wake_word) {
+#if MIMI_AUDIO_WAKENET_AVAILABLE
         if (s_config.wake_word_threshold > 0.0f &&
             (s_config.wake_word_threshold < 0.4f || s_config.wake_word_threshold > 0.9999f)) {
             ESP_LOGW(TAG, "Wake threshold %.3f out of range, use model default",
@@ -249,6 +259,10 @@ esp_err_t audio_init(const audio_config_t *config)
         }
         ESP_LOGI(TAG, "Wake word configured: \"%s\"",
                  s_config.wake_word ? s_config.wake_word : "");
+#else
+        s_config.enable_wake_word = false;
+        ESP_LOGW(TAG, "Wake word disabled: esp-sr headers not found in build environment");
+#endif
     }
 
     s_initialized = true;
@@ -300,6 +314,10 @@ esp_err_t audio_start_listening(void)
         return ESP_ERR_NOT_SUPPORTED;
     }
 
+#if !MIMI_AUDIO_WAKENET_AVAILABLE
+    ESP_LOGW(TAG, "WakeNet unavailable: missing esp-sr headers");
+    return ESP_ERR_NOT_SUPPORTED;
+#else
     esp_err_t ret = audio_wakenet_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "WakeNet init failed");
@@ -324,6 +342,7 @@ esp_err_t audio_start_listening(void)
 
     ESP_LOGI(TAG, "Started listening for wake word");
     return ESP_OK;
+#endif
 }
 
 void audio_stop_listening(void)
@@ -566,6 +585,7 @@ static void persist_volume(uint8_t volume)
     }
 }
 
+#if MIMI_AUDIO_WAKENET_AVAILABLE
 static const char *wake_word_keyword_from_config(const char *wake_word,
                                                  char *out, size_t out_size)
 {
@@ -869,6 +889,11 @@ static void listen_task(void *arg)
     s_listen_task = NULL;
     vTaskDelete(NULL);
 }
+#else
+static void audio_wakenet_deinit(void)
+{
+}
+#endif
 
 static void record_task(void *arg)
 {

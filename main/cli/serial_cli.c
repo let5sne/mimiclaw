@@ -11,7 +11,9 @@
 #include "tools/tool_web_search.h"
 #include "security/access_control.h"
 #include "heartbeat/heartbeat_service.h"
+#include "heartbeat/heartbeat.h"
 #include "cron/cron_service.h"
+#include "bus/message_bus.h"
 #include "audio/audio.h"
 #include "voice/voice_channel.h"
 #include "control/control_plane.h"
@@ -305,6 +307,138 @@ static struct {
     struct arg_end *end;
 } cron_set_args;
 
+/* 兼容旧版单任务 cron CLI，映射到新版多任务 cron 服务 */
+#define CLI_LEGACY_CRON_NAME "cli_schedule"
+
+typedef struct {
+    bool enabled;
+    uint32_t interval_min;
+    uint32_t total_runs;
+    uint32_t triggered_runs;
+    uint32_t enqueue_success;
+    uint32_t enqueue_failures;
+    uint32_t skipped_not_configured;
+    uint32_t last_run_unix;
+} cron_stats_t;
+
+static bool find_legacy_cron_job(const cron_job_t **job_out)
+{
+    const cron_job_t *jobs = NULL;
+    int count = 0;
+    cron_list_jobs(&jobs, &count);
+    for (int i = 0; i < count; i++) {
+        if (strcmp(jobs[i].name, CLI_LEGACY_CRON_NAME) == 0) {
+            if (job_out) *job_out = &jobs[i];
+            return true;
+        }
+    }
+    return false;
+}
+
+static esp_err_t cron_service_clear_schedule(void)
+{
+    while (true) {
+        const cron_job_t *jobs = NULL;
+        int count = 0;
+        bool removed = false;
+
+        cron_list_jobs(&jobs, &count);
+        for (int i = 0; i < count; i++) {
+            if (strcmp(jobs[i].name, CLI_LEGACY_CRON_NAME) == 0) {
+                esp_err_t err = cron_remove_job(jobs[i].id);
+                if (err != ESP_OK) {
+                    return err;
+                }
+                removed = true;
+                break;
+            }
+        }
+
+        if (!removed) {
+            return ESP_OK;
+        }
+    }
+}
+
+static esp_err_t cron_service_set_schedule(uint32_t minutes, const char *task)
+{
+    if (minutes == 0 || !task || !task[0]) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    esp_err_t err = cron_service_clear_schedule();
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    cron_job_t job;
+    memset(&job, 0, sizeof(job));
+    strncpy(job.name, CLI_LEGACY_CRON_NAME, sizeof(job.name) - 1);
+    job.enabled = true;
+    job.kind = CRON_KIND_EVERY;
+    job.interval_s = minutes * 60U;
+    strncpy(job.message, task, sizeof(job.message) - 1);
+    strncpy(job.channel, MIMI_CHAN_SYSTEM, sizeof(job.channel) - 1);
+    strncpy(job.chat_id, "cron", sizeof(job.chat_id) - 1);
+
+    return cron_add_job(&job);
+}
+
+static esp_err_t cron_service_get_stats(cron_stats_t *stats)
+{
+    if (!stats) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    memset(stats, 0, sizeof(*stats));
+    const cron_job_t *job = NULL;
+    if (find_legacy_cron_job(&job)) {
+        stats->enabled = job->enabled;
+        stats->interval_min = job->interval_s / 60U;
+        stats->last_run_unix = (job->last_run > 0) ? (uint32_t)job->last_run : 0;
+    }
+    return ESP_OK;
+}
+
+static esp_err_t cron_service_get_task(char *task, size_t task_size)
+{
+    if (!task || task_size == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    task[0] = '\0';
+    const cron_job_t *job = NULL;
+    if (find_legacy_cron_job(&job)) {
+        strncpy(task, job->message, task_size - 1);
+    }
+    return ESP_OK;
+}
+
+static esp_err_t cron_service_trigger_now(void)
+{
+    const cron_job_t *job = NULL;
+    if (!find_legacy_cron_job(&job)) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    mimi_msg_t msg;
+    memset(&msg, 0, sizeof(msg));
+    strncpy(msg.channel, job->channel[0] ? job->channel : MIMI_CHAN_SYSTEM,
+            sizeof(msg.channel) - 1);
+    strncpy(msg.chat_id, job->chat_id[0] ? job->chat_id : "cron",
+            sizeof(msg.chat_id) - 1);
+    msg.content = strdup(job->message);
+    if (!msg.content) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_err_t err = message_bus_push_inbound(&msg);
+    if (err != ESP_OK) {
+        free(msg.content);
+    }
+    return err;
+}
+
 static int cmd_cron_set(int argc, char **argv)
 {
 #if MIMI_CRON_ENABLED
@@ -523,6 +657,9 @@ static int cmd_clear_ws_token(int argc, char **argv)
     }
 
     printf("WS token cleared (open mode).\n");
+    return 0;
+}
+
 /* --- wifi_scan command --- */
 static int cmd_wifi_scan(int argc, char **argv)
 {

@@ -12,7 +12,7 @@
 
 static const char *TAG = "tools";
 
-#define MAX_TOOLS 12
+#define MAX_TOOLS 16
 
 static mimi_tool_t s_tools[MAX_TOOLS];
 static int s_tool_count = 0;
@@ -173,6 +173,14 @@ esp_err_t tool_registry_init(void)
     mimi_tool_t gv = {
         .name = "get_volume",
         .description = "Get current speaker volume percentage.",
+        .input_schema_json =
+            "{\"type\":\"object\","
+            "\"properties\":{},"
+            "\"required\":[]}",
+        .execute = tool_get_volume_execute,
+    };
+    register_tool(&gv);
+
     /* Register cron_add */
     mimi_tool_t ca = {
         .name = "cron_add",
@@ -201,9 +209,6 @@ esp_err_t tool_registry_init(void)
             "{\"type\":\"object\","
             "\"properties\":{},"
             "\"required\":[]}",
-        .execute = tool_get_volume_execute,
-    };
-    register_tool(&gv);
         .execute = tool_cron_list_execute,
     };
     register_tool(&cl);

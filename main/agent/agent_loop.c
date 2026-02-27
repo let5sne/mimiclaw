@@ -17,6 +17,7 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "esp_random.h"
 #include "cJSON.h"
 
 static const char *TAG = "agent";
@@ -186,15 +187,6 @@ static cJSON *build_assistant_content(const llm_response_t *resp)
     return content;
 }
 
-static void json_set_string(cJSON *obj, const char *key, const char *value)
-{
-    if (!obj || !key || !value) {
-        return;
-    }
-    cJSON_DeleteItemFromObject(obj, key);
-    cJSON_AddStringToObject(obj, key, value);
-}
-
 static void append_turn_context_prompt(char *prompt, size_t size, const mimi_msg_t *msg)
 {
     if (!prompt || size == 0 || !msg) {
@@ -219,54 +211,6 @@ static void append_turn_context_prompt(char *prompt, size_t size, const mimi_msg
     if (n < 0 || (size_t)n >= (size - off)) {
         prompt[size - 1] = '\0';
     }
-}
-
-static char *patch_tool_input_with_context(const llm_tool_call_t *call, const mimi_msg_t *msg)
-{
-    if (!call || !msg || strcmp(call->name, "cron_add") != 0) {
-        return NULL;
-    }
-
-    cJSON *root = cJSON_Parse(call->input ? call->input : "{}");
-    if (!root || !cJSON_IsObject(root)) {
-        cJSON_Delete(root);
-        root = cJSON_CreateObject();
-    }
-    if (!root) {
-        return NULL;
-    }
-
-    bool changed = false;
-
-    cJSON *channel_item = cJSON_GetObjectItem(root, "channel");
-    const char *channel = cJSON_IsString(channel_item) ? channel_item->valuestring : NULL;
-
-    if ((!channel || channel[0] == '\0') && msg->channel[0] != '\0') {
-        json_set_string(root, "channel", msg->channel);
-        channel = msg->channel;
-        changed = true;
-    }
-
-    if (channel && strcmp(channel, MIMI_CHAN_TELEGRAM) == 0 &&
-        strcmp(msg->channel, MIMI_CHAN_TELEGRAM) == 0 && msg->chat_id[0] != '\0') {
-        cJSON *chat_item = cJSON_GetObjectItem(root, "chat_id");
-        const char *chat_id = cJSON_IsString(chat_item) ? chat_item->valuestring : NULL;
-        if (!chat_id || chat_id[0] == '\0' || strcmp(chat_id, "cron") == 0) {
-            json_set_string(root, "chat_id", msg->chat_id);
-            changed = true;
-        }
-    }
-
-    char *patched = NULL;
-    if (changed) {
-        patched = cJSON_PrintUnformatted(root);
-        if (patched) {
-            ESP_LOGI(TAG, "Patched cron_add target to %s:%s", msg->channel, msg->chat_id);
-        }
-    }
-
-    cJSON_Delete(root);
-    return patched;
 }
 
 /* Build the user message with tool_result blocks */
@@ -777,12 +721,6 @@ static cJSON *build_tool_results(const llm_response_t *resp, char *tool_output,
 
     for (int i = 0; i < resp->call_count; i++) {
         const llm_tool_call_t *call = &resp->calls[i];
-        const char *tool_input = call->input ? call->input : "{}";
-        char *patched_input = patch_tool_input_with_context(call, msg);
-        if (patched_input) {
-            tool_input = patched_input;
-        }
-
         if (exhausted) {
             snprintf(tool_output, tool_output_size, "%s", TOOL_BUDGET_EXCEEDED_MSG);
         } else {
@@ -981,6 +919,16 @@ static void agent_loop_task(void *arg)
 
             /* Send "working" indicator before each API call */
 #if MIMI_AGENT_SEND_WORKING_STATUS
+            static const char *working_phrases[] = {
+                "mimi\xF0\x9F\x98\x97is working...",
+                "mimi\xF0\x9F\x90\xBE is thinking...",
+                "mimi\xF0\x9F\x92\xAD is pondering...",
+                "mimi\xF0\x9F\x8C\x99 is on it...",
+                "mimi\xE2\x9C\xA8 is cooking...",
+            };
+            static const int phrase_count = sizeof(working_phrases) / sizeof(working_phrases[0]);
+#endif
+#if MIMI_AGENT_SEND_WORKING_STATUS
             if (!sent_working_status && strcmp(msg.channel, MIMI_CHAN_SYSTEM) != 0) {
                 mimi_msg_t status = {0};
                 strncpy(status.channel, msg.channel, sizeof(status.channel) - 1);
@@ -1001,6 +949,16 @@ static void agent_loop_task(void *arg)
 
             if (err != ESP_OK) {
                 ESP_LOGE(TAG, "LLM call failed: %s", esp_err_to_name(err));
+                int http_status = llm_get_last_http_status();
+                const char *llm_err = llm_get_last_error_message();
+                if (http_status == 401 ||
+                    (llm_err && (strstr(llm_err, "invalid x-api-key") ||
+                                 strstr(llm_err, "authentication_error") ||
+                                 strstr(llm_err, "invalid_api_key")))) {
+                    final_text = strdup("LLM 鉴权失败：API Key 无效或与当前 provider 不匹配。请执行 set_api_key <KEY>，必要时执行 set_model_provider openai 或 set_model_provider anthropic。");
+                } else {
+                    final_text = strdup("LLM 调用失败，请稍后重试。");
+                }
                 hit_llm_error = true;
                 display_set_display_status(DISPLAY_STATUS_ERROR);
                 break;

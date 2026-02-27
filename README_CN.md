@@ -138,7 +138,7 @@ cp main/mimi_secrets.h.example main/mimi_secrets.h
 
 ```bash
 # 完整编译（修改 mimi_secrets.h 后必须 fullclean）
-idf.py fullclean && idf.py build
+get_idf && idf.py fullclean && idf.py build
 
 # 查找串口
 ls /dev/cu.usb*          # macOS

@@ -59,3 +59,13 @@ esp_err_t llm_chat_tools(const char *system_prompt,
                          cJSON *messages,
                          const char *tools_json,
                          llm_response_t *resp);
+
+/**
+ * 最近一次 LLM HTTP 调用的状态码（0 表示无 HTTP 状态）。
+ */
+int llm_get_last_http_status(void);
+
+/**
+ * 最近一次 LLM 调用的错误详情（可能为空字符串）。
+ */
+const char *llm_get_last_error_message(void);
