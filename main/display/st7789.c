@@ -12,6 +12,7 @@
 #include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 
 static const char *TAG = "st7789";
 
@@ -23,9 +24,47 @@ static int s_height = 240;
 static int s_backlight_pin = -1;
 static bool s_inited = false;
 static uint16_t *s_fill_buf = NULL;
+static SemaphoreHandle_t s_color_done_sem = NULL;
 static const int ST7789_SAFE_PCLK_HZ = 10 * 1000 * 1000;
 static const int ST7789_SPI_MODE = 3;
 static const int ST7789_FILL_LINES = 20;
+static const bool ST7789_MIRROR_X = false;
+static const bool ST7789_MIRROR_Y = false;
+
+static bool st7789_color_trans_done(esp_lcd_panel_io_handle_t panel_io,
+                                    esp_lcd_panel_io_event_data_t *edata,
+                                    void *user_ctx)
+{
+    (void)panel_io;
+    (void)edata;
+    BaseType_t high_task_wakeup = pdFALSE;
+    SemaphoreHandle_t sem = (SemaphoreHandle_t)user_ctx;
+    if (sem) {
+        xSemaphoreGiveFromISR(sem, &high_task_wakeup);
+    }
+    return high_task_wakeup == pdTRUE;
+}
+
+static esp_err_t st7789_draw_bitmap_sync(int x_start, int y_start, int x_end, int y_end, const void *color_data)
+{
+    if (!s_panel) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_color_done_sem) {
+        while (xSemaphoreTake(s_color_done_sem, 0) == pdTRUE) {
+        }
+    }
+    esp_err_t err = esp_lcd_panel_draw_bitmap(s_panel, x_start, y_start, x_end, y_end, (void *)color_data);
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (s_color_done_sem) {
+        if (xSemaphoreTake(s_color_done_sem, pdMS_TO_TICKS(200)) != pdTRUE) {
+            ESP_LOGW(TAG, "wait color trans done timeout");
+        }
+    }
+    return ESP_OK;
+}
 
 /* 8x8 ASCII font (chars 32-127), same as SSD1306 */
 static const uint8_t font8x8[96][8] = {
@@ -149,7 +188,7 @@ static void st7789_fill_color(uint16_t color)
         if (y2 > s_height) {
             y2 = s_height;
         }
-        esp_lcd_panel_draw_bitmap(s_panel, 0, y, s_width, y2, s_fill_buf);
+        st7789_draw_bitmap_sync(0, y, s_width, y2, s_fill_buf);
     }
 }
 
@@ -186,7 +225,11 @@ esp_err_t st7789_init(const display_config_t *config)
         .lcd_param_bits = 8,
         .spi_mode = ST7789_SPI_MODE,
         .trans_queue_depth = 1,
+        .on_color_trans_done = st7789_color_trans_done,
     };
+    s_color_done_sem = xSemaphoreCreateBinary();
+    ESP_RETURN_ON_FALSE(s_color_done_sem != NULL, ESP_ERR_NO_MEM, TAG, "create color done semaphore failed");
+    io_config.user_ctx = s_color_done_sem;
     ESP_RETURN_ON_ERROR(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)s_spi_host, &io_config, &s_io),
                         TAG, "new_panel_io_spi failed");
 
@@ -202,10 +245,10 @@ esp_err_t st7789_init(const display_config_t *config)
     ESP_RETURN_ON_ERROR(esp_lcd_panel_init(s_panel), TAG, "panel_init failed");
     /* 面包板/杜邦线场景下给控制器一点稳定时间，减少首帧花屏概率 */
     vTaskDelay(pdMS_TO_TICKS(120));
-    /* 1.54" 240x240 ST7789V: rotate 180° via MADCTL mirror both axes */
+    /* 1.54" 240x240 ST7789V: no mirror, no gap */
     ESP_RETURN_ON_ERROR(esp_lcd_panel_set_gap(s_panel, 0, 0), TAG, "set_gap failed");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_invert_color(s_panel, true), TAG, "invert_color failed");
-    ESP_RETURN_ON_ERROR(esp_lcd_panel_mirror(s_panel, true, true), TAG, "mirror failed");
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_mirror(s_panel, ST7789_MIRROR_X, ST7789_MIRROR_Y), TAG, "mirror failed");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_swap_xy(s_panel, false), TAG, "swap_xy failed");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_disp_on_off(s_panel, true), TAG, "display_on failed");
 
@@ -227,9 +270,10 @@ esp_err_t st7789_init(const display_config_t *config)
 
     st7789_fill_color(0x0000);
     s_inited = true;
-    ESP_LOGI(TAG, "ST7789 initialized: %dx%d, SPI host=%d mode=%d pclk=%d MOSI=%d SCLK=%d CS=%d DC=%d RST=%d BL=%d",
+    ESP_LOGI(TAG, "ST7789 initialized: %dx%d, SPI host=%d mode=%d pclk=%d mirror=(%d,%d) MOSI=%d SCLK=%d CS=%d DC=%d RST=%d BL=%d",
              s_width, s_height, (int)s_spi_host,
              ST7789_SPI_MODE, ST7789_SAFE_PCLK_HZ,
+             (int)ST7789_MIRROR_X, (int)ST7789_MIRROR_Y,
              config->mosi_pin, config->sclk_pin, config->cs_pin,
              config->dc_pin, config->rst_pin, s_backlight_pin);
     return ESP_OK;
@@ -255,6 +299,10 @@ void st7789_deinit(void)
     if (s_fill_buf) {
         free(s_fill_buf);
         s_fill_buf = NULL;
+    }
+    if (s_color_done_sem) {
+        vSemaphoreDelete(s_color_done_sem);
+        s_color_done_sem = NULL;
     }
     spi_bus_free(s_spi_host);
     s_inited = false;
@@ -316,7 +364,7 @@ static void st7789_draw_char(int x, int y, char c, int scale,
             }
         }
     }
-    esp_lcd_panel_draw_bitmap(s_panel, x, y, x + cw, y + ch, s_fill_buf);
+    st7789_draw_bitmap_sync(x, y, x + cw, y + ch, s_fill_buf);
 }
 
 /* Draw ASCII string at (x,y) with scale */

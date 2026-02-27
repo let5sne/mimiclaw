@@ -280,9 +280,35 @@ static void render_screen(void)
                 default: break;
             }
 
-            /* Status bar: icon + status text, scale=2 (16px high) */
-            st7789_draw_text(4, 4, status_icon, 2, icon_color, 0x0000);
-            st7789_draw_text(24, 4, s_status_text, 2, 0xFFFF, 0x0000);
+            /* 状态栏单行显示：长文本自动降级字号，避免折行和截断尾字 */
+            const int icon_scale = 2;
+            const int status_text_x = 24;
+            int status_scale = 2;
+            const size_t status_len = strlen(s_status_text);
+            if (status_len > 13) {
+                status_scale = 1;
+            }
+
+            const int status_char_px = 8 * status_scale;
+            int max_status_chars = (s_config.width - status_text_x) / status_char_px;
+            if (max_status_chars < 1) {
+                max_status_chars = 1;
+            }
+
+            char status_line[64];
+            size_t copy_len = (size_t)max_status_chars;
+            if (copy_len > status_len) {
+                copy_len = status_len;
+            }
+            if (copy_len >= sizeof(status_line)) {
+                copy_len = sizeof(status_line) - 1;
+            }
+            memcpy(status_line, s_status_text, copy_len);
+            status_line[copy_len] = '\0';
+
+            const int status_y = (status_scale == 2) ? 4 : 8;
+            st7789_draw_text(4, 4, status_icon, icon_scale, icon_color, 0x0000);
+            st7789_draw_text(status_text_x, status_y, status_line, status_scale, 0xFFFF, 0x0000);
 
             /* Message area below status bar */
             if (s_message_buffer[0]) {
