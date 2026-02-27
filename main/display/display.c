@@ -1,5 +1,6 @@
 #include "display.h"
 #include "ssd1306.h"
+#include "st7789.h"
 #include <string.h>
 #include <stdio.h>
 #include "esp_log.h"
@@ -40,6 +41,9 @@ esp_err_t display_init(const display_config_t *config)
     switch (s_config.type) {
         case DISPLAY_TYPE_SSD1306:
             ret = ssd1306_init(&s_config);
+            break;
+        case DISPLAY_TYPE_ST7789:
+            ret = st7789_init(&s_config);
             break;
 
         case DISPLAY_TYPE_NONE:
@@ -84,6 +88,9 @@ void display_deinit(void)
         case DISPLAY_TYPE_SSD1306:
             ssd1306_deinit();
             break;
+        case DISPLAY_TYPE_ST7789:
+            st7789_deinit();
+            break;
         default:
             break;
     }
@@ -100,6 +107,9 @@ void display_clear(void)
         case DISPLAY_TYPE_SSD1306:
             ssd1306_clear();
             break;
+        case DISPLAY_TYPE_ST7789:
+            st7789_clear();
+            break;
         default:
             break;
     }
@@ -112,6 +122,9 @@ void display_update(void)
     switch (s_config.type) {
         case DISPLAY_TYPE_SSD1306:
             ssd1306_update();
+            break;
+        case DISPLAY_TYPE_ST7789:
+            st7789_update();
             break;
         default:
             break;
@@ -144,6 +157,9 @@ void display_show_notification(const char *text, int duration_ms)
     switch (s_config.type) {
         case DISPLAY_TYPE_SSD1306:
             ssd1306_draw_text(0, 20, text, 2);
+            break;
+        case DISPLAY_TYPE_ST7789:
+            st7789_draw_text(4, 80, text, 2, 0xFFFF, 0x0000);
             break;
         default:
             break;
@@ -186,6 +202,9 @@ void display_set_brightness(uint8_t brightness)
         case DISPLAY_TYPE_SSD1306:
             ssd1306_set_contrast(brightness * 255 / 100);
             break;
+        case DISPLAY_TYPE_ST7789:
+            st7789_set_brightness(brightness);
+            break;
         default:
             break;
     }
@@ -198,6 +217,9 @@ void display_set_power(bool on)
     switch (s_config.type) {
         case DISPLAY_TYPE_SSD1306:
             ssd1306_set_power(on);
+            break;
+        case DISPLAY_TYPE_ST7789:
+            st7789_set_power(on);
             break;
         default:
             break;
@@ -243,16 +265,46 @@ static void render_screen(void)
             }
             break;
         }
+        case DISPLAY_TYPE_ST7789: {
+            st7789_render_status(s_status);
+
+            /* Status icon color based on state */
+            uint16_t icon_color = 0xFFFF; /* white */
+            const char *status_icon = "*";
+            switch (s_status) {
+                case DISPLAY_STATUS_CONNECTING: status_icon = "~"; icon_color = 0xFD20; break;
+                case DISPLAY_STATUS_CONNECTED:  status_icon = "*"; icon_color = 0x07E0; break;
+                case DISPLAY_STATUS_THINKING:   status_icon = "?"; icon_color = 0x001F; break;
+                case DISPLAY_STATUS_SPEAKING:   status_icon = ">"; icon_color = 0xFFE0; break;
+                case DISPLAY_STATUS_ERROR:      status_icon = "!"; icon_color = 0xF800; break;
+                default: break;
+            }
+
+            /* Status bar: icon + status text, scale=2 (16px high) */
+            st7789_draw_text(4, 4, status_icon, 2, icon_color, 0x0000);
+            st7789_draw_text(24, 4, s_status_text, 2, 0xFFFF, 0x0000);
+
+            /* Message area below status bar */
+            if (s_message_buffer[0]) {
+                st7789_draw_text(4, 40, s_message_buffer, 2, 0xFFFF, 0x0000);
+            }
+            break;
+        }
         default:
             break;
     }
+}
+
 /* Stubs for upstream display functions (not used with SSD1306 hardware) */
 void display_show_banner(void) {}
 void display_set_backlight_percent(uint8_t percent) { (void)percent; }
 uint8_t display_get_backlight_percent(void) { return 50; }
 void display_cycle_backlight(void) {}
 bool display_get_banner_center_rgb(uint8_t *r, uint8_t *g, uint8_t *b) {
-    if (r) *r = 0; if (g) *g = 0; if (b) *b = 0; return false;
+    if (r) *r = 0;
+    if (g) *g = 0;
+    if (b) *b = 0;
+    return false;
 }
 void display_show_config_screen(const char *qr_text, const char *ip_text,
                                 const char **lines, size_t line_count, size_t scroll,
@@ -262,5 +314,4 @@ void display_show_config_screen(const char *qr_text, const char *ip_text,
 }
 void display_show_message_card(const char *title, const char *body) {
     (void)title; (void)body;
-}
 }
