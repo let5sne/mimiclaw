@@ -191,6 +191,35 @@ mimi> cron_start                  # cronスケジューラを今すぐ開始
 mimi> restart                     # 再起動
 ```
 
+### USB（JTAG）vs UART：どのポートで何をするか
+
+ほとんどの ESP32-S3 開発ボードには **2つの USB-C ポート**があります。用途を正しく理解することが重要です：
+
+| ポート | ラベル | プロトコル | 用途 |
+|--------|--------|------------|------|
+| **USB** | USB / JTAG | ネイティブ USB Serial/JTAG | `idf.py flash`、`idf.py monitor`、JTAGデバッグ |
+| **COM** | UART / COM | 外部 UART ブリッジ（CP2102/CH340） | **REPL CLI**、シリアルコンソール、`idf.py monitor` |
+
+> **REPL CLIを使用するには、UART（COM）ポートに接続する必要があります。**USB（JTAG）ポートではありません。ESP-IDFコンソールはデフォルトでUART出力に設定されています（`CONFIG_ESP_CONSOLE_UART_DEFAULT=y`）。USB（JTAG）ポートは補助的なシリアル出力を提供しますが、対話的なREPL入力を確実にサポートしません。
+
+**両方のポートを同時に接続している場合：**
+
+- USB（JTAG）ポートはフラッシュ/ダウンロードを処理し、補助シリアル出力を提供
+- UART（COM）ポートはREPL用のメインインタラクティブコンソールを提供
+- macOS では両ポートとも `/dev/cu.usbmodem*` または `/dev/cu.usbserial-*` として表示 — `ls /dev/cu.usb*` で確認
+- Linux では USB（JTAG）は通常 `/dev/ttyACM0`、UART は通常 `/dev/ttyUSB0`
+
+**推奨ワークフロー：**
+
+```bash
+# USB（JTAG）ポートでフラッシュ
+idf.py -p /dev/cu.usbmodem11401 flash
+
+# UART（COM）ポートでREPLを開く
+idf.py -p /dev/cu.usbserial-110 monitor
+# または任意のシリアルターミナル：screen、minicom、PuTTY（ボーレート 115200）
+```
+
 ## メモリ
 
 MimiClawはすべてのデータをプレーンテキストファイルとして保存します。直接読み取り・編集可能です：

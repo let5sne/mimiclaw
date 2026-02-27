@@ -191,6 +191,35 @@ mimi> cron_start                  # start cron scheduler now
 mimi> restart                     # reboot
 ```
 
+### USB (JTAG) vs UART: Which Port for What
+
+Most ESP32-S3 dev boards expose **two USB-C ports**. Understanding which to use is critical:
+
+| Port | Label | Protocol | Use for |
+|------|-------|----------|---------|
+| **USB** | USB / JTAG | Native USB Serial/JTAG | `idf.py flash`, `idf.py monitor`, JTAG debugging |
+| **COM** | UART / COM | External UART bridge (CP2102/CH340) | **REPL CLI**, serial console, `idf.py monitor` |
+
+> **To use the REPL CLI, you must connect via the UART (COM) port**, not the USB (JTAG) port. The ESP-IDF console/REPL is configured to use UART by default (`CONFIG_ESP_CONSOLE_UART_DEFAULT=y`). The USB (JTAG) port provides secondary console output but does not support interactive REPL input reliably.
+
+**If you have both ports connected simultaneously:**
+
+- The USB (JTAG) port handles flash/download and provides a secondary serial output
+- The UART (COM) port provides the primary interactive console for the REPL
+- On macOS, both ports appear as `/dev/cu.usbmodem*` or `/dev/cu.usbserial-*` — check `ls /dev/cu.usb*` to identify them
+- On Linux, USB (JTAG) typically shows as `/dev/ttyACM0` and UART as `/dev/ttyUSB0`
+
+**Recommended workflow:**
+
+```bash
+# Flash via USB (JTAG) port
+idf.py -p /dev/cu.usbmodem11401 flash
+
+# Open REPL via UART (COM) port
+idf.py -p /dev/cu.usbserial-110 monitor
+# or use any serial terminal: screen, minicom, PuTTY at 115200 baud
+```
+
 ## Memory
 
 MimiClaw stores everything as plain text files you can read and edit:

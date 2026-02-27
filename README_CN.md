@@ -206,6 +206,35 @@ mimi> cron_start                  # 立即启动 cron 调度器
 mimi> restart                     # 重启
 ```
 
+### USB (JTAG) 与 UART：哪个口做什么
+
+大多数 ESP32-S3 开发板有 **两个 USB-C 口**，务必区分清楚：
+
+| 端口 | 标注 | 协议 | 用途 |
+|------|------|------|------|
+| **USB** | USB / JTAG | 原生 USB Serial/JTAG | `idf.py flash`、`idf.py monitor`、JTAG 调试 |
+| **COM** | UART / COM | 外置 UART 桥接芯片（CP2102/CH340） | **REPL 命令行**、串口控制台、`idf.py monitor` |
+
+> **使用 REPL 命令行必须连接 UART（COM）口**，而不是 USB（JTAG）口。ESP-IDF 控制台默认配置为 UART 输出（`CONFIG_ESP_CONSOLE_UART_DEFAULT=y`）。USB（JTAG）口提供辅助串口输出，但不能可靠地支持交互式 REPL 输入。
+
+**同时连接两个口时：**
+
+- USB（JTAG）口负责烧录/下载，并提供辅助串口输出
+- UART（COM）口提供主要的交互式控制台，用于 REPL
+- macOS 下两个口都会显示为 `/dev/cu.usbmodem*` 或 `/dev/cu.usbserial-*`，用 `ls /dev/cu.usb*` 区分
+- Linux 下 USB（JTAG）通常是 `/dev/ttyACM0`，UART 通常是 `/dev/ttyUSB0`
+
+**推荐工作流：**
+
+```bash
+# 通过 USB（JTAG）口烧录
+idf.py -p /dev/cu.usbmodem11401 flash
+
+# 通过 UART（COM）口打开 REPL
+idf.py -p /dev/cu.usbserial-110 monitor
+# 或使用任意串口工具：screen、minicom、PuTTY，波特率 115200
+```
+
 ## 记忆
 
 MimiClaw 把所有数据存为纯文本文件，可以直接读取和编辑：
