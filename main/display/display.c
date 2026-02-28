@@ -1,8 +1,10 @@
 #include "display.h"
+#include "status/status_led.h"
 #include "ssd1306.h"
 #include "st7789.h"
 #include <string.h>
 #include <stdio.h>
+#include <ctype.h>
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -16,10 +18,25 @@ static display_config_t s_config = {0};
 static bool s_initialized = false;
 static display_status_t s_status = DISPLAY_STATUS_IDLE;
 static char s_status_text[64] = {0};
+static char s_message_role[24] = {0};
+static char s_message_content[256] = {0};
 static char s_message_buffer[256] = {0};
 static TimerHandle_t s_notification_timer = NULL;
+static TimerHandle_t s_message_page_timer = NULL;
 static SemaphoreHandle_t s_display_mutex = NULL;
 static bool s_prev_had_message = false;
+static size_t s_message_page_index = 0;
+static size_t s_message_visible_pages = 0;
+static bool s_message_pages_truncated = false;
+static bool s_notification_active = false;
+
+#define DISPLAY_ST7789_MESSAGE_X            4
+#define DISPLAY_ST7789_ROLE_Y               40
+#define DISPLAY_ST7789_BODY_Y               64
+#define DISPLAY_ST7789_FOOTER_H             16
+#define DISPLAY_ST7789_BODY_BOTTOM_PAD      4
+#define DISPLAY_ST7789_MAX_AUTO_PAGES       3
+#define DISPLAY_MESSAGE_PAGE_INTERVAL_MS    2500
 
 #define DISPLAY_LOCK() do { \
     if (s_display_mutex) xSemaphoreTakeRecursive(s_display_mutex, portMAX_DELAY); \
@@ -32,6 +49,12 @@ static bool s_prev_had_message = false;
 /* Forward declarations */
 static void notification_timer_callback(TimerHandle_t timer);
 static void render_screen(void);
+static const char *display_role_label(const char *role);
+static uint16_t display_role_color(const char *role);
+static void display_sanitize_text(const char *src, char *dst, size_t dst_size);
+static void message_page_timer_callback(TimerHandle_t timer);
+static void display_stop_message_paging_locked(void);
+static void display_refresh_message_paging_locked(bool reset_page);
 
 esp_err_t display_init(const display_config_t *config)
 {
@@ -114,8 +137,31 @@ esp_err_t display_init(const display_config_t *config)
         return ESP_ERR_NO_MEM;
     }
 
+    s_message_page_timer = xTimerCreate("disp_page", pdMS_TO_TICKS(DISPLAY_MESSAGE_PAGE_INTERVAL_MS),
+                                        pdTRUE, NULL, message_page_timer_callback);
+    if (!s_message_page_timer) {
+        ESP_LOGE(TAG, "Failed to create message page timer");
+        xTimerDelete(s_notification_timer, 0);
+        s_notification_timer = NULL;
+        switch (s_config.type) {
+            case DISPLAY_TYPE_SSD1306: ssd1306_deinit(); break;
+            case DISPLAY_TYPE_ST7789:  st7789_deinit(); break;
+            default: break;
+        }
+        DISPLAY_UNLOCK();
+        if (created_mutex) {
+            vSemaphoreDelete(s_display_mutex);
+            s_display_mutex = NULL;
+        }
+        return ESP_ERR_NO_MEM;
+    }
+
     s_initialized = true;
     s_prev_had_message = false;
+    s_message_page_index = 0;
+    s_message_visible_pages = 0;
+    s_message_pages_truncated = false;
+    s_notification_active = false;
     strcpy(s_status_text, "MimiClaw");
 
     render_screen();
@@ -139,6 +185,10 @@ void display_deinit(void)
         xTimerDelete(s_notification_timer, 0);
         s_notification_timer = NULL;
     }
+    if (s_message_page_timer) {
+        xTimerDelete(s_message_page_timer, 0);
+        s_message_page_timer = NULL;
+    }
 
     switch (s_config.type) {
         case DISPLAY_TYPE_SSD1306:
@@ -153,6 +203,10 @@ void display_deinit(void)
 
     s_initialized = false;
     s_prev_had_message = false;
+    s_message_page_index = 0;
+    s_message_visible_pages = 0;
+    s_message_pages_truncated = false;
+    s_notification_active = false;
     ESP_LOGI(TAG, "Display deinitialized");
     DISPLAY_UNLOCK();
     vSemaphoreDelete(s_display_mutex);
@@ -178,6 +232,7 @@ void display_clear(void)
         default:
             break;
     }
+    display_stop_message_paging_locked();
     s_prev_had_message = false;
     DISPLAY_UNLOCK();
 }
@@ -234,6 +289,8 @@ void display_show_notification(const char *text, int duration_ms)
     if (s_notification_timer) {
         xTimerStop(s_notification_timer, 0);
     }
+    display_stop_message_paging_locked();
+    s_notification_active = true;
 
     /* Show notification */
     display_clear();
@@ -268,8 +325,22 @@ void display_show_message(const char *role, const char *content)
         return;
     }
 
-    /* Store message */
-    snprintf(s_message_buffer, sizeof(s_message_buffer), "%s: %s", role, content);
+    /* ST7789 单独保存角色和正文，便于更细的排版控制；其余屏幕继续复用合成文本。 */
+    strncpy(s_message_role, role, sizeof(s_message_role) - 1);
+    s_message_role[sizeof(s_message_role) - 1] = '\0';
+    display_sanitize_text(content, s_message_content, sizeof(s_message_content));
+    const char *role_label = display_role_label(role);
+    size_t used = 0;
+    if (role_label && role_label[0] != '\0') {
+        used = snprintf(s_message_buffer, sizeof(s_message_buffer), "%s: ", role_label);
+        if (used >= sizeof(s_message_buffer)) {
+            used = sizeof(s_message_buffer) - 1;
+        }
+    } else {
+        s_message_buffer[0] = '\0';
+    }
+    snprintf(s_message_buffer + used, sizeof(s_message_buffer) - used, "%s", s_message_content);
+    display_refresh_message_paging_locked(true);
 
     render_screen();
     display_update();
@@ -278,6 +349,18 @@ void display_show_message(const char *role, const char *content)
 
 void display_set_display_status(display_status_t status)
 {
+    switch (status) {
+        case DISPLAY_STATUS_THINKING:
+            status_led_set_activity(STATUS_LED_ACTIVITY_THINKING);
+            break;
+        case DISPLAY_STATUS_SPEAKING:
+            status_led_set_activity(STATUS_LED_ACTIVITY_SPEAKING);
+            break;
+        default:
+            status_led_set_activity(STATUS_LED_ACTIVITY_IDLE);
+            break;
+    }
+
     if (!s_display_mutex) return;
     DISPLAY_LOCK();
     if (!s_initialized) {
@@ -347,9 +430,145 @@ static void notification_timer_callback(TimerHandle_t timer)
         return;
     }
     /* Restore normal display */
+    s_notification_active = false;
+    display_refresh_message_paging_locked(false);
     render_screen();
     display_update();
     DISPLAY_UNLOCK();
+}
+
+static void message_page_timer_callback(TimerHandle_t timer)
+{
+    (void)timer;
+    if (!s_display_mutex) return;
+    DISPLAY_LOCK();
+    if (!s_initialized || s_notification_active || s_message_visible_pages <= 1) {
+        DISPLAY_UNLOCK();
+        return;
+    }
+
+    s_message_page_index = (s_message_page_index + 1) % s_message_visible_pages;
+    render_screen();
+    display_update();
+    DISPLAY_UNLOCK();
+}
+
+static const char *display_role_label(const char *role)
+{
+    if (!role || role[0] == '\0') {
+        return "Mimi";
+    }
+    if (strcmp(role, "assistant") == 0) {
+        return "Mimi";
+    }
+    if (strcmp(role, "user") == 0) {
+        return "你";
+    }
+    return role;
+}
+
+static uint16_t display_role_color(const char *role)
+{
+    if (role && strcmp(role, "user") == 0) {
+        return 0x07FF;
+    }
+    return 0xFFE0;
+}
+
+static void display_sanitize_text(const char *src, char *dst, size_t dst_size)
+{
+    if (!dst || dst_size == 0) return;
+    if (!src) {
+        dst[0] = '\0';
+        return;
+    }
+
+    size_t di = 0;
+    bool last_was_space = false;
+    bool last_was_newline = false;
+
+    for (size_t si = 0; src[si] != '\0' && di + 1 < dst_size; ++si) {
+        unsigned char ch = (unsigned char)src[si];
+
+        if (ch == '*' || ch == '_' || ch == '`' || ch == '~') {
+            continue;
+        }
+        if (ch == '\r') {
+            continue;
+        }
+        if (ch == '\n') {
+            while (di > 0 && dst[di - 1] == ' ') {
+                --di;
+            }
+            if (!last_was_newline) {
+                dst[di++] = '\n';
+                last_was_newline = true;
+            }
+            last_was_space = false;
+            continue;
+        }
+        if (isspace(ch)) {
+            if (!last_was_space && !last_was_newline) {
+                dst[di++] = ' ';
+                last_was_space = true;
+            }
+            continue;
+        }
+
+        dst[di++] = (char)ch;
+        last_was_space = false;
+        last_was_newline = false;
+    }
+
+    while (di > 0 && (dst[di - 1] == ' ' || dst[di - 1] == '\n')) {
+        --di;
+    }
+    dst[di] = '\0';
+}
+
+static void display_stop_message_paging_locked(void)
+{
+    if (s_message_page_timer) {
+        xTimerStop(s_message_page_timer, 0);
+    }
+}
+
+static void display_refresh_message_paging_locked(bool reset_page)
+{
+    if (s_config.type != DISPLAY_TYPE_ST7789 || s_message_content[0] == '\0') {
+        s_message_page_index = 0;
+        s_message_visible_pages = 0;
+        s_message_pages_truncated = false;
+        display_stop_message_paging_locked();
+        return;
+    }
+
+    const int footer_y = s_config.height - DISPLAY_ST7789_FOOTER_H;
+    const int body_height = footer_y - DISPLAY_ST7789_BODY_Y - DISPLAY_ST7789_BODY_BOTTOM_PAD;
+    int total_pages = st7789_get_text_page_count(
+        s_message_content,
+        s_config.width - (DISPLAY_ST7789_MESSAGE_X * 2),
+        body_height);
+    if (total_pages < 1) {
+        total_pages = 1;
+    }
+
+    s_message_visible_pages = (size_t)total_pages;
+    if (s_message_visible_pages > DISPLAY_ST7789_MAX_AUTO_PAGES) {
+        s_message_visible_pages = DISPLAY_ST7789_MAX_AUTO_PAGES;
+    }
+    s_message_pages_truncated = (size_t)total_pages > s_message_visible_pages;
+
+    if (reset_page || s_message_page_index >= s_message_visible_pages) {
+        s_message_page_index = 0;
+    }
+
+    if (s_message_visible_pages > 1 && !s_notification_active && s_message_page_timer) {
+        xTimerChangePeriod(s_message_page_timer, pdMS_TO_TICKS(DISPLAY_MESSAGE_PAGE_INTERVAL_MS), 0);
+        xTimerStart(s_message_page_timer, 0);
+    } else {
+        display_stop_message_paging_locked();
+    }
 }
 
 static void render_screen(void)
@@ -382,10 +601,13 @@ static void render_screen(void)
             break;
         }
         case DISPLAY_TYPE_ST7789: {
-            const bool has_message = (s_message_buffer[0] != '\0');
+            const bool has_message = (s_message_content[0] != '\0');
+            const int footer_y = s_config.height - DISPLAY_ST7789_FOOTER_H;
+            const int body_height = footer_y - DISPLAY_ST7789_BODY_Y - DISPLAY_ST7789_BODY_BOTTOM_PAD;
             st7789_fill_rect(0, 0, s_config.width, 32, 0x0000);
             if (has_message || s_prev_had_message) {
-                st7789_fill_rect(0, 40, s_config.width, s_config.height - 40, 0x0000);
+                st7789_fill_rect(0, DISPLAY_ST7789_ROLE_Y, s_config.width,
+                                 s_config.height - DISPLAY_ST7789_ROLE_Y, 0x0000);
             }
 
             /* Status icon color based on state */
@@ -403,7 +625,34 @@ static void render_screen(void)
 
             /* Message area below status bar */
             if (has_message) {
-                st7789_draw_text(4, 40, s_message_buffer, 2, 0xFFFF, 0x0000);
+                const char *role_label = display_role_label(s_message_role);
+                const size_t visible_pages = (s_message_visible_pages > 0) ? s_message_visible_pages : 1;
+                const size_t page_index = (s_message_page_index < visible_pages) ? s_message_page_index : 0;
+                st7789_draw_text(DISPLAY_ST7789_MESSAGE_X, DISPLAY_ST7789_ROLE_Y,
+                                 role_label, 1, display_role_color(s_message_role), 0x0000);
+                st7789_draw_text_wrapped_page(
+                    DISPLAY_ST7789_MESSAGE_X, DISPLAY_ST7789_BODY_Y, s_message_content,
+                    s_config.width - (DISPLAY_ST7789_MESSAGE_X * 2), body_height,
+                    (int)page_index, 0xFFFF, 0x0000);
+
+                if (visible_pages > 1 || s_message_pages_truncated) {
+                    char footer[8];
+                    size_t footer_len = 0;
+                    footer[footer_len++] = (char)('0' + (int)(page_index + 1));
+                    footer[footer_len++] = '/';
+                    footer[footer_len++] = (char)('0' + (int)visible_pages);
+                    if (s_message_pages_truncated) {
+                        footer[footer_len++] = '+';
+                    }
+                    footer[footer_len] = '\0';
+                    const int footer_w = (int)footer_len * 8;
+                    int footer_x = s_config.width - footer_w - DISPLAY_ST7789_MESSAGE_X;
+                    if (footer_x < DISPLAY_ST7789_MESSAGE_X) {
+                        footer_x = DISPLAY_ST7789_MESSAGE_X;
+                    }
+                    st7789_fill_rect(0, footer_y - 1, s_config.width, 1, 0x2104);
+                    st7789_draw_text(footer_x, footer_y, footer, 1, 0x7BEF, 0x0000);
+                }
             }
             s_prev_had_message = has_message;
             break;

@@ -35,12 +35,23 @@ You send a message on Telegram. The ESP32-S3 picks it up over WiFi, feeds it int
 
 ## Quick Start
 
+The default quick start uses **ESP32-S3-DevKitC-1** with **no external peripherals** attached. Plug into the correct **USB** port, configure WiFi/Telegram/API key, flash the firmware, and verify the bot from Telegram.
+
+### Fast Path (5 Steps)
+
+1. Prepare an **ESP32-S3-DevKitC-1** and plug into the port labeled **USB** (not **COM**).
+2. Install ESP-IDF and clone this repository.
+3. Copy `main/mimi_secrets.h.example` to `main/mimi_secrets.h` and fill in WiFi, Telegram, and API key.
+4. Build and flash the firmware.
+5. Open Telegram and send `/start` to confirm the device is online, then send `hello` to test the full agent path.
+
 ### What You Need
 
-- An **ESP32-S3 dev board** with 16 MB flash and 8 MB PSRAM (e.g. Xiaozhi AI board, ~$10)
+- An **ESP32-S3-DevKitC-1** (default quick-start board; use a variant with 16 MB flash and 8 MB PSRAM)
 - A **USB Type-C cable**
 - A **Telegram bot token** — talk to [@BotFather](https://t.me/BotFather) on Telegram to create one
 - An **Anthropic API key** — from [console.anthropic.com](https://console.anthropic.com), or an **OpenAI API key** — from [platform.openai.com](https://platform.openai.com)
+- No microphone, speaker, or display is required for the default quick start
 
 ### Install
 
@@ -149,7 +160,25 @@ ls /dev/ttyACM*          # Linux
 idf.py -p PORT flash monitor
 ```
 
-### Voice/Vision Gateway
+Recommended first check:
+
+- Send `/start` to confirm the firmware is online and Telegram connectivity works
+- Send `hello` to test the full agent path
+
+> **Important: Plug into the correct USB port!** Most ESP32-S3 boards have two USB-C ports. You must use the one labeled **USB** (native USB Serial/JTAG), **not** the one labeled **COM** (external UART bridge). Plugging into the wrong port will cause flash/monitor failures.
+>
+> **Quick-start reference board**: the default path in this README assumes **ESP32-S3-DevKitC-1**. For the first boot, keep the board in its minimum form: **USB cable only, no microphone, no speaker, no display**.
+>
+> <details>
+> <summary>Show reference photo</summary>
+>
+> <img src="assets/esp32s3-usb-port.jpg" alt="Plug into the USB port, not COM" width="480" />
+>
+> </details>
+
+### Optional: Voice/Vision Gateway
+
+Not required for the default quick start. If you only want to get the board online, skip this section for now.
 
 Start the local gateway (STT + image analysis endpoint):
 
@@ -183,14 +212,6 @@ python3 tools/doc_regression.py \
 
 The script calls `/doc_upload` and validates format, extracted text length, keywords, parser prefix, and latency budget.
 `tools/doc_regression_manifest.office.example.json` includes a real `xlsx` sample and an optional `xls` case (`food_legacy.xls`) which is skipped when missing.
-> **Important: Plug into the correct USB port!** Most ESP32-S3 boards have two USB-C ports. You must use the one labeled **USB** (native USB Serial/JTAG), **not** the one labeled **COM** (external UART bridge). Plugging into the wrong port will cause flash/monitor failures.
->
-> <details>
-> <summary>Show reference photo</summary>
->
-> <img src="assets/esp32s3-usb-port.jpg" alt="Plug into the USB port, not COM" width="480" />
->
-> </details>
 
 ### CLI Commands
 

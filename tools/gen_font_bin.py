@@ -47,8 +47,10 @@ RANGES = [
 
 # Optional: restrict to only the most common ~3500 chars to save space.
 # This list covers GB2312 Level 1 (3755 chars): U+4E00..U+9FA5
-# Set to True to include ALL CJK in the hex file (larger), False for common only.
-INCLUDE_ALL_CJK = False
+# 240x240 ST7789 的 SPIFFS 空间足够容纳完整目标范围字库。
+# 继续按码点截断会漏掉“我/是/的/帮/手/有”等高频中文，屏幕上就会退化成 ?。
+# 因此默认直接保留目标范围内全部字形，优先保证可读性。
+INCLUDE_ALL_CJK = True
 
 # If restricting, use frequency-based top chars. We'll use a simpler approach:
 # include GB2312 Level 1 range which covers the most common characters.

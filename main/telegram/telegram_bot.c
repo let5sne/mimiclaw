@@ -4,6 +4,7 @@
 #include "proxy/http_proxy.h"
 #include "security/access_control.h"
 #include "display/display.h"
+#include "status/status_led.h"
 #include "ui/config_screen.h"
 
 #include <string.h>
@@ -25,6 +26,8 @@ static const char *TG_START_HELP =
     "语音/图片/文件消息我也会识别类型并给出处理建议。";
 
 static char s_bot_token[128] = MIMI_SECRET_TG_TOKEN;
+static int s_last_error_code = 0;
+static char s_last_error_message[160] = {0};
 static int64_t s_update_offset = 0;
 static int64_t s_last_saved_offset = -1;
 static int64_t s_last_offset_save_us = 0;
@@ -107,6 +110,39 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
         resp->buf[resp->len] = '\0';
     }
     return ESP_OK;
+}
+
+static void tg_safe_copy(char *dst, size_t dst_size, const char *src)
+{
+    if (!dst || dst_size == 0) return;
+    if (!src) {
+        dst[0] = '\0';
+        return;
+    }
+    size_t n = strnlen(src, dst_size - 1);
+    memcpy(dst, src, n);
+    dst[n] = '\0';
+}
+
+static void tg_clear_last_error(void)
+{
+    s_last_error_code = 0;
+    s_last_error_message[0] = '\0';
+}
+
+static void tg_record_last_error(int error_code, const char *message)
+{
+    s_last_error_code = error_code;
+    tg_safe_copy(s_last_error_message, sizeof(s_last_error_message), message);
+}
+
+static status_led_service_state_t tg_led_state_for_error(int error_code, const char *message)
+{
+    if (error_code == 401 ||
+        (message && (strstr(message, "Unauthorized") || strstr(message, "bot token")))) {
+        return STATUS_LED_SERVICE_AUTH_ERROR;
+    }
+    return STATUS_LED_SERVICE_ERROR;
 }
 
 /* ── Proxy path: manual HTTP over CONNECT tunnel ────────────── */
@@ -232,15 +268,31 @@ static char *tg_api_call(const char *method, const char *post_data)
     return tg_api_call_direct(method, post_data);
 }
 
-static int tg_response_is_ok(const char *resp, const char **out_desc)
+static int tg_response_is_ok(const char *resp, int *out_error_code,
+                             char *out_desc, size_t out_desc_size)
 {
     if (!resp) return 0;
     cJSON *root = cJSON_Parse(resp);
-    if (!root) return 0;
+    if (!root) {
+        if (out_error_code) *out_error_code = 0;
+        if (out_desc && out_desc_size > 0) {
+            tg_safe_copy(out_desc, out_desc_size, "invalid telegram response");
+        }
+        return 0;
+    }
     int ok = cJSON_IsTrue(cJSON_GetObjectItem(root, "ok")) ? 1 : 0;
-    if (!ok && out_desc) {
-        cJSON *desc = cJSON_GetObjectItem(root, "description");
-        *out_desc = cJSON_IsString(desc) ? desc->valuestring : NULL;
+    if (out_error_code) {
+        cJSON *error_code = cJSON_GetObjectItem(root, "error_code");
+        *out_error_code = cJSON_IsNumber(error_code) ? error_code->valueint : 0;
+    }
+    if (out_desc && out_desc_size > 0) {
+        if (!ok) {
+            cJSON *desc = cJSON_GetObjectItem(root, "description");
+            tg_safe_copy(out_desc, out_desc_size,
+                         cJSON_IsString(desc) ? desc->valuestring : "telegram api error");
+        } else {
+            out_desc[0] = '\0';
+        }
     }
     cJSON_Delete(root);
     return ok;
@@ -1487,6 +1539,8 @@ static void telegram_poll_task(void *arg)
     while (1) {
         if (s_bot_token[0] == '\0') {
             ESP_LOGW(TAG, "No bot token configured, waiting...");
+            tg_record_last_error(401, "No Telegram bot token configured");
+            status_led_set_telegram_state(STATUS_LED_SERVICE_AUTH_ERROR);
             vTaskDelay(pdMS_TO_TICKS(5000));
             continue;
         }
@@ -1498,9 +1552,22 @@ static void telegram_poll_task(void *arg)
 
         char *resp = tg_api_call(params, NULL);
         if (resp) {
-            process_updates(resp);
+            int error_code = 0;
+            char desc[160] = {0};
+            if (tg_response_is_ok(resp, &error_code, desc, sizeof(desc))) {
+                tg_clear_last_error();
+                status_led_set_telegram_state(STATUS_LED_SERVICE_OK);
+                process_updates(resp);
+            } else {
+                tg_record_last_error(error_code, desc);
+                status_led_set_telegram_state(tg_led_state_for_error(error_code, desc));
+                ESP_LOGW(TAG, "Telegram polling failed: code=%d desc=%s",
+                         error_code, desc[0] ? desc : "(unknown)");
+            }
             free(resp);
         } else {
+            tg_record_last_error(0, "Telegram request failed");
+            status_led_set_telegram_state(STATUS_LED_SERVICE_ERROR);
             /* Back off on error */
             vTaskDelay(pdMS_TO_TICKS(3000));
         }
@@ -1533,8 +1600,11 @@ esp_err_t telegram_bot_init(void)
 
     if (s_bot_token[0]) {
         ESP_LOGI(TAG, "Telegram bot token loaded (len=%d)", (int)strlen(s_bot_token));
+        status_led_set_telegram_state(STATUS_LED_SERVICE_UNKNOWN);
     } else {
         ESP_LOGW(TAG, "No Telegram bot token. Use CLI: set_tg_token <TOKEN>");
+        tg_record_last_error(401, "No Telegram bot token configured");
+        status_led_set_telegram_state(STATUS_LED_SERVICE_AUTH_ERROR);
     }
     return ESP_OK;
 }
@@ -1553,6 +1623,8 @@ esp_err_t telegram_send_message(const char *chat_id, const char *text)
 {
     if (s_bot_token[0] == '\0') {
         ESP_LOGW(TAG, "Cannot send: no bot token");
+        tg_record_last_error(401, "No Telegram bot token configured");
+        status_led_set_telegram_state(STATUS_LED_SERVICE_AUTH_ERROR);
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -1600,12 +1672,15 @@ esp_err_t telegram_send_message(const char *chat_id, const char *text)
         int sent_ok = 0;
         bool markdown_failed = false;
         if (resp) {
-            const char *desc = NULL;
-            sent_ok = tg_response_is_ok(resp, &desc);
+            int error_code = 0;
+            char desc[160] = {0};
+            sent_ok = tg_response_is_ok(resp, &error_code, desc, sizeof(desc));
             if (!sent_ok) {
                 markdown_failed = true;
+                tg_record_last_error(error_code, desc);
+                status_led_set_telegram_state(tg_led_state_for_error(error_code, desc));
                 ESP_LOGI(TAG, "Markdown rejected by Telegram for %s: %s",
-                         chat_id, desc ? desc : "unknown");
+                         chat_id, desc[0] ? desc : "unknown");
             }
         }
 
@@ -1626,14 +1701,19 @@ esp_err_t telegram_send_message(const char *chat_id, const char *text)
                 char *resp2 = tg_api_call("sendMessage", json2);
                 free(json2);
                 if (resp2) {
-                    const char *desc2 = NULL;
-                    sent_ok = tg_response_is_ok(resp2, &desc2);
+                    int error_code2 = 0;
+                    char desc2[160] = {0};
+                    sent_ok = tg_response_is_ok(resp2, &error_code2, desc2, sizeof(desc2));
                     if (!sent_ok) {
-                        ESP_LOGE(TAG, "Plain send failed: %s", desc2 ? desc2 : "unknown");
+                        tg_record_last_error(error_code2, desc2);
+                        status_led_set_telegram_state(tg_led_state_for_error(error_code2, desc2));
+                        ESP_LOGE(TAG, "Plain send failed: %s", desc2[0] ? desc2 : "unknown");
                         ESP_LOGE(TAG, "Telegram raw response: %.300s", resp2);
                     }
                     free(resp2);
                 } else {
+                    tg_record_last_error(0, "Telegram request failed");
+                    status_led_set_telegram_state(STATUS_LED_SERVICE_ERROR);
                     ESP_LOGE(TAG, "Plain send failed: no HTTP response");
                 }
             } else {
@@ -1644,6 +1724,8 @@ esp_err_t telegram_send_message(const char *chat_id, const char *text)
         if (!sent_ok) {
             all_ok = 0;
         } else {
+            tg_clear_last_error();
+            status_led_set_telegram_state(STATUS_LED_SERVICE_OK);
             if (markdown_failed) {
                 ESP_LOGI(TAG, "Plain-text fallback succeeded for %s", chat_id);
             }
@@ -1666,6 +1748,18 @@ esp_err_t telegram_set_token(const char *token)
     nvs_close(nvs);
 
     strncpy(s_bot_token, token, sizeof(s_bot_token) - 1);
+    tg_clear_last_error();
+    status_led_set_telegram_state(STATUS_LED_SERVICE_UNKNOWN);
     ESP_LOGI(TAG, "Telegram bot token saved");
     return ESP_OK;
+}
+
+int telegram_get_last_error_code(void)
+{
+    return s_last_error_code;
+}
+
+const char *telegram_get_last_error_message(void)
+{
+    return s_last_error_message;
 }

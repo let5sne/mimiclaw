@@ -36,6 +36,7 @@ idf_component_register(
         "tools/tool_memory.c"
         "tools/tool_audio.c"
         "skills/skill_loader.c"
+        "status/status_led.c"
     INCLUDE_DIRS
         "."
     REQUIRES

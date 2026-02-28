@@ -35,12 +35,23 @@ MimiClaw 把一块小小的 ESP32-S3 开发板变成你的私人 AI 助理。插
 
 ## 快速开始
 
+默认快速开始使用 **ESP32-S3-DevKitC-1**，**不需要连接任何外设**。先插对 **USB** 口，再配置 WiFi / Telegram / API Key，烧录后通过 Telegram 验证即可。
+
+### 5 步快跑
+
+1. 准备一块 **ESP32-S3-DevKitC-1**，并插到标有 **USB** 的接口，不要插 **COM**。
+2. 安装 ESP-IDF 并克隆仓库。
+3. 复制 `main/mimi_secrets.h.example` 为 `main/mimi_secrets.h`，填好 WiFi、Telegram 和 API Key。
+4. 编译并烧录固件。
+5. 打开 Telegram，先发 `/start` 确认设备在线，再发 `hello` 验证完整 Agent 链路。
+
 ### 你需要
 
-- 一块 **ESP32-S3 开发板**，16MB Flash + 8MB PSRAM（如小智 AI 开发板，~¥30）
+- 一块 **ESP32-S3-DevKitC-1**（默认快速开始板型，建议选择 16MB Flash + 8MB PSRAM 版本）
 - 一根 **USB Type-C 数据线**
 - 一个 **Telegram Bot Token** — 在 Telegram 找 [@BotFather](https://t.me/BotFather) 创建
 - 一个 **Anthropic API Key** — 从 [console.anthropic.com](https://console.anthropic.com) 获取，或一个 **OpenAI API Key** — 从 [platform.openai.com](https://platform.openai.com) 获取
+- 默认快速开始不需要麦克风、喇叭或屏幕
 
 ### 安装
 
@@ -149,7 +160,14 @@ ls /dev/ttyACM*          # Linux
 idf.py -p PORT flash monitor
 ```
 
+建议的首次验证动作：
+
+- 发送 `/start`，确认固件在线且 Telegram 通路正常
+- 发送 `hello`，验证完整 Agent 链路
+
 > **注意：请插对 USB 口！** 大多数 ESP32-S3 开发板有两个 Type-C 接口，必须插标有 **USB** 的那个口（原生 USB Serial/JTAG），**不要**插标有 **COM** 的口（外部 UART 桥接）。插错口会导致烧录/监控失败。
+>
+> **快速开始默认参考板型**：本 README 的主路径默认使用 **ESP32-S3-DevKitC-1**。第一次启动请保持最小形态：**只接 USB 线，不接麦克风、不接喇叭、不接屏幕**。
 >
 > <details>
 > <summary>查看参考图片</summary>
@@ -173,7 +191,9 @@ mimi> clear_proxy                    # 清除代理
 
 > **提示**：确保 ESP32-S3 和代理机器在同一局域网。Clash Verge 在「设置 → 允许局域网」中开启。
 
-### 语音/视觉网关启动
+### 可选：语音/视觉网关启动
+
+默认快速开始不需要这一部分。如果你只是想先让板子联网并在 Telegram 上跑起来，可以先跳过。
 
 在开发机启动网关（同时提供 STT 与图片解析入口）：
 

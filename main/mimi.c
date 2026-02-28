@@ -29,6 +29,7 @@
 #include "display/display.h"
 #include "display/font_cjk.h"
 #include "audio/audio.h"
+#include "status/status_led.h"
 #include "voice/voice_channel.h"
 
 static const char *TAG = "mimi";
@@ -214,6 +215,12 @@ void app_main(void)
     ESP_ERROR_CHECK(init_nvs());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     ESP_ERROR_CHECK(init_spiffs());
+    {
+        esp_err_t led_ret = status_led_init();
+        if (led_ret != ESP_OK) {
+            ESP_LOGW(TAG, "Status LED init failed: %s", esp_err_to_name(led_ret));
+        }
+    }
 
     /* Load CJK font (non-fatal if missing) */
     font_cjk_init("/spiffs/fonts/unifont_cjk.bin");

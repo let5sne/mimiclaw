@@ -192,6 +192,7 @@
 #define MIMI_NVS_KEY_API_KEY         "api_key"
 #define MIMI_NVS_KEY_MODEL           "model"
 #define MIMI_NVS_KEY_PROVIDER        "provider"
+#define MIMI_NVS_KEY_ENDPOINT        "endpoint"
 #define MIMI_NVS_KEY_PROXY_HOST      "host"
 #define MIMI_NVS_KEY_PROXY_PORT      "port"
 #define MIMI_NVS_KEY_ALLOW_FROM      "allow_from"
@@ -199,6 +200,19 @@
 #define MIMI_NVS_KEY_CRON_INTERVAL   "interval_min"
 #define MIMI_NVS_KEY_CRON_TASK       "task"
 #define MIMI_NVS_KEY_VOLUME          "volume"
+
+/* Status LED Configuration (ESP32-S3-DevKitC-1 onboard RGB LED) */
+#ifndef MIMI_STATUS_LED_ENABLED
+#define MIMI_STATUS_LED_ENABLED      1
+#endif
+
+#ifndef MIMI_STATUS_LED_PIN
+#define MIMI_STATUS_LED_PIN          38
+#endif
+
+#ifndef MIMI_STATUS_LED_BRIGHTNESS
+#define MIMI_STATUS_LED_BRIGHTNESS   48
+#endif
 
 /* Display Configuration */
 #ifndef MIMI_DISPLAY_ENABLED
