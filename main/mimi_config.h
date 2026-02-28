@@ -207,19 +207,19 @@
 
 /* Display Configuration */
 #ifndef MIMI_DISPLAY_ENABLED
-#define MIMI_DISPLAY_ENABLED         0  /* Set to 1 to enable display */
+#define MIMI_DISPLAY_ENABLED         1  /* Set to 1 to enable display */
 #endif
 
 #ifndef MIMI_DISPLAY_TYPE
-#define MIMI_DISPLAY_TYPE            1  /* 0=None, 1=SSD1306, 2=ST7789, 3=ILI9341 */
+#define MIMI_DISPLAY_TYPE            2  /* 0=None, 1=SSD1306, 2=ST7789, 3=ILI9341 */
 #endif
 
 #ifndef MIMI_DISPLAY_WIDTH
-#define MIMI_DISPLAY_WIDTH           128
+#define MIMI_DISPLAY_WIDTH           240
 #endif
 
 #ifndef MIMI_DISPLAY_HEIGHT
-#define MIMI_DISPLAY_HEIGHT          64
+#define MIMI_DISPLAY_HEIGHT          240
 #endif
 
 /* I2C pins for OLED (SSD1306) */
@@ -228,11 +228,11 @@
 #endif
 
 #ifndef MIMI_DISPLAY_SDA_PIN
-#define MIMI_DISPLAY_SDA_PIN         21
+#define MIMI_DISPLAY_SDA_PIN         41
 #endif
 
 #ifndef MIMI_DISPLAY_SCL_PIN
-#define MIMI_DISPLAY_SCL_PIN         22
+#define MIMI_DISPLAY_SCL_PIN         42
 #endif
 
 #ifndef MIMI_DISPLAY_I2C_ADDR
@@ -245,27 +245,27 @@
 #endif
 
 #ifndef MIMI_DISPLAY_MOSI_PIN
-#define MIMI_DISPLAY_MOSI_PIN        23
+#define MIMI_DISPLAY_MOSI_PIN        47
 #endif
 
 #ifndef MIMI_DISPLAY_SCLK_PIN
-#define MIMI_DISPLAY_SCLK_PIN        18
+#define MIMI_DISPLAY_SCLK_PIN        21
 #endif
 
 #ifndef MIMI_DISPLAY_CS_PIN
-#define MIMI_DISPLAY_CS_PIN          5
+#define MIMI_DISPLAY_CS_PIN          41
 #endif
 
 #ifndef MIMI_DISPLAY_DC_PIN
-#define MIMI_DISPLAY_DC_PIN          16
+#define MIMI_DISPLAY_DC_PIN          40
 #endif
 
 #ifndef MIMI_DISPLAY_RST_PIN
-#define MIMI_DISPLAY_RST_PIN         17
+#define MIMI_DISPLAY_RST_PIN         45
 #endif
 
 #ifndef MIMI_DISPLAY_BL_PIN
-#define MIMI_DISPLAY_BL_PIN          4
+#define MIMI_DISPLAY_BL_PIN          42
 #endif
 
 /* Audio Configuration */

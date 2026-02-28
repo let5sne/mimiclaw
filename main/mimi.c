@@ -25,6 +25,7 @@
 #include "security/access_control.h"
 #include "heartbeat/heartbeat_service.h"
 #include "cron/cron_service.h"
+#include "skills/skill_loader.h"
 #include "display/display.h"
 #include "display/font_cjk.h"
 #include "audio/audio.h"
@@ -201,6 +202,7 @@ void app_main(void)
     /* Silence noisy components */
     esp_log_level_set("esp-x509-crt-bundle", ESP_LOG_WARN);
     esp_log_level_set("i2c", ESP_LOG_ERROR);
+    esp_log_level_set("QRCODE", ESP_LOG_WARN);
 
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "  MimiClaw - ESP32-S3 AI Agent");
@@ -211,11 +213,6 @@ void app_main(void)
              (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     ESP_LOGI(TAG, "PSRAM free:    %d bytes",
              (int)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-
-    /* Input */
-    button_Init();
-    imu_manager_init();
-    imu_manager_set_shake_callback(NULL);
 
     /* Phase 1: Core infrastructure */
     ESP_ERROR_CHECK(init_nvs());
@@ -253,7 +250,7 @@ void app_main(void)
         esp_err_t audio_ret = audio_init(&audio_cfg);
         if (audio_ret != ESP_OK) {
             ESP_LOGW(TAG, "Audio init failed: %s", esp_err_to_name(audio_ret));
-        } else if (audio_cfg.enable_wake_word) {
+        } else if (audio_is_wake_word_enabled()) {
             /* Start listening for wake word */
             audio_ret = audio_start_listening();
             if (audio_ret == ESP_ERR_NOT_SUPPORTED) {
@@ -276,7 +273,6 @@ void app_main(void)
     ESP_ERROR_CHECK(telegram_bot_init());
     ESP_ERROR_CHECK(llm_proxy_init());
     ESP_ERROR_CHECK(tool_registry_init());
-    ESP_ERROR_CHECK(cron_service_init());
     ESP_ERROR_CHECK(agent_loop_init());
 
     /* Start Serial CLI first (works without WiFi) */
@@ -357,7 +353,7 @@ void app_main(void)
                 if (voice_ret == ESP_OK) {
                     voice_channel_start();
                     ESP_LOGI(TAG, "Voice channel started (button GPIO: %d, wake word enabled: %s)", 
-                             MIMI_VOICE_BUTTON_PIN, "true");
+                             MIMI_VOICE_BUTTON_PIN, audio_is_wake_word_enabled() ? "true" : "false");
                 } else {
                     ESP_LOGW(TAG, "Voice channel init failed: %s",
                              esp_err_to_name(voice_ret));

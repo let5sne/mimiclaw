@@ -232,6 +232,30 @@ static char *tg_api_call(const char *method, const char *post_data)
     return tg_api_call_direct(method, post_data);
 }
 
+static int tg_response_is_ok(const char *resp, const char **out_desc)
+{
+    static char s_desc_buf[160];
+    s_desc_buf[0] = '\0';
+    if (out_desc) {
+        *out_desc = NULL;
+    }
+
+    if (!resp) return 0;
+    cJSON *root = cJSON_Parse(resp);
+    if (!root) return 0;
+    int ok = cJSON_IsTrue(cJSON_GetObjectItem(root, "ok")) ? 1 : 0;
+    if (!ok && out_desc) {
+        cJSON *desc = cJSON_GetObjectItem(root, "description");
+        if (cJSON_IsString(desc) && desc->valuestring) {
+            strncpy(s_desc_buf, desc->valuestring, sizeof(s_desc_buf) - 1);
+            s_desc_buf[sizeof(s_desc_buf) - 1] = '\0';
+            *out_desc = s_desc_buf;
+        }
+    }
+    cJSON_Delete(root);
+    return ok;
+}
+
 static int tg_find_http_header_end(const uint8_t *buf, size_t len)
 {
     if (!buf || len < 4) return -1;
@@ -1535,33 +1559,6 @@ esp_err_t telegram_bot_start(void)
     return (ret == pdPASS) ? ESP_OK : ESP_FAIL;
 }
 
-static int tg_response_is_ok(const char *resp_json, const char **out_desc)
-{
-    static char s_desc_buf[160];
-    s_desc_buf[0] = '\0';
-    if (out_desc) {
-        *out_desc = NULL;
-    }
-    if (!resp_json) {
-        return 0;
-    }
-
-    cJSON *root = cJSON_Parse(resp_json);
-    if (!root) {
-        return 0;
-    }
-
-    cJSON *ok = cJSON_GetObjectItem(root, "ok");
-    cJSON *desc = cJSON_GetObjectItem(root, "description");
-    int ret = cJSON_IsTrue(ok) ? 1 : 0;
-    if (out_desc && cJSON_IsString(desc) && desc->valuestring) {
-        strncpy(s_desc_buf, desc->valuestring, sizeof(s_desc_buf) - 1);
-        s_desc_buf[sizeof(s_desc_buf) - 1] = '\0';
-        *out_desc = s_desc_buf;
-    }
-    cJSON_Delete(root);
-    return ret;
-}
 
 esp_err_t telegram_send_message(const char *chat_id, const char *text)
 {

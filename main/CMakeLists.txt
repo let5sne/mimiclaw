@@ -23,6 +23,7 @@ idf_component_register(
         "cron/cron_service.c"
         "display/display.c"
         "display/ssd1306.c"
+        "display/st7789.c"
         "display/font_cjk.c"
         "audio/audio.c"
         "voice/voice_channel.c"

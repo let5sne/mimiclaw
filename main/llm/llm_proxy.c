@@ -24,6 +24,8 @@ static const char *TAG = "llm";
 static char s_api_key[LLM_API_KEY_MAX_LEN] = {0};
 static char s_model[LLM_MODEL_MAX_LEN] = MIMI_LLM_DEFAULT_MODEL;
 static char s_provider[16] = MIMI_LLM_PROVIDER_DEFAULT;
+static int s_last_http_status = 0;
+static char s_last_error_message[192] = {0};
 
 static void llm_log_payload(const char *label, const char *payload)
 {
@@ -82,6 +84,42 @@ static void safe_copy(char *dst, size_t dst_size, const char *src)
     size_t n = strnlen(src, dst_size - 1);
     memcpy(dst, src, n);
     dst[n] = '\0';
+}
+
+static void llm_clear_last_error(void)
+{
+    s_last_http_status = 0;
+    s_last_error_message[0] = '\0';
+}
+
+static void llm_record_last_error(int status, const char *raw_body)
+{
+    s_last_http_status = status;
+    s_last_error_message[0] = '\0';
+
+    if (raw_body && raw_body[0]) {
+        cJSON *root = cJSON_Parse(raw_body);
+        if (root) {
+            cJSON *error = cJSON_GetObjectItem(root, "error");
+            if (error && cJSON_IsObject(error)) {
+                cJSON *msg = cJSON_GetObjectItem(error, "message");
+                if (msg && cJSON_IsString(msg) && msg->valuestring[0]) {
+                    safe_copy(s_last_error_message, sizeof(s_last_error_message), msg->valuestring);
+                }
+            } else if (error && cJSON_IsString(error) && error->valuestring[0]) {
+                safe_copy(s_last_error_message, sizeof(s_last_error_message), error->valuestring);
+            }
+            cJSON_Delete(root);
+        }
+    }
+
+    if (s_last_error_message[0] == '\0') {
+        if (status > 0) {
+            snprintf(s_last_error_message, sizeof(s_last_error_message), "HTTP %d", status);
+        } else {
+            safe_copy(s_last_error_message, sizeof(s_last_error_message), "llm request failed");
+        }
+    }
 }
 
 /* ── Response buffer ──────────────────────────────────────────── */
@@ -161,6 +199,8 @@ static const char *llm_api_path(void)
 
 esp_err_t llm_proxy_init(void)
 {
+    llm_clear_last_error();
+
     /* Start with build-time defaults */
     if (MIMI_SECRET_API_KEY[0] != '\0') {
         safe_copy(s_api_key, sizeof(s_api_key), MIMI_SECRET_API_KEY);
@@ -576,6 +616,8 @@ static cJSON *convert_messages_openai(const char *system_prompt, cJSON *messages
 esp_err_t llm_chat(const char *system_prompt, const char *messages_json,
                    char *response_buf, size_t buf_size)
 {
+    llm_clear_last_error();
+
     if (s_api_key[0] == '\0') {
         snprintf(response_buf, buf_size, "Error: No API key configured");
         return ESP_ERR_INVALID_STATE;
@@ -640,6 +682,7 @@ esp_err_t llm_chat(const char *system_prompt, const char *messages_json,
     free(post_data);
 
     if (err != ESP_OK) {
+        llm_record_last_error(0, esp_err_to_name(err));
         ESP_LOGE(TAG, "HTTP request failed: %s", esp_err_to_name(err));
         llm_log_payload("LLM partial response", rb.data);
         resp_buf_free(&rb);
@@ -651,6 +694,7 @@ esp_err_t llm_chat(const char *system_prompt, const char *messages_json,
     llm_log_payload("LLM raw response", rb.data);
 
     if (status != 200) {
+        llm_record_last_error(status, rb.data);
         ESP_LOGE(TAG, "API returned status %d", status);
         snprintf(response_buf, buf_size, "API error (HTTP %d): %.200s",
                  status, rb.data ? rb.data : "");
@@ -704,6 +748,7 @@ esp_err_t llm_chat_tools(const char *system_prompt,
                          llm_response_t *resp)
 {
     memset(resp, 0, sizeof(*resp));
+    llm_clear_last_error();
 
     if (s_api_key[0] == '\0') return ESP_ERR_INVALID_STATE;
 
@@ -763,6 +808,7 @@ esp_err_t llm_chat_tools(const char *system_prompt,
     free(post_data);
 
     if (err != ESP_OK) {
+        llm_record_last_error(0, esp_err_to_name(err));
         ESP_LOGE(TAG, "HTTP request failed: %s", esp_err_to_name(err));
         llm_log_payload("LLM tools partial response", rb.data);
         resp_buf_free(&rb);
@@ -772,6 +818,7 @@ esp_err_t llm_chat_tools(const char *system_prompt,
     llm_log_payload("LLM tools raw response", rb.data);
 
     if (status != 200) {
+        llm_record_last_error(status, rb.data);
         ESP_LOGE(TAG, "API error %d: %.500s", status, rb.data ? rb.data : "");
         resp_buf_free(&rb);
         return ESP_FAIL;
@@ -918,6 +965,16 @@ esp_err_t llm_chat_tools(const char *system_prompt,
              resp->tool_use ? "tool_use" : "end_turn");
 
     return ESP_OK;
+}
+
+int llm_get_last_http_status(void)
+{
+    return s_last_http_status;
+}
+
+const char *llm_get_last_error_message(void)
+{
+    return s_last_error_message;
 }
 
 /* ── NVS helpers ──────────────────────────────────────────────── */
