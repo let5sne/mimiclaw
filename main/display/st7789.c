@@ -2,6 +2,7 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include "esp_log.h"
 #include "esp_check.h"
 #include "driver/gpio.h"
@@ -13,6 +14,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
+#include "font_cjk.h"
 
 static const char *TAG = "st7789";
 
@@ -34,6 +36,10 @@ static const bool ST7789_MIRROR_Y = false;
 static void st7789_fill_rect_internal(int x_start, int y_start, int x_end, int y_end, uint16_t color);
 static void st7789_draw_glyph_to_buffer(char c, int scale, uint16_t fg, uint16_t bg,
                                         uint16_t *dst, int dst_w, int dst_x);
+static uint32_t st7789_utf8_decode(const char **pp);
+static bool st7789_is_cjk(uint32_t cp);
+static void st7789_draw_cjk_to_buffer(const uint8_t *glyph, int target_w, int target_h,
+                                      uint16_t fg, uint16_t bg, uint16_t *dst, int dst_w, int dst_x);
 
 static bool st7789_color_trans_done(esp_lcd_panel_io_handle_t panel_io,
                                     esp_lcd_panel_io_event_data_t *edata,
@@ -376,9 +382,83 @@ static void st7789_draw_glyph_to_buffer(char c, int scale, uint16_t fg, uint16_t
     }
 }
 
-/* Draw a single ASCII char at (x,y) with scale, fg/bg colors */
-static void st7789_draw_char(int x, int y, char c, int scale,
-                             uint16_t fg, uint16_t bg)
+/* 解码 1 个 UTF-8 字符，返回码点并推进指针；非法字节返回 U+FFFD。 */
+static uint32_t st7789_utf8_decode(const char **pp)
+{
+    const uint8_t *p = (const uint8_t *)*pp;
+    uint32_t cp = 0;
+    int extra = 0;
+
+    if (!p || *p == '\0') {
+        return 0;
+    }
+
+    if (*p < 0x80) {
+        cp = *p++;
+        extra = 0;
+    } else if ((*p & 0xE0) == 0xC0) {
+        cp = *p++ & 0x1F;
+        extra = 1;
+    } else if ((*p & 0xF0) == 0xE0) {
+        cp = *p++ & 0x0F;
+        extra = 2;
+    } else if ((*p & 0xF8) == 0xF0) {
+        cp = *p++ & 0x07;
+        extra = 3;
+    } else {
+        *pp = (const char *)(p + 1);
+        return 0xFFFD;
+    }
+
+    for (int i = 0; i < extra; ++i) {
+        if ((*p & 0xC0) != 0x80) {
+            *pp = (const char *)p;
+            return 0xFFFD;
+        }
+        cp = (cp << 6) | (*p++ & 0x3F);
+    }
+
+    *pp = (const char *)p;
+    return cp;
+}
+
+/* 与 SSD1306 一致：判断常见 CJK/全角符号范围。 */
+static bool st7789_is_cjk(uint32_t cp)
+{
+    return (cp >= 0x2E80 && cp <= 0x9FFF) ||
+           (cp >= 0x3000 && cp <= 0x303F) ||
+           (cp >= 0xF900 && cp <= 0xFAFF) ||
+           (cp >= 0xFE30 && cp <= 0xFE4F) ||
+           (cp >= 0xFF00 && cp <= 0xFFEF);
+}
+
+/* 把 16x16 单色 CJK 字形映射到任意目标尺寸并写入目标缓冲。 */
+static void st7789_draw_cjk_to_buffer(const uint8_t *glyph, int target_w, int target_h,
+                                      uint16_t fg, uint16_t bg, uint16_t *dst, int dst_w, int dst_x)
+{
+    if (!glyph || !dst || dst_w <= 0 || target_w <= 0 || target_h <= 0) {
+        return;
+    }
+
+    for (int py = 0; py < target_h; ++py) {
+        int src_y = (py * 16) / target_h;
+        if (src_y > 15) src_y = 15;
+        uint8_t hi = glyph[src_y * 2];
+        uint8_t lo = glyph[src_y * 2 + 1];
+
+        for (int px = 0; px < target_w; ++px) {
+            int src_x = (px * 16) / target_w;
+            if (src_x > 15) src_x = 15;
+            bool on = (src_x < 8) ? ((hi & (0x80 >> src_x)) != 0)
+                                  : ((lo & (0x80 >> (src_x - 8))) != 0);
+            dst[py * dst_w + (dst_x + px)] = on ? fg : bg;
+        }
+    }
+}
+
+/* 绘制单个 ASCII 字符。 */
+static void st7789_draw_ascii_char(int x, int y, char c, int scale,
+                                   uint16_t fg, uint16_t bg)
 {
     if (!s_panel || !s_fill_buf || scale <= 0) return;
 
@@ -391,6 +471,32 @@ static void st7789_draw_char(int x, int y, char c, int scale,
     }
     st7789_draw_glyph_to_buffer(c, scale, fg, bg, s_fill_buf, cw, 0);
     st7789_draw_bitmap_sync(x, y, x + cw, y + ch, s_fill_buf);
+}
+
+/* 绘制单个 CJK 码点（使用 16x16 字库，按目标单元尺寸缩放）。 */
+static void st7789_draw_cjk_char(int x, int y, uint32_t cp, int cell_w, int cell_h,
+                                 uint16_t fg, uint16_t bg)
+{
+    if (!s_panel || !s_fill_buf || cell_w <= 0 || cell_h <= 0) return;
+    if (x < 0 || y < 0 || x + cell_w > s_width || y + cell_h > s_height) return;
+
+    const int pixels = cell_w * cell_h;
+    if (pixels <= 0 || pixels > s_width * ST7789_FILL_LINES) return;
+
+    for (int i = 0; i < pixels; ++i) {
+        s_fill_buf[i] = bg;
+    }
+
+    const uint8_t *bmp = font_cjk_get_glyph(cp);
+    if (!bmp) {
+        /* 字库缺失时用 ASCII 占位符，避免出现按字节连串问号。 */
+        int fallback_scale = (cell_w >= 16 && cell_h >= 16) ? 2 : 1;
+        st7789_draw_glyph_to_buffer('?', fallback_scale, fg, bg, s_fill_buf, cell_w, 0);
+    } else {
+        st7789_draw_cjk_to_buffer(bmp, cell_w, cell_h, fg, bg, s_fill_buf, cell_w, 0);
+    }
+
+    st7789_draw_bitmap_sync(x, y, x + cell_w, y + cell_h, s_fill_buf);
 }
 
 void st7789_fill_rect(int x, int y, int w, int h, uint16_t color)
@@ -451,24 +557,42 @@ void st7789_draw_status_line(const char *icon, uint16_t icon_color,
 void st7789_draw_text(int x, int y, const char *text, int scale,
                       uint16_t fg, uint16_t bg)
 {
-    if (!text) return;
+    if (!text || scale <= 0) return;
+
     int cx = x;
-    const int cw = 8 * scale;
-    while (*text) {
-        if (*text == '\n') {
+    int cy = y;
+    const int cell_w = 8 * scale;
+    const int cell_h = 8 * scale;
+    const int line_gap = 2;
+    const char *p = text;
+
+    while (*p) {
+        if (*p == '\n') {
+            ++p;
             cx = x;
-            y += 8 * scale + 2;
-            text++;
+            cy += cell_h + line_gap;
+            if (cy + cell_h > s_height) break;
             continue;
         }
-        if (cx + cw > s_width) {
+
+        uint32_t cp = st7789_utf8_decode(&p);
+        if (cp == 0) break;
+
+        if (cx + cell_w > s_width) {
             cx = x;
-            y += 8 * scale + 2;
+            cy += cell_h + line_gap;
+            if (cy + cell_h > s_height) break;
         }
-        if (y + 8 * scale > s_height) break;
-        st7789_draw_char(cx, y, *text, scale, fg, bg);
-        cx += cw;
-        text++;
+
+        if (st7789_is_cjk(cp)) {
+            st7789_draw_cjk_char(cx, cy, cp, cell_w, cell_h, fg, bg);
+        } else if (cp <= 0x7F) {
+            st7789_draw_ascii_char(cx, cy, (char)cp, scale, fg, bg);
+        } else {
+            st7789_draw_ascii_char(cx, cy, '?', scale, fg, bg);
+        }
+
+        cx += cell_w;
     }
 }
 
