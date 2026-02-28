@@ -9,6 +9,11 @@
  * Protocol:
  *   Inbound:  {"type":"message","content":"hello","chat_id":"ws_client1"}
  *   Outbound: {"type":"response","content":"Hi!","chat_id":"ws_client1"}
+ *
+ * Optional auth:
+ *   If WS token is configured, client must provide:
+ *   - Header: X-WS-Token: <token>
+ *   - or query string: ws://host:18789/?token=<token>
  */
 esp_err_t ws_server_start(void);
 

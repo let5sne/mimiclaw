@@ -138,7 +138,7 @@ cp main/mimi_secrets.h.example main/mimi_secrets.h
 
 ```bash
 # 完整编译（修改 mimi_secrets.h 后必须 fullclean）
-idf.py fullclean && idf.py build
+get_idf && idf.py fullclean && idf.py build
 
 # 查找串口
 ls /dev/cu.usb*          # macOS
@@ -173,7 +173,42 @@ mimi> clear_proxy                    # 清除代理
 
 > **提示**：确保 ESP32-S3 和代理机器在同一局域网。Clash Verge 在「设置 → 允许局域网」中开启。
 
-### CLI 命令
+### 语音/视觉网关启动
+
+在开发机启动网关（同时提供 STT 与图片解析入口）：
+
+```bash
+python3 tools/voice_gateway.py \
+  --host 0.0.0.0 --port 8090 --model small --device cpu \
+  --vision-enabled
+```
+
+- STT 入口：`http://<你的电脑IP>:8091/stt_upload`
+- 图片解析入口：`http://<你的电脑IP>:8091/vision_upload`
+- 文档解析入口：`http://<你的电脑IP>:8091/doc_upload`
+- 默认会尝试从 `main/mimi_secrets.h` 读取视觉 API 配置；如需覆盖，可传 `--vision-endpoint/--vision-api-key/--vision-model`
+
+### 文档解析回归冒烟测试
+
+网关启动后，可一键回归：
+
+```bash
+./tools/run_doc_regression.sh --basic
+./tools/run_doc_regression.sh --office
+```
+
+也可自定义参数执行：
+
+```bash
+python3 tools/doc_regression.py \
+  --manifest tools/doc_regression_manifest.example.json \
+  --base-url http://127.0.0.1:8091
+```
+
+脚本会调用 `/doc_upload`，校验格式、文本长度、关键词、解析器前缀和耗时阈值。
+`tools/doc_regression_manifest.office.example.json` 内含可直接运行的 `xlsx` 样本，以及一个可选 `xls` 用例（缺失时自动跳过）。
+
+### CLI 命令（通过 UART/COM 口连接）
 
 通过串口连接即可配置和调试。**配置命令**让你无需重新编译就能修改设置 — 随时随地插上 USB 线就能改。
 
@@ -199,12 +234,60 @@ mimi> wifi_status              # 连上了吗？
 mimi> memory_read              # 看看它记住了什么
 mimi> memory_write "内容"       # 写入 MEMORY.md
 mimi> heap_info                # 还剩多少内存？
+mimi> agent_stats              # Agent 成功率/时延/失败计数
+mimi> heartbeat_status         # Heartbeat 计数/最后运行时间
+mimi> heartbeat_now            # 立即触发一次 Heartbeat
+mimi> cron_status              # Cron 调度与计数
+mimi> cron_set 30 "任务..."     # 设置每 30 分钟执行
+mimi> cron_now                 # 立即触发一次 Cron
+mimi> cron_clear               # 清除 Cron 调度
 mimi> session_list             # 列出所有会话
 mimi> session_clear 12345      # 删除一个会话
 mimi> heartbeat_trigger           # 手动触发一次心跳检查
 mimi> cron_start                  # 立即启动 cron 调度器
 mimi> restart                     # 重启
 ```
+
+### USB (JTAG) 与 UART：哪个口做什么
+
+大多数 ESP32-S3 开发板有 **两个 USB-C 口**：
+
+| 端口 | 用途 |
+|------|------|
+| **USB**（JTAG） | `idf.py flash`、JTAG 调试 |
+| **COM**（UART） | **REPL 命令行**、串口控制台 |
+
+> **REPL 必须连接 UART（COM）口。** USB（JTAG）口不支持交互式 REPL 输入。
+
+<details>
+<summary>端口详情与推荐工作流</summary>
+
+| 端口 | 标注 | 协议 |
+|------|------|------|
+| **USB** | USB / JTAG | 原生 USB Serial/JTAG |
+| **COM** | UART / COM | 外置 UART 桥接芯片（CP2102/CH340） |
+
+ESP-IDF 控制台默认配置为 UART 输出（`CONFIG_ESP_CONSOLE_UART_DEFAULT=y`）。
+
+**同时连接两个口时：**
+
+- USB（JTAG）口负责烧录/下载，并提供辅助串口输出
+- UART（COM）口提供主要的交互式控制台，用于 REPL
+- macOS 下两个口都会显示为 `/dev/cu.usbmodem*` 或 `/dev/cu.usbserial-*`，用 `ls /dev/cu.usb*` 区分
+- Linux 下 USB（JTAG）通常是 `/dev/ttyACM0`，UART 通常是 `/dev/ttyUSB0`
+
+**推荐工作流：**
+
+```bash
+# 通过 USB（JTAG）口烧录
+idf.py -p /dev/cu.usbmodem11401 flash
+
+# 通过 UART（COM）口打开 REPL
+idf.py -p /dev/cu.usbserial-110 monitor
+# 或使用任意串口工具：screen、minicom、PuTTY，波特率 115200
+```
+
+</details>
 
 ## 记忆
 
@@ -214,7 +297,14 @@ MimiClaw 把所有数据存为纯文本文件，可以直接读取和编辑：
 |------|------|
 | `SOUL.md` | 机器人的人设 — 编辑它来改变行为方式 |
 | `USER.md` | 关于你的信息 — 姓名、偏好、语言 |
+| `AGENTS.md` | 行为规范和安全约束 |
+| `TOOLS.md` | 工具使用策略和优先级 |
+| `SKILLS.md` | 技能路由提示和触发式指令规则 |
+| `IDENTITY.md` | 助手身份定位与回复一致性约束 |
+| `HEARTBEAT.md` | 周期内部任务说明（仅非注释行生效） |
+| `CRON.md` | 默认定时任务文件（`every_minutes` + `task`） |
 | `MEMORY.md` | 长期记忆 — 它应该一直记住的事 |
+| `daily/2026-02-05.md` | 每日笔记 — 今天发生了什么 |
 | `HEARTBEAT.md` | 待办清单 — 机器人定期检查并自主执行 |
 | `cron.json` | 定时任务 — AI 创建的周期性或一次性任务 |
 | `2026-02-05.md` | 每日笔记 — 今天发生了什么 |
@@ -228,6 +318,12 @@ MimiClaw 同时支持 Anthropic 和 OpenAI 的工具调用 — LLM 在对话中�
 |------|------|
 | `web_search` | 通过 Brave Search API 搜索网页，获取实时信息 |
 | `get_current_time` | 通过 HTTP 获取当前日期和时间，并设置系统时钟 |
+| `read_file` | 读取 SPIFFS 文件（路径需以 `/spiffs/` 开头） |
+| `write_file` | 写入或覆盖 SPIFFS 文件（默认白名单：`/spiffs/memory/`） |
+| `edit_file` | 对 SPIFFS 文件执行查找替换（默认白名单：`/spiffs/memory/`） |
+| `list_dir` | 列出 SPIFFS 文件，可按前缀过滤 |
+| `memory_write_long_term` | 覆盖长期记忆（`/spiffs/memory/MEMORY.md`） |
+| `memory_append_today` | 追加一条今天的 daily 记忆 |
 | `cron_add` | 创建定时或一次性任务（LLM 自主创建 cron 任务） |
 | `cron_list` | 列出所有已调度的 cron 任务 |
 | `cron_remove` | 按 ID 删除 cron 任务 |
@@ -252,6 +348,19 @@ MimiClaw 内置 cron 调度器，让 AI 可以自主安排任务。LLM 可以通
 - **OTA 更新** — WiFi 远程刷固件，无需 USB
 - **双核** — 网络 I/O 和 AI 处理分别跑在不同 CPU 核心
 - **HTTP 代理** — CONNECT 隧道，适配受限网络
+- **工具调用** — ReAct Agent 循环，Anthropic tool use 协议
+- **Telegram 媒体处理** — `/start` 本地快速回复；语音消息走 voice gateway 的 HTTP STT（`/stt_upload`）真实转写；图片消息通过 `vision_upload` 返回结构化结果（描述/文字/元素）并按 `file_id` 缓存；文件消息优先走 `doc_upload` 解析（`txt/pdf/docx/pptx/xls/xlsx/图片文档`），当 PDF/PPTX 文本提取过短时会自动走分页/分图 OCR 兜底，再失败才回退摘要
+
+## 工程化增强路线（P0，进行中）
+
+- [x] 入站安全：Telegram allowlist（`allow_from`）+ WebSocket 鉴权 token
+- [x] 文件工具边界：默认只允许写 `/spiffs/memory/`，配置目录默认只读
+- [x] 可靠性：LLM/发送链路重试与退避，状态消息可丢、正式回复尽量不丢
+- [x] 预算守卫：工具轮次、上下文大小、工具输出大小、总耗时限制
+- [x] 记忆治理：统一 daily memory 路径，补齐专用记忆写入工具
+- [x] 可观测性：`run_id`、分阶段耗时、`agent_stats` 诊断命令
+
+详细跟踪见 **[docs/TODO.md](docs/TODO.md)**。
 - **多提供商** — 同时支持 Anthropic (Claude) 和 OpenAI (GPT)，运行时可切换
 - **定时任务** — AI 可自主创建周期性和一次性任务，重启后持久保存
 - **心跳服务** — 定期检查任务文件，驱动 AI 自主执行
@@ -264,9 +373,17 @@ MimiClaw 内置 cron 调度器，让 AI 可以自主安排任务。LLM 可以通
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — 系统设计、模块划分、任务布局、内存分配、协议、Flash 分区
 - **[docs/TODO.md](docs/TODO.md)** — 功能差距和路线图
 
-## Contributing
+## 贡献
 
-Please read **[docs/CONTRIBUTE.md](docs/CONTRIBUTE.md)** before opening issues or pull requests.
+提交 Issue 或 Pull Request 前，请先阅读 **[CONTRIBUTING.md](CONTRIBUTING.md)**。
+
+## 贡献者
+
+感谢所有为 MimiClaw 做出贡献的开发者。
+
+<a href="https://github.com/memovai/mimiclaw/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=memovai/mimiclaw" alt="MimiClaw contributors" />
+</a>
 
 ## 许可证
 

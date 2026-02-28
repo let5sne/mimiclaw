@@ -4,6 +4,9 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <inttypes.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
@@ -21,6 +24,8 @@ static const char *TAG = "llm";
 static char s_api_key[LLM_API_KEY_MAX_LEN] = {0};
 static char s_model[LLM_MODEL_MAX_LEN] = MIMI_LLM_DEFAULT_MODEL;
 static char s_provider[16] = MIMI_LLM_PROVIDER_DEFAULT;
+static int s_last_http_status = 0;
+static char s_last_error_message[192] = {0};
 
 static void llm_log_payload(const char *label, const char *payload)
 {
@@ -79,6 +84,42 @@ static void safe_copy(char *dst, size_t dst_size, const char *src)
     size_t n = strnlen(src, dst_size - 1);
     memcpy(dst, src, n);
     dst[n] = '\0';
+}
+
+static void llm_clear_last_error(void)
+{
+    s_last_http_status = 0;
+    s_last_error_message[0] = '\0';
+}
+
+static void llm_record_last_error(int status, const char *raw_body)
+{
+    s_last_http_status = status;
+    s_last_error_message[0] = '\0';
+
+    if (raw_body && raw_body[0]) {
+        cJSON *root = cJSON_Parse(raw_body);
+        if (root) {
+            cJSON *error = cJSON_GetObjectItem(root, "error");
+            if (error && cJSON_IsObject(error)) {
+                cJSON *msg = cJSON_GetObjectItem(error, "message");
+                if (msg && cJSON_IsString(msg) && msg->valuestring[0]) {
+                    safe_copy(s_last_error_message, sizeof(s_last_error_message), msg->valuestring);
+                }
+            } else if (error && cJSON_IsString(error) && error->valuestring[0]) {
+                safe_copy(s_last_error_message, sizeof(s_last_error_message), error->valuestring);
+            }
+            cJSON_Delete(root);
+        }
+    }
+
+    if (s_last_error_message[0] == '\0') {
+        if (status > 0) {
+            snprintf(s_last_error_message, sizeof(s_last_error_message), "HTTP %d", status);
+        } else {
+            safe_copy(s_last_error_message, sizeof(s_last_error_message), "llm request failed");
+        }
+    }
 }
 
 /* ── Response buffer ──────────────────────────────────────────── */
@@ -158,6 +199,8 @@ static const char *llm_api_path(void)
 
 esp_err_t llm_proxy_init(void)
 {
+    llm_clear_last_error();
+
     /* Start with build-time defaults */
     if (MIMI_SECRET_API_KEY[0] != '\0') {
         safe_copy(s_api_key, sizeof(s_api_key), MIMI_SECRET_API_KEY);
@@ -193,7 +236,7 @@ esp_err_t llm_proxy_init(void)
     if (s_api_key[0]) {
         ESP_LOGI(TAG, "LLM proxy initialized (provider: %s, model: %s)", s_provider, s_model);
     } else {
-        ESP_LOGW(TAG, "No API key. Use CLI: set_api_key <KEY>");
+        ESP_LOGI(TAG, "No API key configured. Use CLI: set_api_key <KEY>");
     }
     return ESP_OK;
 }
@@ -310,6 +353,55 @@ static esp_err_t llm_http_call(const char *post_data, resp_buf_t *rb, int *out_s
     } else {
         return llm_http_direct(post_data, rb, out_status);
     }
+}
+
+static bool llm_status_retryable(int status)
+{
+    return status == 0 || status == 408 || status == 409 ||
+           status == 425 || status == 429 || (status >= 500 && status <= 599);
+}
+
+static uint32_t llm_retry_delay_ms(int attempt)
+{
+    uint32_t delay = MIMI_LLM_RETRY_BASE_MS;
+    for (int i = 1; i < attempt; i++) {
+        if (delay >= MIMI_LLM_RETRY_MAX_DELAY_MS) break;
+        delay <<= 1;
+        if (delay > MIMI_LLM_RETRY_MAX_DELAY_MS) {
+            delay = MIMI_LLM_RETRY_MAX_DELAY_MS;
+            break;
+        }
+    }
+    return delay;
+}
+
+/* 返回值与 llm_http_call 保持一致；会在瞬时错误时自动重试。 */
+static esp_err_t llm_http_call_with_retry(const char *post_data, resp_buf_t *rb, int *out_status)
+{
+    esp_err_t last_err = ESP_FAIL;
+    int last_status = 0;
+
+    for (int attempt = 1; attempt <= MIMI_LLM_RETRY_MAX; attempt++) {
+        rb->len = 0;
+        if (rb->data && rb->cap > 0) rb->data[0] = '\0';
+
+        last_err = llm_http_call(post_data, rb, &last_status);
+        bool should_retry = (last_err != ESP_OK) || llm_status_retryable(last_status);
+        if (!should_retry) {
+            *out_status = last_status;
+            return ESP_OK;
+        }
+
+        if (attempt < MIMI_LLM_RETRY_MAX) {
+            uint32_t delay_ms = llm_retry_delay_ms(attempt);
+            ESP_LOGW(TAG, "Transient LLM failure (attempt %d/%d, err=%s, status=%d), retry in %" PRIu32 " ms",
+                     attempt, MIMI_LLM_RETRY_MAX, esp_err_to_name(last_err), last_status, delay_ms);
+            vTaskDelay(pdMS_TO_TICKS(delay_ms));
+        }
+    }
+
+    *out_status = last_status;
+    return last_err;
 }
 
 /* ── Parse text from JSON response ────────────────────────────── */
@@ -524,6 +616,8 @@ static cJSON *convert_messages_openai(const char *system_prompt, cJSON *messages
 esp_err_t llm_chat(const char *system_prompt, const char *messages_json,
                    char *response_buf, size_t buf_size)
 {
+    llm_clear_last_error();
+
     if (s_api_key[0] == '\0') {
         snprintf(response_buf, buf_size, "Error: No API key configured");
         return ESP_ERR_INVALID_STATE;
@@ -584,10 +678,11 @@ esp_err_t llm_chat(const char *system_prompt, const char *messages_json,
     }
 
     int status = 0;
-    esp_err_t err = llm_http_call(post_data, &rb, &status);
+    esp_err_t err = llm_http_call_with_retry(post_data, &rb, &status);
     free(post_data);
 
     if (err != ESP_OK) {
+        llm_record_last_error(0, esp_err_to_name(err));
         ESP_LOGE(TAG, "HTTP request failed: %s", esp_err_to_name(err));
         llm_log_payload("LLM partial response", rb.data);
         resp_buf_free(&rb);
@@ -599,6 +694,7 @@ esp_err_t llm_chat(const char *system_prompt, const char *messages_json,
     llm_log_payload("LLM raw response", rb.data);
 
     if (status != 200) {
+        llm_record_last_error(status, rb.data);
         ESP_LOGE(TAG, "API returned status %d", status);
         snprintf(response_buf, buf_size, "API error (HTTP %d): %.200s",
                  status, rb.data ? rb.data : "");
@@ -652,6 +748,7 @@ esp_err_t llm_chat_tools(const char *system_prompt,
                          llm_response_t *resp)
 {
     memset(resp, 0, sizeof(*resp));
+    llm_clear_last_error();
 
     if (s_api_key[0] == '\0') return ESP_ERR_INVALID_STATE;
 
@@ -707,10 +804,11 @@ esp_err_t llm_chat_tools(const char *system_prompt,
     }
 
     int status = 0;
-    esp_err_t err = llm_http_call(post_data, &rb, &status);
+    esp_err_t err = llm_http_call_with_retry(post_data, &rb, &status);
     free(post_data);
 
     if (err != ESP_OK) {
+        llm_record_last_error(0, esp_err_to_name(err));
         ESP_LOGE(TAG, "HTTP request failed: %s", esp_err_to_name(err));
         llm_log_payload("LLM tools partial response", rb.data);
         resp_buf_free(&rb);
@@ -720,6 +818,7 @@ esp_err_t llm_chat_tools(const char *system_prompt,
     llm_log_payload("LLM tools raw response", rb.data);
 
     if (status != 200) {
+        llm_record_last_error(status, rb.data);
         ESP_LOGE(TAG, "API error %d: %.500s", status, rb.data ? rb.data : "");
         resp_buf_free(&rb);
         return ESP_FAIL;
@@ -866,6 +965,16 @@ esp_err_t llm_chat_tools(const char *system_prompt,
              resp->tool_use ? "tool_use" : "end_turn");
 
     return ESP_OK;
+}
+
+int llm_get_last_http_status(void)
+{
+    return s_last_http_status;
+}
+
+const char *llm_get_last_error_message(void)
+{
+    return s_last_error_message;
 }
 
 /* ── NVS helpers ──────────────────────────────────────────────── */

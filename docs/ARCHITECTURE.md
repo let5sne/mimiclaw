@@ -48,8 +48,8 @@ Telegram App (User)
 │                                                   │
 │   ┌──────────────────────────────────────────┐    │
 │   │  SPIFFS (12 MB)                          │    │
-│   │  /spiffs/config/  SOUL.md, USER.md       │    │
-│   │  /spiffs/memory/  MEMORY.md, YYYY-MM-DD  │    │
+│   │  /spiffs/config/  SOUL.md, USER.md, AGENTS.md, TOOLS.md, SKILLS.md, IDENTITY.md, HEARTBEAT.md, CRON.md │
+│   │  /spiffs/memory/  MEMORY.md, daily/YYYY-MM-DD │  │
 │   │  /spiffs/sessions/ tg_<chat_id>.jsonl    │    │
 │   └──────────────────────────────────────────┘    │
 └───────────────────────────────────────────────────┘
@@ -68,11 +68,14 @@ Telegram App (User)
 
 ```
 1. User sends message on Telegram (or WebSocket)
-2. Channel poller receives message, wraps in mimi_msg_t
+2. Telegram poller parses update:
+   - text → direct inbound
+   - /start → direct welcome reply (no agent hop)
+   - voice/audio/photo/document → normalized into textual media summary inbound
 3. Message pushed to Inbound Queue (FreeRTOS xQueue)
 4. Agent Loop (Core 1) pops message:
    a. Load session history from SPIFFS (JSONL)
-   b. Build system prompt (SOUL.md + USER.md + MEMORY.md + recent notes + tool guidance)
+   b. Build system prompt (SOUL.md + USER.md + AGENTS.md + TOOLS.md + SKILLS.md + IDENTITY.md + MEMORY.md + recent notes + tool guidance)
    c. Build cJSON messages array (history + current message)
    d. ReAct loop (max 10 iterations):
       i.   Call Claude API via HTTPS (non-streaming, with tools array)
@@ -210,8 +213,14 @@ SPIFFS is a flat filesystem — no real directories. Files use path-like names.
 ```
 /spiffs/config/SOUL.md          AI personality definition
 /spiffs/config/USER.md          User profile
+/spiffs/config/AGENTS.md        Behavior rules and safety constraints
+/spiffs/config/TOOLS.md         Tool usage rules and priorities
+/spiffs/config/SKILLS.md        Skill routing hints and trigger-style rules
+/spiffs/config/IDENTITY.md      Assistant identity and consistency constraints
+/spiffs/config/HEARTBEAT.md     Heartbeat instructions (ignore comment lines)
+/spiffs/config/CRON.md          Cron schedule fallback (every_minutes + task)
 /spiffs/memory/MEMORY.md        Long-term persistent memory
-/spiffs/memory/2026-02-05.md    Daily notes (one file per day)
+/spiffs/memory/daily/2026-02-05.md Daily notes (one file per day)
 /spiffs/sessions/tg_12345.jsonl Session history (one file per Telegram chat)
 ```
 
@@ -354,6 +363,8 @@ app_main()
       ├── telegram_bot_start()      Launch tg_poll task (Core 0)
       ├── agent_loop_start()        Launch agent_loop task (Core 1)
       ├── ws_server_start()         Start httpd on port 18789
+      ├── heartbeat_service_start() Periodic internal heartbeat trigger
+      ├── cron_service_start()      Periodic every-N-min internal trigger
       └── outbound_dispatch task    Launch outbound task (Core 0)
 ```
 
@@ -373,6 +384,13 @@ The CLI provides debug and maintenance commands only. All configuration is done 
 | `session_list`                 | List all session files               |
 | `session_clear <CHAT_ID>`      | Delete a session file                |
 | `heap_info`                    | Show internal + PSRAM free bytes     |
+| `agent_stats`                  | Show agent success/latency/failures  |
+| `heartbeat_status`             | Show heartbeat counters and last run |
+| `heartbeat_now`                | Trigger heartbeat immediately         |
+| `cron_status`                  | Show cron schedule and counters       |
+| `cron_set <MIN> <TASK>`        | Set simplified every-N-min schedule   |
+| `cron_now`                     | Trigger cron immediately              |
+| `cron_clear`                   | Clear cron schedule                   |
 | `restart`                      | Reboot the device                    |
 | `help`                         | List all available commands           |
 
@@ -383,10 +401,10 @@ The CLI provides debug and maintenance commands only. All configuration is done 
 | Nanobot Module              | MimiClaw Equivalent            | Notes                        |
 |-----------------------------|--------------------------------|------------------------------|
 | `agent/loop.py`             | `agent/agent_loop.c`           | ReAct loop with tool use     |
-| `agent/context.py`          | `agent/context_builder.c`      | Loads SOUL.md + USER.md + memory + tool guidance |
+| `agent/context.py`          | `agent/context_builder.c`      | Loads SOUL/USER/AGENTS/TOOLS/SKILLS/IDENTITY + memory + tool guidance |
 | `agent/memory.py`           | `memory/memory_store.c`        | MEMORY.md + daily notes      |
 | `session/manager.py`        | `memory/session_mgr.c`         | JSONL per chat, ring buffer  |
-| `channels/telegram.py`      | `telegram/telegram_bot.c`      | Raw HTTP, no python-telegram-bot |
+| `channels/telegram.py`      | `telegram/telegram_bot.c`      | Raw HTTP, supports /start + media summary fallback |
 | `bus/events.py` + `queue.py`| `bus/message_bus.c`            | FreeRTOS queues vs asyncio   |
 | `providers/litellm_provider.py` | `llm/llm_proxy.c`         | Direct Anthropic API only    |
 | `config/schema.py`          | `mimi_config.h` + `mimi_secrets.h` | Build-time secrets only  |
@@ -394,5 +412,5 @@ The CLI provides debug and maintenance commands only. All configuration is done 
 | `agent/tools/*`             | `tools/tool_registry.c` + `tool_web_search.c` | web_search via Brave API |
 | `agent/subagent.py`         | *(not yet implemented)*        | See TODO.md                  |
 | `agent/skills.py`           | *(not yet implemented)*        | See TODO.md                  |
-| `cron/service.py`           | *(not yet implemented)*        | See TODO.md                  |
-| `heartbeat/service.py`      | *(not yet implemented)*        | See TODO.md                  |
+| `cron/service.py`           | `cron/cron_service.c`          | Simplified every-N-min scheduler |
+| `heartbeat/service.py`      | `heartbeat/heartbeat_service.c`| Periodic trigger via HEARTBEAT.md |

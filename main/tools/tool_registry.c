@@ -1,7 +1,10 @@
 #include "tool_registry.h"
+#include "mimi_config.h"
 #include "tools/tool_web_search.h"
 #include "tools/tool_get_time.h"
 #include "tools/tool_files.h"
+#include "tools/tool_memory.h"
+#include "tools/tool_audio.h"
 #include "tools/tool_cron.h"
 
 #include <string.h>
@@ -10,7 +13,7 @@
 
 static const char *TAG = "tools";
 
-#define MAX_TOOLS 12
+#define MAX_TOOLS MIMI_TOOL_REGISTRY_MAX
 
 static mimi_tool_t s_tools[MAX_TOOLS];
 static int s_tool_count = 0;
@@ -83,10 +86,10 @@ esp_err_t tool_registry_init(void)
     /* Register read_file */
     mimi_tool_t rf = {
         .name = "read_file",
-        .description = "Read a file from SPIFFS storage. Path must start with /spiffs/.",
+        .description = "Read a file from SPIFFS storage. Path must start with " MIMI_SPIFFS_BASE "/.",
         .input_schema_json =
             "{\"type\":\"object\","
-            "\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Absolute path starting with /spiffs/\"}},"
+            "\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Absolute path starting with " MIMI_SPIFFS_BASE "/\"}},"
             "\"required\":[\"path\"]}",
         .execute = tool_read_file_execute,
     };
@@ -95,10 +98,10 @@ esp_err_t tool_registry_init(void)
     /* Register write_file */
     mimi_tool_t wf = {
         .name = "write_file",
-        .description = "Write or overwrite a file on SPIFFS storage. Path must start with /spiffs/.",
+        .description = "Write or overwrite a file on SPIFFS storage. Path must be under /spiffs/memory/ (other dirs only if build-time switches are enabled).",
         .input_schema_json =
             "{\"type\":\"object\","
-            "\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Absolute path starting with /spiffs/\"},"
+            "\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Absolute path under /spiffs/memory/ by default\"},"
             "\"content\":{\"type\":\"string\",\"description\":\"File content to write\"}},"
             "\"required\":[\"path\",\"content\"]}",
         .execute = tool_write_file_execute,
@@ -108,10 +111,10 @@ esp_err_t tool_registry_init(void)
     /* Register edit_file */
     mimi_tool_t ef = {
         .name = "edit_file",
-        .description = "Find and replace text in a file on SPIFFS. Replaces first occurrence of old_string with new_string.",
+        .description = "Find and replace text in a file on SPIFFS. Path must be under /spiffs/memory/ by default. Replaces first occurrence of old_string with new_string.",
         .input_schema_json =
             "{\"type\":\"object\","
-            "\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Absolute path starting with /spiffs/\"},"
+            "\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Absolute path under /spiffs/memory/ by default\"},"
             "\"old_string\":{\"type\":\"string\",\"description\":\"Text to find\"},"
             "\"new_string\":{\"type\":\"string\",\"description\":\"Replacement text\"}},"
             "\"required\":[\"path\",\"old_string\",\"new_string\"]}",
@@ -125,11 +128,59 @@ esp_err_t tool_registry_init(void)
         .description = "List files on SPIFFS storage, optionally filtered by path prefix.",
         .input_schema_json =
             "{\"type\":\"object\","
-            "\"properties\":{\"prefix\":{\"type\":\"string\",\"description\":\"Optional path prefix filter, e.g. /spiffs/memory/\"}},"
+            "\"properties\":{\"prefix\":{\"type\":\"string\",\"description\":\"Optional path prefix filter, e.g. " MIMI_SPIFFS_BASE "/memory/\"}},"
             "\"required\":[]}",
         .execute = tool_list_dir_execute,
     };
     register_tool(&ld);
+
+    /* Register memory_write_long_term */
+    mimi_tool_t mlt = {
+        .name = "memory_write_long_term",
+        .description = "Overwrite long-term memory in /spiffs/memory/MEMORY.md. Use for durable user profile/preferences.",
+        .input_schema_json =
+            "{\"type\":\"object\","
+            "\"properties\":{\"content\":{\"type\":\"string\",\"description\":\"Complete MEMORY.md content to persist\"}},"
+            "\"required\":[\"content\"]}",
+        .execute = tool_memory_write_long_term_execute,
+    };
+    register_tool(&mlt);
+
+    /* Register memory_append_today */
+    mimi_tool_t mat = {
+        .name = "memory_append_today",
+        .description = "Append one note to today's daily memory file under /spiffs/memory/daily/<YYYY-MM-DD>.md.",
+        .input_schema_json =
+            "{\"type\":\"object\","
+            "\"properties\":{\"note\":{\"type\":\"string\",\"description\":\"One concise note to append\"}},"
+            "\"required\":[\"note\"]}",
+        .execute = tool_memory_append_today_execute,
+    };
+    register_tool(&mat);
+
+    /* Register set_volume */
+    mimi_tool_t sv = {
+        .name = "set_volume",
+        .description = "Set speaker volume percentage (0-100). Use this when the user asks to raise, lower, mute, or adjust voice playback loudness.",
+        .input_schema_json =
+            "{\"type\":\"object\","
+            "\"properties\":{\"volume\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100,\"description\":\"Target volume percent\"}},"
+            "\"required\":[\"volume\"]}",
+        .execute = tool_set_volume_execute,
+    };
+    register_tool(&sv);
+
+    /* Register get_volume */
+    mimi_tool_t gv = {
+        .name = "get_volume",
+        .description = "Get current speaker volume percentage.",
+        .input_schema_json =
+            "{\"type\":\"object\","
+            "\"properties\":{},"
+            "\"required\":[]}",
+        .execute = tool_get_volume_execute,
+    };
+    register_tool(&gv);
 
     /* Register cron_add */
     mimi_tool_t ca = {

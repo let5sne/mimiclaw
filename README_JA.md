@@ -158,7 +158,7 @@ idf.py -p PORT flash monitor
 >
 > </details>
 
-### CLIコマンド
+### CLIコマンド（UART/COMポート経由）
 
 シリアル接続で設定やデバッグができます。**設定コマンド**により再コンパイル不要で設定変更可能 — USBケーブルを挿すだけ。
 
@@ -190,6 +190,47 @@ mimi> heartbeat_trigger           # ハートビートチェックを手動ト�
 mimi> cron_start                  # cronスケジューラを今すぐ開始
 mimi> restart                     # 再起動
 ```
+
+### USB（JTAG）vs UART：どのポートで何をするか
+
+ほとんどの ESP32-S3 開発ボードには **2つの USB-C ポート**があります：
+
+| ポート | 用途 |
+|--------|------|
+| **USB**（JTAG） | `idf.py flash`、JTAGデバッグ |
+| **COM**（UART） | **REPL CLI**、シリアルコンソール |
+
+> **REPLにはUART（COM）ポートが必要です。** USB（JTAG）ポートは対話的なREPL入力をサポートしません。
+
+<details>
+<summary>ポート詳細と推奨ワークフロー</summary>
+
+| ポート | ラベル | プロトコル |
+|--------|--------|------------|
+| **USB** | USB / JTAG | ネイティブ USB Serial/JTAG |
+| **COM** | UART / COM | 外部 UART ブリッジ（CP2102/CH340） |
+
+ESP-IDFコンソールはデフォルトでUART出力に設定されています（`CONFIG_ESP_CONSOLE_UART_DEFAULT=y`）。
+
+**両方のポートを同時に接続している場合：**
+
+- USB（JTAG）ポートはフラッシュ/ダウンロードを処理し、補助シリアル出力を提供
+- UART（COM）ポートはREPL用のメインインタラクティブコンソールを提供
+- macOS では両ポートとも `/dev/cu.usbmodem*` または `/dev/cu.usbserial-*` として表示 — `ls /dev/cu.usb*` で確認
+- Linux では USB（JTAG）は通常 `/dev/ttyACM0`、UART は通常 `/dev/ttyUSB0`
+
+**推奨ワークフロー：**
+
+```bash
+# USB（JTAG）ポートでフラッシュ
+idf.py -p /dev/cu.usbmodem11401 flash
+
+# UART（COM）ポートでREPLを開く
+idf.py -p /dev/cu.usbserial-110 monitor
+# または任意のシリアルターミナル：screen、minicom、PuTTY（ボーレート 115200）
+```
+
+</details>
 
 ## メモリ
 
@@ -249,9 +290,17 @@ MimiClawにはcronスケジューラが内蔵されており、AIが自律的に
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — システム設計、モジュール構成、タスクレイアウト、メモリバジェット、プロトコル、Flashパーティション
 - **[docs/TODO.md](docs/TODO.md)** — 機能ギャップとロードマップ
 
-## Contributing
+## 貢献
 
-Please read **[docs/CONTRIBUTE.md](docs/CONTRIBUTE.md)** before opening issues or pull requests.
+Issue や Pull Request を作成する前に、**[CONTRIBUTING.md](CONTRIBUTING.md)** をご確認ください。
+
+## コントリビューター
+
+MimiClaw に貢献してくれた皆さんに感謝します。
+
+<a href="https://github.com/memovai/mimiclaw/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=memovai/mimiclaw" alt="MimiClaw contributors" />
+</a>
 
 ## ライセンス
 

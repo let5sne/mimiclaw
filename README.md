@@ -149,6 +149,40 @@ ls /dev/ttyACM*          # Linux
 idf.py -p PORT flash monitor
 ```
 
+### Voice/Vision Gateway
+
+Start the local gateway (STT + image analysis endpoint):
+
+```bash
+python3 tools/voice_gateway.py \
+  --host 0.0.0.0 --port 8090 --model small --device cpu \
+  --vision-enabled
+```
+
+- STT endpoint: `http://<your-host-ip>:8091/stt_upload`
+- Vision endpoint: `http://<your-host-ip>:8091/vision_upload`
+- Document endpoint: `http://<your-host-ip>:8091/doc_upload`
+- By default, gateway tries loading API defaults from `main/mimi_secrets.h`; you can override via `--vision-endpoint/--vision-api-key/--vision-model`
+
+### Document Regression Smoke Test
+
+After gateway is running, execute:
+
+```bash
+./tools/run_doc_regression.sh --basic
+./tools/run_doc_regression.sh --office
+```
+
+Or run with custom arguments:
+
+```bash
+python3 tools/doc_regression.py \
+  --manifest tools/doc_regression_manifest.example.json \
+  --base-url http://127.0.0.1:8091
+```
+
+The script calls `/doc_upload` and validates format, extracted text length, keywords, parser prefix, and latency budget.
+`tools/doc_regression_manifest.office.example.json` includes a real `xlsx` sample and an optional `xls` case (`food_legacy.xls`) which is skipped when missing.
 > **Important: Plug into the correct USB port!** Most ESP32-S3 boards have two USB-C ports. You must use the one labeled **USB** (native USB Serial/JTAG), **not** the one labeled **COM** (external UART bridge). Plugging into the wrong port will cause flash/monitor failures.
 >
 > <details>
@@ -158,7 +192,7 @@ idf.py -p PORT flash monitor
 >
 > </details>
 
-### CLI Commands
+### CLI Commands (via UART/COM port)
 
 Connect via serial to configure or debug. **Config commands** let you change settings without recompiling — just plug in a USB cable anywhere.
 
@@ -184,12 +218,60 @@ mimi> wifi_status              # am I connected?
 mimi> memory_read              # see what the bot remembers
 mimi> memory_write "content"   # write to MEMORY.md
 mimi> heap_info                # how much RAM is free?
+mimi> agent_stats              # agent success rate / latency / failures
+mimi> heartbeat_status         # heartbeat counters / last run
+mimi> heartbeat_now            # trigger heartbeat immediately
+mimi> cron_status              # cron schedule + counters
+mimi> cron_set 30 "task..."    # run every 30 min
+mimi> cron_now                 # trigger cron immediately
+mimi> cron_clear               # clear cron schedule
 mimi> session_list             # list all chat sessions
 mimi> session_clear 12345      # wipe a conversation
 mimi> heartbeat_trigger           # manually trigger a heartbeat check
 mimi> cron_start                  # start cron scheduler now
 mimi> restart                     # reboot
 ```
+
+### USB (JTAG) vs UART: Which Port for What
+
+Most ESP32-S3 dev boards expose **two USB-C ports**:
+
+| Port | Use for |
+|------|---------|
+| **USB** (JTAG) | `idf.py flash`, JTAG debugging |
+| **COM** (UART) | **REPL CLI**, serial console |
+
+> **REPL requires the UART (COM) port.** The USB (JTAG) port does not support interactive REPL input.
+
+<details>
+<summary>Port details & recommended workflow</summary>
+
+| Port | Label | Protocol |
+|------|-------|----------|
+| **USB** | USB / JTAG | Native USB Serial/JTAG |
+| **COM** | UART / COM | External UART bridge (CP2102/CH340) |
+
+The ESP-IDF console/REPL is configured to use UART by default (`CONFIG_ESP_CONSOLE_UART_DEFAULT=y`).
+
+**If you have both ports connected simultaneously:**
+
+- USB (JTAG) handles flash/download and provides secondary serial output
+- UART (COM) provides the primary interactive console for the REPL
+- macOS: both appear as `/dev/cu.usbmodem*` or `/dev/cu.usbserial-*` — run `ls /dev/cu.usb*` to identify
+- Linux: USB (JTAG) → `/dev/ttyACM0`, UART → `/dev/ttyUSB0`
+
+**Recommended workflow:**
+
+```bash
+# Flash via USB (JTAG) port
+idf.py -p /dev/cu.usbmodem11401 flash
+
+# Open REPL via UART (COM) port
+idf.py -p /dev/cu.usbserial-110 monitor
+# or use any serial terminal: screen, minicom, PuTTY at 115200 baud
+```
+
+</details>
 
 ## Memory
 
@@ -199,7 +281,14 @@ MimiClaw stores everything as plain text files you can read and edit:
 |------|------------|
 | `SOUL.md` | The bot's personality — edit this to change how it behaves |
 | `USER.md` | Info about you — name, preferences, language |
+| `AGENTS.md` | Behavior rules and safety constraints |
+| `TOOLS.md` | Tool usage policy and priorities |
+| `SKILLS.md` | Skill routing hints and trigger-style instruction rules |
+| `IDENTITY.md` | Assistant identity and response consistency constraints |
+| `HEARTBEAT.md` | Periodic internal task instructions (non-comment lines only) |
+| `CRON.md` | Default cron schedule file (`every_minutes` + `task`) |
 | `MEMORY.md` | Long-term memory — things the bot should always remember |
+| `daily/2026-02-05.md` | Daily notes — what happened today |
 | `HEARTBEAT.md` | Task list the bot checks periodically and acts on autonomously |
 | `cron.json` | Scheduled jobs — recurring or one-shot tasks created by the AI |
 | `2026-02-05.md` | Daily notes — what happened today |
@@ -213,6 +302,12 @@ MimiClaw supports tool calling for both Anthropic and OpenAI — the LLM can cal
 |------|-------------|
 | `web_search` | Search the web via Brave Search API for current information |
 | `get_current_time` | Fetch current date/time via HTTP and set the system clock |
+| `read_file` | Read a SPIFFS file (path must start with `/spiffs/`) |
+| `write_file` | Write or overwrite a SPIFFS file (default allowlist: `/spiffs/memory/`) |
+| `edit_file` | Find-and-replace in a SPIFFS file (default allowlist: `/spiffs/memory/`) |
+| `list_dir` | List SPIFFS files, optionally filtered by prefix |
+| `memory_write_long_term` | Overwrite long-term memory (`/spiffs/memory/MEMORY.md`) |
+| `memory_append_today` | Append one note to today's daily memory |
 | `cron_add` | Schedule a recurring or one-shot task (the LLM creates cron jobs on its own) |
 | `cron_list` | List all scheduled cron jobs |
 | `cron_remove` | Remove a cron job by ID |
@@ -237,6 +332,19 @@ This turns MimiClaw into a proactive assistant — write tasks to `HEARTBEAT.md`
 - **OTA updates** — flash new firmware over WiFi, no USB needed
 - **Dual-core** — network I/O and AI processing run on separate CPU cores
 - **HTTP proxy** — CONNECT tunnel support for restricted networks
+- **Tool use** — ReAct agent loop with Anthropic tool use protocol
+- **Telegram media handling** — `/start` local reply; voice uses real STT via voice gateway HTTP (`/stt_upload`); photos call cloud vision via `vision_upload` with structured output (`caption`/`ocr_text`/`objects`) and `file_id` cache dedupe; documents call `doc_upload` for parsing (`txt/pdf/docx/pptx/xls/xlsx/image-doc`), and when PDF/PPTX text extraction is too short it auto-falls back to page/image OCR via vision before summary fallback
+
+## P0 Hardening Roadmap (In Progress)
+
+- [x] Inbound security: Telegram allowlist (`allow_from`) + WebSocket auth token
+- [x] File tool safety boundaries: write default-limited to `/spiffs/memory/`
+- [x] Reliability: retries/backoff for LLM and outbound delivery; drop status first, preserve final replies
+- [x] Budget guards: tool iterations, context size, tool output size, end-to-end timeout caps
+- [x] Memory governance: unify daily memory path and add dedicated memory write tools
+- [x] Observability: `run_id`, stage-level latency logs, `agent_stats` diagnostics command
+
+Detailed tracking: **[docs/TODO.md](docs/TODO.md)**.
 - **Multi-provider** — supports both Anthropic (Claude) and OpenAI (GPT), switchable at runtime
 - **Cron scheduler** — the AI can schedule its own recurring and one-shot tasks, persisted across reboots
 - **Heartbeat** — periodically checks a task file and prompts the AI to act autonomously
@@ -251,7 +359,15 @@ Technical details live in the `docs/` folder:
 
 ## Contributing
 
-Please read **[docs/CONTRIBUTE.md](docs/CONTRIBUTE.md)** before opening issues or pull requests.
+Please read **[CONTRIBUTING.md](CONTRIBUTING.md)** before opening issues or pull requests.
+
+## Contributors
+
+Thanks to everyone who has contributed to MimiClaw.
+
+<a href="https://github.com/memovai/mimiclaw/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=memovai/mimiclaw" alt="MimiClaw contributors" />
+</a>
 
 ## License
 

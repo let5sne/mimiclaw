@@ -1,0 +1,18 @@
+[
+  {
+    "file": "tools/regression_samples/notes.txt",
+    "expect_format": "txt",
+    "min_text_len": 30,
+    "must_contain": ["MimiClaw", "ESP32-S3"],
+    "max_latency_ms": 5000,
+    "expect_parser_prefix": "text"
+  },
+  {
+    "file": "tools/regression_samples/food.csv",
+    "expect_format": "csv",
+    "min_text_len": 40,
+    "must_contain": ["店名", "红牌楼"],
+    "max_latency_ms": 5000,
+    "expect_parser_prefix": "text"
+  }
+]

@@ -1,0 +1,19 @@
+[
+  {
+    "file": "tools/regression_samples/food.xlsx",
+    "expect_format": "xlsx",
+    "min_text_len": 60,
+    "must_contain": ["店名", "红牌楼", "十二桥路夫妻烧烤"],
+    "max_latency_ms": 8000,
+    "expect_parser_prefix": "xlsx"
+  },
+  {
+    "file": "tools/regression_samples/food_legacy.xls",
+    "expect_format": "xls",
+    "min_text_len": 40,
+    "must_contain": ["店名", "红牌楼"],
+    "max_latency_ms": 8000,
+    "expect_parser_prefix": "xls",
+    "optional": true
+  }
+]

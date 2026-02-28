@@ -1,0 +1,3 @@
+MimiClaw 回归样本
+目标：验证 doc_upload 的文本解析链路稳定。
+关键词：Agent、Telegram、ESP32-S3

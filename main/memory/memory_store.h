@@ -4,7 +4,7 @@
 #include <stddef.h>
 
 /**
- * Initialize memory store. Ensures SPIFFS directories exist.
+ * Initialize memory store.
  */
 esp_err_t memory_store_init(void);
 
@@ -20,7 +20,7 @@ esp_err_t memory_read_long_term(char *buf, size_t size);
 esp_err_t memory_write_long_term(const char *content);
 
 /**
- * Append a note to today's daily memory file (YYYY-MM-DD.md).
+ * Append a note to today's daily memory file (/spiffs/memory/daily/YYYY-MM-DD.md).
  */
 esp_err_t memory_append_today(const char *note);
 
