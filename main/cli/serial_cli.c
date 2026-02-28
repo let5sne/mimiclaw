@@ -27,6 +27,7 @@
 #include <math.h>
 #include <ctype.h>
 #include <dirent.h>
+#include <time.h>
 #include "esp_log.h"
 #include "esp_console.h"
 #include "esp_system.h"
@@ -550,6 +551,11 @@ static struct {
     struct arg_end *end;
 } proxy_args;
 
+static struct {
+    struct arg_str *tz;
+    struct arg_end *end;
+} timezone_args;
+
 static int cmd_set_proxy(int argc, char **argv)
 {
     int nerrors = arg_parse(argc, argv, (void **)&proxy_args);
@@ -576,6 +582,46 @@ static int cmd_clear_proxy(int argc, char **argv)
 {
     http_proxy_clear();
     printf("Proxy cleared. Restart to apply.\n");
+    return 0;
+}
+
+static int cmd_set_timezone(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&timezone_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, timezone_args.end, argv[0]);
+        return 1;
+    }
+
+    const char *tz = timezone_args.tz->sval[0];
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open(MIMI_NVS_NAMESPACE, NVS_READWRITE, &nvs);
+    if (err != ESP_OK) {
+        printf("NVS open failed: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    err = nvs_set_str(nvs, MIMI_NVS_KEY_TIMEZONE, tz);
+    if (err == ESP_OK) {
+        err = nvs_commit(nvs);
+    }
+    nvs_close(nvs);
+
+    if (err != ESP_OK) {
+        printf("Failed to save timezone: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    setenv("TZ", tz, 1);
+    tzset();
+    printf("Timezone set to: %s (applied immediately)\n", tz);
+    return 0;
+}
+
+static int cmd_get_timezone(int argc, char **argv)
+{
+    const char *current = getenv("TZ");
+    printf("Current timezone: %s\n", current ? current : MIMI_TIMEZONE);
     return 0;
 }
 
@@ -893,6 +939,7 @@ static int cmd_config_show(int argc, char **argv)
     print_config("Proxy Host", MIMI_NVS_PROXY,  MIMI_NVS_KEY_PROXY_HOST, MIMI_SECRET_PROXY_HOST, false);
     print_config("Proxy Port", MIMI_NVS_PROXY,  MIMI_NVS_KEY_PROXY_PORT, MIMI_SECRET_PROXY_PORT, false);
     print_config("Search Key", MIMI_NVS_SEARCH, MIMI_NVS_KEY_API_KEY,  MIMI_SECRET_SEARCH_KEY, true);
+    print_config("Timezone",   MIMI_NVS_NAMESPACE, MIMI_NVS_KEY_TIMEZONE, MIMI_TIMEZONE, false);
     print_config("Allow From", MIMI_NVS_SECURITY, MIMI_NVS_KEY_ALLOW_FROM, MIMI_SECRET_ALLOW_FROM, false);
     print_config("WS Token",  MIMI_NVS_SECURITY, MIMI_NVS_KEY_WS_TOKEN, MIMI_SECRET_WS_TOKEN, true);
     print_config("Voice GW",   MIMI_NVS_VOICE,  MIMI_NVS_KEY_VOICE_GW, MIMI_VOICE_GATEWAY_URL, false);
@@ -906,7 +953,7 @@ static int cmd_config_reset(int argc, char **argv)
 {
     const char *namespaces[] = {
         MIMI_NVS_WIFI, MIMI_NVS_TG, MIMI_NVS_LLM, MIMI_NVS_PROXY, MIMI_NVS_SEARCH,
-        MIMI_NVS_VOICE, MIMI_NVS_SECURITY, MIMI_NVS_AUDIO
+        MIMI_NVS_VOICE, MIMI_NVS_SECURITY, MIMI_NVS_AUDIO, MIMI_NVS_NAMESPACE
     };
     int ns_count = sizeof(namespaces) / sizeof(namespaces[0]);
     for (int i = 0; i < ns_count; i++) {
@@ -1598,6 +1645,25 @@ esp_err_t serial_cli_init(void)
         .func = &cmd_heartbeat_trigger,
     };
     esp_console_cmd_register(&heartbeat_cmd);
+
+    /* set_timezone */
+    timezone_args.tz = arg_str1(NULL, NULL, "<tz>", "POSIX TZ string, e.g. CST-8 or UTC0");
+    timezone_args.end = arg_end(1);
+    esp_console_cmd_t tz_set_cmd = {
+        .command = "set_timezone",
+        .help = "Set timezone (POSIX TZ format, e.g. CST-8, EST5EDT). Persisted in NVS.",
+        .func = &cmd_set_timezone,
+        .argtable = &timezone_args,
+    };
+    esp_console_cmd_register(&tz_set_cmd);
+
+    /* get_timezone */
+    esp_console_cmd_t tz_get_cmd = {
+        .command = "get_timezone",
+        .help = "Show current timezone setting",
+        .func = &cmd_get_timezone,
+    };
+    esp_console_cmd_register(&tz_get_cmd);
 
     /* cron_start */
     esp_console_cmd_t cron_start_cmd = {
