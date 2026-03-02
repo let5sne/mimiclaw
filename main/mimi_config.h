@@ -101,7 +101,7 @@
 #define MIMI_NVS_KEY_TIMEZONE        "timezone"
 
 /* LLM */
-#define MIMI_LLM_DEFAULT_MODEL       "claude-opus-4-5"
+#define MIMI_LLM_DEFAULT_MODEL       "claude-3-5-haiku-20241022"
 #define MIMI_LLM_PROVIDER_DEFAULT    "anthropic"
 #define MIMI_LLM_MAX_TOKENS          4096
 #define MIMI_LLM_API_URL             "https://api.anthropic.com/v1/messages"

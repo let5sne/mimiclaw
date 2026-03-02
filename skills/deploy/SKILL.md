@@ -49,7 +49,7 @@ Edit `main/mimi_secrets.h` — fill in ALL required fields:
 #define MIMI_SECRET_WIFI_PASS       "YourWiFiPassword"     // REQUIRED
 #define MIMI_SECRET_TG_TOKEN        "123456:ABC-DEF..."    // REQUIRED
 #define MIMI_SECRET_API_KEY         "sk-ant-api03-..."     // REQUIRED
-#define MIMI_SECRET_MODEL           ""                     // optional, defaults to claude-opus-4-5
+#define MIMI_SECRET_MODEL           ""                     // optional, defaults to claude-3-5-haiku-20241022
 #define MIMI_SECRET_SEARCH_KEY      ""                     // optional: Brave Search API key
 #define MIMI_SECRET_PROXY_HOST      ""                     // optional: e.g. "192.168.1.83"
 #define MIMI_SECRET_PROXY_PORT      ""                     // optional: e.g. "7897"
