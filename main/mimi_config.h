@@ -101,7 +101,7 @@
 #define MIMI_NVS_KEY_TIMEZONE        "timezone"
 
 /* LLM */
-#define MIMI_LLM_DEFAULT_MODEL       "claude-opus-4-5"
+#define MIMI_LLM_DEFAULT_MODEL       "claude-haiku-3-5-20241022"
 #define MIMI_LLM_PROVIDER_DEFAULT    "anthropic"
 #define MIMI_LLM_MAX_TOKENS          4096
 #define MIMI_LLM_API_URL             "https://api.anthropic.com/v1/messages"
@@ -143,7 +143,7 @@
 #ifndef MIMI_FILE_WRITE_ALLOW_SESSION_DIR
 #define MIMI_FILE_WRITE_ALLOW_SESSION_DIR 0
 #endif
-#define MIMI_CONTEXT_BUF_SIZE        (16 * 1024)
+#define MIMI_CONTEXT_BUF_SIZE        (24 * 1024)
 #define MIMI_SESSION_MAX_MSGS        20
 
 /* Cron / Heartbeat */
