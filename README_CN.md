@@ -17,12 +17,12 @@
 
 **$5 芯片上的 AI 助理（OpenClaw）。没有 Linux，没有 Node.js，纯 C。**
 
-MimiClaw 把一块小小的 ESP32-S3 开发板变成你的私人 AI 助理。插上 USB 供电，连上 WiFi，通过 Telegram 跟它对话 — 它能处理你丢给它的任何任务，还会随时间积累本地记忆不断进化 — 全部跑在一颗拇指大小的芯片上。
+MimiClaw 把一块小小的 ESP32-S3 开发板变成你的私人 AI 助理。插上 USB 供电，连上 WiFi，通过 Telegram 或飞书 Bot 跟它对话 — 它能处理你丢给它的任何任务，还会随时间积累本地记忆不断进化 — 全部跑在一颗拇指大小的芯片上。
 
 ## 认识 MimiClaw
 
 - **小巧** — 没有 Linux，没有 Node.js，没有臃肿依赖 — 纯 C
-- **好用** — 在 Telegram 发消息，剩下的它来搞定
+- **好用** — 在 Telegram / 飞书发消息，剩下的它来搞定
 - **忠诚** — 从记忆中学习，跨重启也不会忘
 - **能干** — USB 供电，0.5W，24/7 运行
 - **可爱** — 一块 ESP32-S3 开发板，$5，没了
@@ -31,25 +31,25 @@ MimiClaw 把一块小小的 ESP32-S3 开发板变成你的私人 AI 助理。插
 
 ![](assets/mimiclaw.png)
 
-你在 Telegram 发一条消息，ESP32-S3 通过 WiFi 收到后送进 Agent 循环 — LLM 思考、调用工具、读取记忆 — 再把回复发回来。同时支持 **Anthropic (Claude)** 和 **OpenAI (GPT)** 两种提供商，运行时可切换。一切都跑在一颗 $5 的芯片上，所有数据存在本地 Flash。
+你在 Telegram、飞书或局域网 WebSocket 客户端发一条消息，ESP32-S3 通过 WiFi 收到后送进 Agent 循环 — LLM 思考、调用工具、读取记忆 — 再把回复发回来。同时支持 **Anthropic (Claude)** 和 **OpenAI (GPT)** 两种提供商，运行时可切换。一切都跑在一颗 $5 的芯片上，所有数据存在本地 Flash。
 
 ## 快速开始
 
-默认快速开始使用 **ESP32-S3-DevKitC-1**，**不需要连接任何外设**。先插对 **USB** 口，再配置 WiFi / Telegram / API Key，烧录后通过 Telegram 验证即可。
+默认快速开始使用 **ESP32-S3-DevKitC-1**，**不需要连接任何外设**。先插对 **USB** 口，再配置 WiFi / Bot / API Key，烧录后通过 Telegram 或飞书验证即可。
 
 ### 5 步快跑
 
 1. 准备一块 **ESP32-S3-DevKitC-1**，并插到标有 **USB** 的接口，不要插 **COM**。
 2. 安装 ESP-IDF 并克隆仓库。
-3. 复制 `main/mimi_secrets.h.example` 为 `main/mimi_secrets.h`，填好 WiFi、Telegram 和 API Key。
+3. 复制 `main/mimi_secrets.h.example` 为 `main/mimi_secrets.h`，填好 WiFi、Bot 和 API Key。
 4. 编译并烧录固件。
-5. 打开 Telegram，先发 `/start` 确认设备在线，再发 `hello` 验证完整 Agent 链路。
+5. 打开 Telegram 或飞书，先发 `/start` 或 `hello` 验证完整 Agent 链路。
 
 ### 你需要
 
 - 一块 **ESP32-S3-DevKitC-1**（默认快速开始板型，建议选择 16MB Flash + 8MB PSRAM 版本）
 - 一根 **USB Type-C 数据线**
-- 一个 **Telegram Bot Token** — 在 Telegram 找 [@BotFather](https://t.me/BotFather) 创建
+- 一个 **Telegram Bot Token**，或一个 **飞书自建应用**（开启机器人能力 + 事件订阅）
 - 一个 **Anthropic API Key** — 从 [console.anthropic.com](https://console.anthropic.com) 获取，或一个 **OpenAI API Key** — 从 [platform.openai.com](https://platform.openai.com) 获取
 - 默认快速开始不需要麦克风、喇叭或屏幕
 
@@ -137,7 +137,10 @@ cp main/mimi_secrets.h.example main/mimi_secrets.h
 ```c
 #define MIMI_SECRET_WIFI_SSID       "你的WiFi名"
 #define MIMI_SECRET_WIFI_PASS       "你的WiFi密码"
-#define MIMI_SECRET_TG_TOKEN        "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+#define MIMI_SECRET_TG_TOKEN        ""              // 只用飞书时可留空
+#define MIMI_SECRET_FEISHU_APP_ID   ""              // 只用 Telegram 时可留空
+#define MIMI_SECRET_FEISHU_APP_SECRET ""
+#define MIMI_SECRET_FEISHU_VERIFY_TOKEN ""
 #define MIMI_SECRET_API_KEY         "sk-ant-api03-xxxxx"
 #define MIMI_SECRET_MODEL_PROVIDER  "anthropic"     // "anthropic" 或 "openai"
 #define MIMI_SECRET_SEARCH_KEY      ""              // 可选：Brave Search API key
@@ -162,7 +165,8 @@ idf.py -p PORT flash monitor
 
 建议的首次验证动作：
 
-- 发送 `/start`，确认固件在线且 Telegram 通路正常
+- Telegram：发送 `/start`，确认固件在线
+- 飞书：给机器人发送 `hello`，确认回调和出站发送都正常
 - 发送 `hello`，验证完整 Agent 链路
 
 > **注意：请插对 USB 口！** 大多数 ESP32-S3 开发板有两个 Type-C 接口，必须插标有 **USB** 的那个口（原生 USB Serial/JTAG），**不要**插标有 **COM** 的口（外部 UART 桥接）。插错口会导致烧录/监控失败。
@@ -191,7 +195,60 @@ mimi> clear_proxy                    # 清除代理
 
 > **提示**：确保 ESP32-S3 和代理机器在同一局域网。Clash Verge 在「设置 → 允许局域网」中开启。
 
+### 飞书 Bot 接入与联调
+
+这个分支默认是**无外部 voice gateway 版本**。文本对话开箱即用，不需要先启动 `tools/voice_gateway.py`。
+
+#### 1. 填写飞书配置
+
+在 `main/mimi_secrets.h` 中填写：
+
+```c
+#define MIMI_SECRET_FEISHU_APP_ID        "cli_xxx"
+#define MIMI_SECRET_FEISHU_APP_SECRET    "xxx"
+#define MIMI_SECRET_FEISHU_VERIFY_TOKEN  "mimiclaw-feishu"
+```
+
+说明：
+
+- 飞书配置目前只支持**编译时写入**
+- 如果你在飞书开放平台配置了 `Verify Token`，这里必须保持一致
+
+#### 2. 在飞书开放平台配置应用
+
+- 创建**自建应用**
+- 开启**机器人能力**
+- 订阅事件 `im.message.receive_v1`
+- 请求地址填 `https://<你的公网地址>/feishu/events`
+- `Verify Token` 填成和 `MIMI_SECRET_FEISHU_VERIFY_TOKEN` 一样
+- `Encrypt Key` 先留空或关闭
+
+当前固件**不支持加密事件体**。如果启用了 `Encrypt Key`，设备会返回 `501 Not Implemented`。
+
+#### 3. 保证设备可被飞书回调
+
+- 回调路径固定为 `/feishu/events`
+- HTTP 服务默认监听端口 `18789`
+- 如果设备不在公网，需要自己做反向代理、端口映射或内网穿透，把外部请求转到 `http://<设备局域网IP>:18789/feishu/events`
+
+#### 4. 烧录后的联调步骤
+
+- 打开串口监控，确认日志里出现 `Feishu callback registered at /feishu/events`
+- 在飞书里给机器人发送 `hello`
+- 预期现象：
+  - 飞书开放平台事件订阅页显示回调成功
+  - 设备日志出现 `Feishu text from ...`
+  - Bot 返回一条文本回复
+
+#### 5. 当前边界
+
+- 只支持**文本消息**
+- 非文本消息会直接 ACK，但不会进入 Agent
+- 飞书出站发送使用 `chat_id`
+
 ### 可选：语音/视觉网关启动
+
+这部分是**可选扩展**。默认无网关版本不依赖它；只有你想给 Telegram 增加真实 STT、图片理解、文档解析时，才需要单独启动。
 
 默认快速开始不需要这一部分。如果你只是想先让板子联网并在 Telegram 上跑起来，可以先跳过。
 
@@ -207,6 +264,14 @@ python3 tools/voice_gateway.py \
 - 图片解析入口：`http://<你的电脑IP>:8091/vision_upload`
 - 文档解析入口：`http://<你的电脑IP>:8091/doc_upload`
 - 默认会尝试从 `main/mimi_secrets.h` 读取视觉 API 配置；如需覆盖，可传 `--vision-endpoint/--vision-api-key/--vision-model`
+
+要让 Telegram 真正启用这些扩展，还需要把 `main/mimi_config.h` 中的：
+
+```c
+#define MIMI_TELEGRAM_GATEWAY_MEDIA_ENABLED 1
+```
+
+重新编译烧录。默认值是 `0`，即只保留文本与媒体摘要模式。
 
 ### 文档解析回归冒烟测试
 
@@ -246,6 +311,11 @@ mimi> set_search_key BSA...        # 设置 Brave Search API Key
 mimi> config_show                  # 查看所有配置（脱敏显示）
 mimi> config_reset                 # 清除 NVS，恢复编译时默认值
 ```
+
+说明：
+
+- 目前没有 `set_feishu_*` 系列命令
+- 飞书 `app_id/app_secret/verify_token` 修改后需要重新编译固件
 
 **调试与运维：**
 
@@ -324,11 +394,12 @@ MimiClaw 内置 cron 调度器，让 AI 可以自主安排任务。LLM 可以通
 ## 其他功能
 
 - **WebSocket 网关** — 端口 18789，局域网内用任意 WebSocket 客户端连接
+- **飞书 Bot** — 文本消息回调入口 `/feishu/events`，与 WebSocket 复用同一个 HTTP 服务
 - **OTA 更新** — WiFi 远程刷固件，无需 USB
 - **双核** — 网络 I/O 和 AI 处理分别跑在不同 CPU 核心
 - **HTTP 代理** — CONNECT 隧道，适配受限网络
 - **工具调用** — ReAct Agent 循环，Anthropic tool use 协议
-- **Telegram 媒体处理** — `/start` 本地快速回复；语音消息走 voice gateway 的 HTTP STT（`/stt_upload`）真实转写；图片消息通过 `vision_upload` 返回结构化结果（描述/文字/元素）并按 `file_id` 缓存；文件消息优先走 `doc_upload` 解析（`txt/pdf/docx/pptx/xls/xlsx/图片文档`），当 PDF/PPTX 文本提取过短时会自动走分页/分图 OCR 兜底，再失败才回退摘要
+- **Telegram 媒体处理** — 默认无网关模式下，语音/图片/文件会退化为媒体摘要；启用 `MIMI_TELEGRAM_GATEWAY_MEDIA_ENABLED=1` 并启动 `voice_gateway.py` 后，才会开启真实 STT / vision / doc_upload 扩展
 
 ## 工程化增强路线（P0，进行中）
 

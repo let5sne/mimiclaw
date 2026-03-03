@@ -17,12 +17,12 @@
 
 **The world's first AI assistant(OpenClaw) on a $5 chip. No Linux. No Node.js. Just pure C**
 
-MimiClaw turns a tiny ESP32-S3 board into a personal AI assistant. Plug it into USB power, connect to WiFi, and talk to it through Telegram — it handles any task you throw at it and evolves over time with local memory — all on a chip the size of a thumb.
+MimiClaw turns a tiny ESP32-S3 board into a personal AI assistant. Plug it into USB power, connect to WiFi, and talk to it through Telegram or a Feishu bot — it handles any task you throw at it and evolves over time with local memory — all on a chip the size of a thumb.
 
 ## Meet MimiClaw
 
 - **Tiny** — No Linux, no Node.js, no bloat — just pure C
-- **Handy** — Message it from Telegram, it handles the rest
+- **Handy** — Message it from Telegram or Feishu, it handles the rest
 - **Loyal** — Learns from memory, remembers across reboots
 - **Energetic** — USB power, 0.5 W, runs 24/7
 - **Lovable** — One ESP32-S3 board, $5, nothing else
@@ -31,25 +31,25 @@ MimiClaw turns a tiny ESP32-S3 board into a personal AI assistant. Plug it into 
 
 ![](assets/mimiclaw.png)
 
-You send a message on Telegram. The ESP32-S3 picks it up over WiFi, feeds it into an agent loop — the LLM thinks, calls tools, reads memory — and sends the reply back. Supports both **Anthropic (Claude)** and **OpenAI (GPT)** as providers, switchable at runtime. Everything runs on a single $5 chip with all your data stored locally on flash.
+You send a message on Telegram, Feishu, or a LAN WebSocket client. The ESP32-S3 picks it up over WiFi, feeds it into an agent loop — the LLM thinks, calls tools, reads memory — and sends the reply back. Supports both **Anthropic (Claude)** and **OpenAI (GPT)** as providers, switchable at runtime. Everything runs on a single $5 chip with all your data stored locally on flash.
 
 ## Quick Start
 
-The default quick start uses **ESP32-S3-DevKitC-1** with **no external peripherals** attached. Plug into the correct **USB** port, configure WiFi/Telegram/API key, flash the firmware, and verify the bot from Telegram.
+The default quick start uses **ESP32-S3-DevKitC-1** with **no external peripherals** attached. Plug into the correct **USB** port, configure WiFi/Bot/API key, flash the firmware, and verify from Telegram or Feishu.
 
 ### Fast Path (5 Steps)
 
 1. Prepare an **ESP32-S3-DevKitC-1** and plug into the port labeled **USB** (not **COM**).
 2. Install ESP-IDF and clone this repository.
-3. Copy `main/mimi_secrets.h.example` to `main/mimi_secrets.h` and fill in WiFi, Telegram, and API key.
+3. Copy `main/mimi_secrets.h.example` to `main/mimi_secrets.h` and fill in WiFi, bot, and API key.
 4. Build and flash the firmware.
-5. Open Telegram and send `/start` to confirm the device is online, then send `hello` to test the full agent path.
+5. Open Telegram or Feishu and send `/start` or `hello` to test the full agent path.
 
 ### What You Need
 
 - An **ESP32-S3-DevKitC-1** (default quick-start board; use a variant with 16 MB flash and 8 MB PSRAM)
 - A **USB Type-C cable**
-- A **Telegram bot token** — talk to [@BotFather](https://t.me/BotFather) on Telegram to create one
+- A **Telegram bot token**, or a **Feishu self-built app** with bot capability and event subscription
 - An **Anthropic API key** — from [console.anthropic.com](https://console.anthropic.com), or an **OpenAI API key** — from [platform.openai.com](https://platform.openai.com)
 - No microphone, speaker, or display is required for the default quick start
 
@@ -137,7 +137,10 @@ Edit `main/mimi_secrets.h`:
 ```c
 #define MIMI_SECRET_WIFI_SSID       "YourWiFiName"
 #define MIMI_SECRET_WIFI_PASS       "YourWiFiPassword"
-#define MIMI_SECRET_TG_TOKEN        "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+#define MIMI_SECRET_TG_TOKEN        ""              // leave empty if you only use Feishu
+#define MIMI_SECRET_FEISHU_APP_ID   ""
+#define MIMI_SECRET_FEISHU_APP_SECRET ""
+#define MIMI_SECRET_FEISHU_VERIFY_TOKEN ""
 #define MIMI_SECRET_API_KEY         "sk-ant-api03-xxxxx"
 #define MIMI_SECRET_MODEL_PROVIDER  "anthropic"     // "anthropic" or "openai"
 #define MIMI_SECRET_SEARCH_KEY      ""              // optional: Brave Search API key
@@ -162,7 +165,8 @@ idf.py -p PORT flash monitor
 
 Recommended first check:
 
-- Send `/start` to confirm the firmware is online and Telegram connectivity works
+- Telegram: send `/start` to confirm connectivity
+- Feishu: send `hello` to confirm callback ingress and outbound messaging
 - Send `hello` to test the full agent path
 
 > **Important: Plug into the correct USB port!** Most ESP32-S3 boards have two USB-C ports. You must use the one labeled **USB** (native USB Serial/JTAG), **not** the one labeled **COM** (external UART bridge). Plugging into the wrong port will cause flash/monitor failures.
@@ -176,7 +180,50 @@ Recommended first check:
 >
 > </details>
 
+### Feishu Bot Setup
+
+This branch defaults to a **no external voice gateway** build. Text chat works without running `tools/voice_gateway.py`.
+
+1. Fill these build-time secrets in `main/mimi_secrets.h`:
+
+```c
+#define MIMI_SECRET_FEISHU_APP_ID        "cli_xxx"
+#define MIMI_SECRET_FEISHU_APP_SECRET    "xxx"
+#define MIMI_SECRET_FEISHU_VERIFY_TOKEN  "mimiclaw-feishu"
+```
+
+2. In the Feishu Open Platform:
+
+- create a **self-built app**
+- enable **bot capability**
+- subscribe to event `im.message.receive_v1`
+- set request URL to `https://<public-address>/feishu/events`
+- set `Verify Token` to the same value as `MIMI_SECRET_FEISHU_VERIFY_TOKEN`
+- leave `Encrypt Key` empty / disabled
+
+This firmware currently does **not** support encrypted event payloads.
+
+3. Make the device reachable from Feishu:
+
+- callback path is fixed at `/feishu/events`
+- the shared HTTP service listens on port `18789`
+- if your board is not public, add reverse proxy / port forwarding / tunnel to `http://<device-lan-ip>:18789/feishu/events`
+
+4. Smoke test after flashing:
+
+- check serial logs for `Feishu callback registered at /feishu/events`
+- send `hello` to the bot in Feishu
+- expect a text reply from MimiClaw
+
+Current limits:
+
+- text messages only
+- non-text events are ACKed but ignored
+- outbound Feishu delivery uses `chat_id`
+
 ### Optional: Voice/Vision Gateway
+
+This is an optional extension. The default no-gateway build does not depend on it.
 
 Not required for the default quick start. If you only want to get the board online, skip this section for now.
 
@@ -192,6 +239,12 @@ python3 tools/voice_gateway.py \
 - Vision endpoint: `http://<your-host-ip>:8091/vision_upload`
 - Document endpoint: `http://<your-host-ip>:8091/doc_upload`
 - By default, gateway tries loading API defaults from `main/mimi_secrets.h`; you can override via `--vision-endpoint/--vision-api-key/--vision-model`
+
+To actually enable these Telegram media features in firmware, also set this in `main/mimi_config.h` and rebuild:
+
+```c
+#define MIMI_TELEGRAM_GATEWAY_MEDIA_ENABLED 1
+```
 
 ### Document Regression Smoke Test
 
@@ -231,6 +284,11 @@ mimi> set_search_key BSA...        # set Brave Search API key
 mimi> config_show                  # show all config (masked)
 mimi> config_reset                 # clear NVS, revert to build-time defaults
 ```
+
+Note:
+
+- there are currently no `set_feishu_*` CLI commands
+- changing Feishu `app_id/app_secret/verify_token` requires a rebuild
 
 **Debug & maintenance:**
 
@@ -309,11 +367,12 @@ This turns MimiClaw into a proactive assistant — write tasks to `HEARTBEAT.md`
 ## Also Included
 
 - **WebSocket gateway** on port 18789 — connect from your LAN with any WebSocket client
+- **Feishu Bot** — text callback endpoint at `/feishu/events`, sharing the same HTTP service
 - **OTA updates** — flash new firmware over WiFi, no USB needed
 - **Dual-core** — network I/O and AI processing run on separate CPU cores
 - **HTTP proxy** — CONNECT tunnel support for restricted networks
 - **Tool use** — ReAct agent loop with Anthropic tool use protocol
-- **Telegram media handling** — `/start` local reply; voice uses real STT via voice gateway HTTP (`/stt_upload`); photos call cloud vision via `vision_upload` with structured output (`caption`/`ocr_text`/`objects`) and `file_id` cache dedupe; documents call `doc_upload` for parsing (`txt/pdf/docx/pptx/xls/xlsx/image-doc`), and when PDF/PPTX text extraction is too short it auto-falls back to page/image OCR via vision before summary fallback
+- **Telegram media handling** — in the default no-gateway mode, voice/photos/documents fall back to media summaries; if you enable `MIMI_TELEGRAM_GATEWAY_MEDIA_ENABLED=1` and run `voice_gateway.py`, Telegram can use real STT / vision / doc parsing again
 
 ## P0 Hardening Roadmap (In Progress)
 
