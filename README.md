@@ -287,7 +287,8 @@ Notes:
 Current limits:
 
 - text messages go to the Agent as-is
-- image / file / audio / sticker / other non-text Feishu messages are downgraded into summary text before entering the Agent
+- by default, image / file / audio / sticker / other non-text Feishu messages are downgraded into summary text before entering the Agent
+- if you enable `MIMI_FEISHU_GATEWAY_MEDIA_ENABLED=1` and run `voice_gateway.py`, Feishu `image/file` messages are downloaded and sent through real vision / doc parsing; `audio/sticker/other` still stay in summary mode
 - outbound Feishu delivery uses `chat_id`
 - repeated Feishu deliveries are lightly deduplicated by `event_id/message_id` before entering the Agent
 
@@ -310,11 +311,17 @@ python3 tools/voice_gateway.py \
 - Document endpoint: `http://<your-host-ip>:8091/doc_upload`
 - By default, gateway tries loading API defaults from `main/mimi_secrets.h`; you can override via `--vision-endpoint/--vision-api-key/--vision-model`
 
-To actually enable these Telegram media features in firmware, also set this in `main/mimi_config.h` and rebuild:
+To actually enable these media extensions in firmware, also set these in `main/mimi_config.h` and rebuild:
 
 ```c
 #define MIMI_TELEGRAM_GATEWAY_MEDIA_ENABLED 1
+#define MIMI_FEISHU_GATEWAY_MEDIA_ENABLED   1
 ```
+
+Both defaults are `0`, which keeps the no-gateway text + summary behavior. After enabling them:
+
+- Telegram regains real STT / vision / doc parsing for voice / photos / documents
+- Feishu enables real download + vision / doc parsing for `image/file`, while other media types still fall back to summaries
 
 ### Document Regression Smoke Test
 
@@ -440,12 +447,13 @@ This turns MimiClaw into a proactive assistant — write tasks to `HEARTBEAT.md`
 ## Also Included
 
 - **WebSocket gateway** on port 18789 — connect from your LAN with any WebSocket client
-- **Feishu Bot** — text callback endpoint at `/feishu/events`, sharing the same HTTP service
+- **Feishu Bot** — callback endpoint at `/feishu/events`, with text passthrough and summary fallback by default; optional real gateway parsing for `image/file`
 - **OTA updates** — flash new firmware over WiFi, no USB needed
 - **Dual-core** — network I/O and AI processing run on separate CPU cores
 - **HTTP proxy** — CONNECT tunnel support for restricted networks
 - **Tool use** — ReAct agent loop with Anthropic tool use protocol
 - **Telegram media handling** — in the default no-gateway mode, voice/photos/documents fall back to media summaries; if you enable `MIMI_TELEGRAM_GATEWAY_MEDIA_ENABLED=1` and run `voice_gateway.py`, Telegram can use real STT / vision / doc parsing again
+- **Feishu media handling** — in the default no-gateway mode, media falls back to summaries; if you enable `MIMI_FEISHU_GATEWAY_MEDIA_ENABLED=1` and run `voice_gateway.py`, Feishu `image/file` can use real download + vision / doc parsing
 
 ## P0 Hardening Roadmap (In Progress)
 

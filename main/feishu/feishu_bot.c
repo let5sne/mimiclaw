@@ -6,6 +6,7 @@
 #include "security/access_control.h"
 
 #include <stdbool.h>
+#include <ctype.h>
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
@@ -28,6 +29,8 @@ static const char *TAG = "feishu";
 static const char *FEISHU_START_HELP =
     "MimiClaw 已连接飞书 Bot。\n"
     "直接发送文本消息即可开始对话。";
+#define FEISHU_VISION_TEXT_MAX 768
+#define FEISHU_ERR_UNAUTHORIZED ((esp_err_t)(ESP_ERR_HTTP_BASE + 0x101))
 
 typedef struct {
     char *buf;
@@ -39,6 +42,13 @@ typedef struct {
     char event_id[MIMI_FEISHU_EVENT_ID_MAX_LEN];
     int64_t seen_at_us;
 } feishu_event_dedup_entry_t;
+
+typedef struct {
+    char message_id[96];
+    char file_key[96];
+    char file_name[128];
+    char mime_type[96];
+} feishu_media_ref_t;
 
 static char s_app_id[96] = MIMI_SECRET_FEISHU_APP_ID;
 static char s_app_secret[128] = MIMI_SECRET_FEISHU_APP_SECRET;
@@ -673,6 +683,732 @@ static const char *feishu_get_bus_media_type(const char *message_type)
     return "media";
 }
 
+#if MIMI_FEISHU_GATEWAY_MEDIA_ENABLED
+static const char *feishu_guess_image_format(const char *file_name, const char *mime_type)
+{
+    if (file_name && file_name[0]) {
+        const char *dot = strrchr(file_name, '.');
+        if (dot && dot[1]) {
+            char ext[8] = {0};
+            size_t n = strlen(dot + 1);
+            if (n >= sizeof(ext)) {
+                n = sizeof(ext) - 1;
+            }
+            for (size_t i = 0; i < n; i++) {
+                ext[i] = (char)tolower((unsigned char)dot[1 + i]);
+            }
+            ext[n] = '\0';
+
+            if (strcmp(ext, "png") == 0) return "png";
+            if (strcmp(ext, "webp") == 0) return "webp";
+            if (strcmp(ext, "bmp") == 0) return "bmp";
+            if (strcmp(ext, "gif") == 0) return "gif";
+        }
+    }
+
+    if (mime_type && mime_type[0]) {
+        if (strcasestr(mime_type, "png")) return "png";
+        if (strcasestr(mime_type, "webp")) return "webp";
+        if (strcasestr(mime_type, "bmp")) return "bmp";
+        if (strcasestr(mime_type, "gif")) return "gif";
+    }
+    return "jpeg";
+}
+
+static void feishu_guess_doc_format(const char *file_name, const char *mime_type,
+                                    char *out_format, size_t out_size)
+{
+    if (!out_format || out_size < 2) {
+        return;
+    }
+    safe_copy(out_format, out_size, "bin");
+
+    if (file_name && file_name[0]) {
+        const char *dot = strrchr(file_name, '.');
+        if (dot && dot[1]) {
+            size_t n = strlen(dot + 1);
+            if (n >= out_size) {
+                n = out_size - 1;
+            }
+            for (size_t i = 0; i < n; i++) {
+                out_format[i] = (char)tolower((unsigned char)dot[1 + i]);
+            }
+            out_format[n] = '\0';
+            if (out_format[0] != '\0') {
+                return;
+            }
+        }
+    }
+
+    if (!mime_type || !mime_type[0]) {
+        return;
+    }
+    if (strcasestr(mime_type, "pdf")) {
+        safe_copy(out_format, out_size, "pdf");
+    } else if (strcasestr(mime_type, "markdown")) {
+        safe_copy(out_format, out_size, "md");
+    } else if (strcasestr(mime_type, "plain")) {
+        safe_copy(out_format, out_size, "txt");
+    } else if (strcasestr(mime_type, "msword")) {
+        safe_copy(out_format, out_size, "doc");
+    } else if (strcasestr(mime_type, "wordprocessingml")) {
+        safe_copy(out_format, out_size, "docx");
+    } else if (strcasestr(mime_type, "spreadsheetml")) {
+        safe_copy(out_format, out_size, "xlsx");
+    } else if (strcasestr(mime_type, "presentationml")) {
+        safe_copy(out_format, out_size, "pptx");
+    } else if (strcasestr(mime_type, "ms-excel")) {
+        safe_copy(out_format, out_size, "xls");
+    } else if (strcasestr(mime_type, "ms-powerpoint")) {
+        safe_copy(out_format, out_size, "ppt");
+    } else if (strcasestr(mime_type, "json")) {
+        safe_copy(out_format, out_size, "json");
+    } else if (strcasestr(mime_type, "xml")) {
+        safe_copy(out_format, out_size, "xml");
+    } else if (strcasestr(mime_type, "zip")) {
+        safe_copy(out_format, out_size, "zip");
+    }
+}
+
+static esp_err_t feishu_build_gateway_http_url(const char *endpoint_path, char *out_url, size_t out_size)
+{
+    if (!endpoint_path || !endpoint_path[0] || !out_url || out_size < 16) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    out_url[0] = '\0';
+
+    char gw[160] = {0};
+    safe_copy(gw, sizeof(gw), MIMI_VOICE_GATEWAY_URL);
+
+    nvs_handle_t nvs;
+    if (nvs_open(MIMI_NVS_VOICE, NVS_READONLY, &nvs) == ESP_OK) {
+        size_t len = sizeof(gw);
+        if (nvs_get_str(nvs, MIMI_NVS_KEY_VOICE_GW, gw, &len) != ESP_OK || gw[0] == '\0') {
+            safe_copy(gw, sizeof(gw), MIMI_VOICE_GATEWAY_URL);
+        }
+        nvs_close(nvs);
+    }
+
+    bool secure = false;
+    const char *p = gw;
+    if (strncmp(gw, "wss://", 6) == 0) {
+        secure = true;
+        p = gw + 6;
+    } else if (strncmp(gw, "ws://", 5) == 0) {
+        p = gw + 5;
+    }
+
+    const char *slash = strchr(p, '/');
+    size_t hostport_len = slash ? (size_t)(slash - p) : strlen(p);
+    if (hostport_len == 0 || hostport_len >= 96) {
+        return ESP_FAIL;
+    }
+
+    char hostport[96] = {0};
+    memcpy(hostport, p, hostport_len);
+    hostport[hostport_len] = '\0';
+
+    char host[80] = {0};
+    int port = secure ? 443 : 80;
+    const char *colon = strrchr(hostport, ':');
+    if (colon && colon[1] != '\0' && isdigit((unsigned char)colon[1])) {
+        size_t host_len = (size_t)(colon - hostport);
+        if (host_len == 0 || host_len >= sizeof(host)) {
+            return ESP_FAIL;
+        }
+        memcpy(host, hostport, host_len);
+        host[host_len] = '\0';
+        port = atoi(colon + 1);
+    } else {
+        safe_copy(host, sizeof(host), hostport);
+    }
+
+    int http_port = (port > 0) ? (port + 1) : 8091;
+    snprintf(out_url, out_size, "%s://%s:%d/%s",
+             secure ? "https" : "http", host, http_port, endpoint_path);
+    return ESP_OK;
+}
+
+static esp_err_t feishu_vision_upload(const uint8_t *image, size_t image_len, const char *image_format,
+                                      char *out_text, size_t out_size)
+{
+    if (!image || image_len == 0 || !out_text || out_size < 2) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    out_text[0] = '\0';
+
+    char vision_url[192] = {0};
+    esp_err_t err = feishu_build_gateway_http_url("vision_upload", vision_url, sizeof(vision_url));
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    http_resp_t resp = {
+        .buf = calloc(1, 4096),
+        .len = 0,
+        .cap = 4096,
+    };
+    if (!resp.buf) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_http_client_config_t config = {
+        .url = vision_url,
+        .event_handler = http_event_handler,
+        .user_data = &resp,
+        .timeout_ms = MIMI_TG_VISION_TIMEOUT_MS,
+        .buffer_size = 2048,
+        .buffer_size_tx = 2048,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (!client) {
+        free(resp.buf);
+        return ESP_FAIL;
+    }
+
+    esp_http_client_set_method(client, HTTP_METHOD_POST);
+    esp_http_client_set_header(client, "Content-Type", "application/octet-stream");
+    esp_http_client_set_header(client, "X-Image-Format",
+                               (image_format && image_format[0]) ? image_format : "jpeg");
+    esp_http_client_set_post_field(client, (const char *)image, image_len);
+
+    err = esp_http_client_perform(client);
+    int status = esp_http_client_get_status_code(client);
+    esp_http_client_cleanup(client);
+    if (err != ESP_OK || status != 200) {
+        ESP_LOGW(TAG, "Feishu vision upload failed: err=%s status=%d url=%s",
+                 esp_err_to_name(err), status, vision_url);
+        free(resp.buf);
+        return ESP_FAIL;
+    }
+
+    cJSON *root = cJSON_Parse(resp.buf);
+    free(resp.buf);
+    if (!root) {
+        return ESP_FAIL;
+    }
+
+    char merged[FEISHU_VISION_TEXT_MAX] = {0};
+    size_t off = 0;
+    cJSON *caption = cJSON_GetObjectItem(root, "caption");
+    if (cJSON_IsString(caption) && caption->valuestring && caption->valuestring[0]) {
+        int n = snprintf(merged + off, sizeof(merged) - off, "描述：%s", caption->valuestring);
+        if (n > 0) {
+            off += (size_t)n;
+            if (off >= sizeof(merged)) {
+                off = sizeof(merged) - 1;
+            }
+        }
+    }
+
+    cJSON *ocr_text = cJSON_GetObjectItem(root, "ocr_text");
+    if (cJSON_IsString(ocr_text) && ocr_text->valuestring && ocr_text->valuestring[0]) {
+        int n = snprintf(merged + off, sizeof(merged) - off, "%s文字：%s",
+                         off ? "\n" : "", ocr_text->valuestring);
+        if (n > 0) {
+            off += (size_t)n;
+            if (off >= sizeof(merged)) {
+                off = sizeof(merged) - 1;
+            }
+        }
+    }
+
+    cJSON *objects = cJSON_GetObjectItem(root, "objects");
+    if (objects && cJSON_IsArray(objects) && cJSON_GetArraySize(objects) > 0) {
+        char items[256] = {0};
+        size_t item_off = 0;
+        cJSON *it = NULL;
+        int count = 0;
+        cJSON_ArrayForEach(it, objects) {
+            if (!cJSON_IsString(it) || !it->valuestring || !it->valuestring[0]) {
+                continue;
+            }
+            if (count >= 12) {
+                break;
+            }
+            int n = snprintf(items + item_off, sizeof(items) - item_off, "%s%s",
+                             count ? "、" : "", it->valuestring);
+            if (n <= 0) {
+                break;
+            }
+            item_off += (size_t)n;
+            if (item_off >= sizeof(items)) {
+                item_off = sizeof(items) - 1;
+                break;
+            }
+            count++;
+        }
+        if (count > 0) {
+            int n = snprintf(merged + off, sizeof(merged) - off, "%s元素：%s",
+                             off ? "\n" : "", items);
+            if (n > 0) {
+                off += (size_t)n;
+                if (off >= sizeof(merged)) {
+                    off = sizeof(merged) - 1;
+                }
+            }
+        }
+    }
+
+    if (off == 0) {
+        cJSON *text = cJSON_GetObjectItem(root, "text");
+        if (!cJSON_IsString(text) || !text->valuestring || !text->valuestring[0]) {
+            cJSON_Delete(root);
+            return ESP_FAIL;
+        }
+        safe_copy(merged, sizeof(merged), text->valuestring);
+    }
+
+    safe_copy(out_text, out_size, merged);
+    cJSON_Delete(root);
+    return ESP_OK;
+}
+
+static esp_err_t feishu_doc_upload(const uint8_t *doc_data, size_t doc_len,
+                                   const char *doc_name, const char *doc_mime,
+                                   const char *doc_path, const char *doc_format,
+                                   char *out_text, size_t out_size,
+                                   char *out_meta, size_t meta_size)
+{
+    if (!doc_data || doc_len == 0 || !out_text || out_size < 2) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    out_text[0] = '\0';
+    if (out_meta && meta_size > 0) {
+        out_meta[0] = '\0';
+    }
+
+    char doc_url[192] = {0};
+    esp_err_t err = feishu_build_gateway_http_url("doc_upload", doc_url, sizeof(doc_url));
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    http_resp_t resp = {
+        .buf = calloc(1, 4096),
+        .len = 0,
+        .cap = 4096,
+    };
+    if (!resp.buf) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_http_client_config_t config = {
+        .url = doc_url,
+        .event_handler = http_event_handler,
+        .user_data = &resp,
+        .timeout_ms = MIMI_TG_DOC_TIMEOUT_MS,
+        .buffer_size = 2048,
+        .buffer_size_tx = 2048,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (!client) {
+        free(resp.buf);
+        return ESP_FAIL;
+    }
+
+    esp_http_client_set_method(client, HTTP_METHOD_POST);
+    esp_http_client_set_header(client, "Content-Type", "application/octet-stream");
+    if (doc_name && doc_name[0]) {
+        esp_http_client_set_header(client, "X-Doc-Name", doc_name);
+    }
+    if (doc_mime && doc_mime[0]) {
+        esp_http_client_set_header(client, "X-Doc-Mime", doc_mime);
+    }
+    if (doc_path && doc_path[0]) {
+        esp_http_client_set_header(client, "X-Doc-Path", doc_path);
+    }
+    if (doc_format && doc_format[0]) {
+        esp_http_client_set_header(client, "X-Doc-Format", doc_format);
+    }
+    esp_http_client_set_post_field(client, (const char *)doc_data, doc_len);
+
+    err = esp_http_client_perform(client);
+    int status = esp_http_client_get_status_code(client);
+    esp_http_client_cleanup(client);
+    if (err != ESP_OK || status != 200) {
+        ESP_LOGW(TAG, "Feishu doc upload failed: err=%s status=%d url=%s",
+                 esp_err_to_name(err), status, doc_url);
+        free(resp.buf);
+        return ESP_FAIL;
+    }
+
+    cJSON *root = cJSON_Parse(resp.buf);
+    free(resp.buf);
+    if (!root) {
+        return ESP_FAIL;
+    }
+
+    cJSON *text = cJSON_GetObjectItem(root, "text");
+    if (!cJSON_IsString(text) || !text->valuestring || !text->valuestring[0]) {
+        cJSON_Delete(root);
+        return ESP_FAIL;
+    }
+    safe_copy(out_text, out_size, text->valuestring);
+
+    if (out_meta && meta_size > 0) {
+        const char *fmt = "";
+        const char *parser = "";
+        int text_len = 0;
+        bool truncated = false;
+        bool from_vision = false;
+        cJSON *fmt_item = cJSON_GetObjectItem(root, "doc_format");
+        cJSON *parser_item = cJSON_GetObjectItem(root, "parser");
+        cJSON *len_item = cJSON_GetObjectItem(root, "text_len");
+        cJSON *trunc_item = cJSON_GetObjectItem(root, "truncated");
+        cJSON *vision_item = cJSON_GetObjectItem(root, "from_vision");
+        if (cJSON_IsString(fmt_item)) {
+            fmt = fmt_item->valuestring;
+        }
+        if (cJSON_IsString(parser_item)) {
+            parser = parser_item->valuestring;
+        }
+        if (cJSON_IsNumber(len_item)) {
+            text_len = len_item->valueint;
+        }
+        if (cJSON_IsBool(trunc_item)) {
+            truncated = cJSON_IsTrue(trunc_item);
+        }
+        if (cJSON_IsBool(vision_item)) {
+            from_vision = cJSON_IsTrue(vision_item);
+        }
+        snprintf(out_meta, meta_size,
+                 "{\"doc_parse\":\"ok\",\"format\":\"%.16s\",\"parser\":\"%.24s\","
+                 "\"text_len\":%d,\"truncated\":%s,\"from_vision\":%s}",
+                 fmt, parser, text_len,
+                 truncated ? "true" : "false",
+                 from_vision ? "true" : "false");
+    }
+
+    cJSON_Delete(root);
+    return ESP_OK;
+}
+
+static bool feishu_extract_media_ref(cJSON *message, const char *message_type, feishu_media_ref_t *out_ref)
+{
+    if (!message || !out_ref) {
+        return false;
+    }
+    memset(out_ref, 0, sizeof(*out_ref));
+
+    cJSON *message_id_item = cJSON_GetObjectItem(message, "message_id");
+    if (cJSON_IsString(message_id_item) && message_id_item->valuestring) {
+        safe_copy(out_ref->message_id, sizeof(out_ref->message_id), message_id_item->valuestring);
+    }
+
+    cJSON *content_item = cJSON_GetObjectItem(message, "content");
+    if (!cJSON_IsString(content_item) || !content_item->valuestring || !content_item->valuestring[0]) {
+        return false;
+    }
+
+    cJSON *content_root = cJSON_Parse(content_item->valuestring);
+    if (!content_root) {
+        return false;
+    }
+
+    const char *key = NULL;
+    if (message_type && strcmp(message_type, "image") == 0) {
+        key = feishu_json_get_string(content_root, "image_key");
+    } else if (message_type && strcmp(message_type, "file") == 0) {
+        key = feishu_json_get_string(content_root, "file_key");
+    }
+    if (!key) {
+        key = feishu_json_get_string(content_root, "file_key");
+    }
+    if (!key) {
+        key = feishu_json_get_string(content_root, "image_key");
+    }
+    if (!key) {
+        key = feishu_json_get_string(content_root, "media_key");
+    }
+    if (!key) {
+        key = feishu_json_get_string(content_root, "audio_key");
+    }
+
+    const char *file_name = feishu_json_get_string(content_root, "file_name");
+    if (!file_name) {
+        file_name = feishu_json_get_string(content_root, "title");
+    }
+    const char *mime_type = feishu_json_get_string(content_root, "mime_type");
+
+    if (key && key[0]) {
+        safe_copy(out_ref->file_key, sizeof(out_ref->file_key), key);
+    }
+    if (file_name && file_name[0]) {
+        safe_copy(out_ref->file_name, sizeof(out_ref->file_name), file_name);
+    }
+    if (mime_type && mime_type[0]) {
+        safe_copy(out_ref->mime_type, sizeof(out_ref->mime_type), mime_type);
+    }
+
+    cJSON_Delete(content_root);
+    return out_ref->message_id[0] != '\0' && out_ref->file_key[0] != '\0';
+}
+
+static esp_err_t feishu_download_message_resource_once(const feishu_media_ref_t *ref,
+                                                       uint8_t **out_data, size_t *out_len)
+{
+    if (!ref || !ref->message_id[0] || !ref->file_key[0] || !out_data || !out_len) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *out_data = NULL;
+    *out_len = 0;
+
+    esp_err_t err = feishu_ensure_tenant_token();
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    char url[512] = {0};
+    snprintf(url, sizeof(url),
+             "https://open.feishu.cn/open-apis/im/v1/messages/%s/resources/%s",
+             ref->message_id, ref->file_key);
+
+    http_resp_t resp = {
+        .buf = calloc(1, 4096),
+        .len = 0,
+        .cap = 4096,
+    };
+    if (!resp.buf) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_http_client_config_t config = {
+        .url = url,
+        .event_handler = http_event_handler,
+        .user_data = &resp,
+        .timeout_ms = MIMI_FEISHU_HTTP_TIMEOUT_MS,
+        .buffer_size = 2048,
+        .buffer_size_tx = 2048,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (!client) {
+        free(resp.buf);
+        return ESP_FAIL;
+    }
+
+    char auth[320] = {0};
+    snprintf(auth, sizeof(auth), "Bearer %s", s_tenant_token);
+    esp_http_client_set_method(client, HTTP_METHOD_GET);
+    esp_http_client_set_header(client, "Authorization", auth);
+
+    err = esp_http_client_perform(client);
+    int status = esp_http_client_get_status_code(client);
+    esp_http_client_cleanup(client);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Feishu media download failed: err=%s url=%s",
+                 esp_err_to_name(err), url);
+        free(resp.buf);
+        return err;
+    }
+    if (status == 401) {
+        free(resp.buf);
+        return FEISHU_ERR_UNAUTHORIZED;
+    }
+    if (status != 200) {
+        ESP_LOGW(TAG, "Feishu media download status=%d message=%s file_key=%.48s",
+                 status, ref->message_id, ref->file_key);
+        free(resp.buf);
+        return ESP_FAIL;
+    }
+    if (resp.len == 0 || resp.len > MIMI_FEISHU_MEDIA_MAX_BYTES) {
+        ESP_LOGW(TAG, "Feishu media size invalid: %u bytes file_key=%.48s",
+                 (unsigned int)resp.len, ref->file_key);
+        free(resp.buf);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    *out_data = (uint8_t *)resp.buf;
+    *out_len = resp.len;
+    return ESP_OK;
+}
+
+static esp_err_t feishu_download_message_resource(const feishu_media_ref_t *ref,
+                                                  uint8_t **out_data, size_t *out_len)
+{
+    esp_err_t err = feishu_download_message_resource_once(ref, out_data, out_len);
+    if (err == FEISHU_ERR_UNAUTHORIZED) {
+        feishu_invalidate_tenant_token();
+        return feishu_download_message_resource_once(ref, out_data, out_len);
+    }
+    return err;
+}
+
+static void feishu_merge_json_object(cJSON *dst, cJSON *src)
+{
+    if (!cJSON_IsObject(dst) || !cJSON_IsObject(src)) {
+        return;
+    }
+    for (cJSON *item = src->child; item; item = item->next) {
+        if (!item->string || !item->string[0]) {
+            continue;
+        }
+        cJSON *dup = cJSON_Duplicate(item, true);
+        if (!dup) {
+            continue;
+        }
+        cJSON_DeleteItemFromObjectCaseSensitive(dst, item->string);
+        cJSON_AddItemToObject(dst, item->string, dup);
+    }
+}
+
+static bool feishu_try_build_gateway_media_text(cJSON *message,
+                                                const char *message_type,
+                                                char *out_text,
+                                                size_t out_text_size,
+                                                char *out_file_id,
+                                                size_t out_file_id_size,
+                                                char *out_file_path,
+                                                size_t out_file_path_size,
+                                                char **out_meta_json)
+{
+    if (!message || !message_type || !out_text || out_text_size < 2) {
+        return false;
+    }
+    out_text[0] = '\0';
+    if (out_file_id && out_file_id_size > 0) {
+        out_file_id[0] = '\0';
+    }
+    if (out_file_path && out_file_path_size > 0) {
+        out_file_path[0] = '\0';
+    }
+    if (out_meta_json) {
+        *out_meta_json = NULL;
+    }
+
+    if (strcmp(message_type, "image") != 0 && strcmp(message_type, "file") != 0) {
+        return false;
+    }
+
+    feishu_media_ref_t ref = {0};
+    if (!feishu_extract_media_ref(message, message_type, &ref)) {
+        return false;
+    }
+
+    uint8_t *media_data = NULL;
+    size_t media_len = 0;
+    esp_err_t media_err = feishu_download_message_resource(&ref, &media_data, &media_len);
+    if (media_err != ESP_OK || !media_data || media_len == 0) {
+        free(media_data);
+        ESP_LOGW(TAG, "Feishu %s media download failed: err=%s message_id=%s file_key=%.48s",
+                 message_type, esp_err_to_name(media_err), ref.message_id, ref.file_key);
+        return false;
+    }
+
+    char parsed_text[1024] = {0};
+    char doc_meta[192] = {0};
+    char resolved_path[128] = {0};
+    safe_copy(resolved_path, sizeof(resolved_path), ref.file_name);
+
+    if (strcmp(message_type, "image") == 0) {
+        const char *img_fmt = feishu_guess_image_format(ref.file_name, ref.mime_type);
+        if (!resolved_path[0]) {
+            snprintf(resolved_path, sizeof(resolved_path), "feishu_image.%s", img_fmt);
+        }
+        media_err = feishu_vision_upload(media_data, media_len, img_fmt,
+                                         parsed_text, sizeof(parsed_text));
+        if (media_err == ESP_OK && parsed_text[0]) {
+            snprintf(out_text, out_text_size,
+                     "[飞书图片解析]\n%s\n\n[下载信息]\n大小: %u 字节\nfile_path: %.96s",
+                     parsed_text, (unsigned int)media_len, resolved_path);
+        }
+    } else {
+        char doc_format[16] = {0};
+        feishu_guess_doc_format(ref.file_name, ref.mime_type, doc_format, sizeof(doc_format));
+        if (!resolved_path[0]) {
+            snprintf(resolved_path, sizeof(resolved_path), "feishu_file.%s",
+                     doc_format[0] ? doc_format : "bin");
+        }
+        media_err = feishu_doc_upload(media_data, media_len,
+                                      ref.file_name, ref.mime_type,
+                                      resolved_path, doc_format,
+                                      parsed_text, sizeof(parsed_text),
+                                      doc_meta, sizeof(doc_meta));
+        if (media_err == ESP_OK && parsed_text[0]) {
+            snprintf(out_text, out_text_size,
+                     "[飞书文件解析]\n%.760s\n\n[下载信息]\n大小: %u 字节\nfile_path: %.96s",
+                     parsed_text, (unsigned int)media_len, resolved_path);
+        }
+    }
+    free(media_data);
+
+    if (media_err != ESP_OK || !out_text[0]) {
+        ESP_LOGW(TAG, "Feishu %s gateway parse failed: err=%s message_id=%s file_key=%.48s",
+                 message_type, esp_err_to_name(media_err), ref.message_id, ref.file_key);
+        return false;
+    }
+
+    if (out_file_id && out_file_id_size > 0) {
+        safe_copy(out_file_id, out_file_id_size, ref.file_key);
+    }
+    if (out_file_path && out_file_path_size > 0) {
+        safe_copy(out_file_path, out_file_path_size, resolved_path);
+    }
+    if (out_meta_json) {
+        cJSON *meta = cJSON_CreateObject();
+        if (meta) {
+            cJSON_AddStringToObject(meta, "source_type", message_type);
+            cJSON_AddStringToObject(meta, "gateway_parse",
+                                    strcmp(message_type, "image") == 0 ? "vision" : "doc");
+            cJSON_AddNumberToObject(meta, "bytes", (double)media_len);
+            if (ref.message_id[0]) {
+                cJSON_AddStringToObject(meta, "message_id", ref.message_id);
+            }
+            if (ref.file_key[0]) {
+                cJSON_AddStringToObject(meta, "file_key", ref.file_key);
+            }
+            if (ref.file_name[0]) {
+                cJSON_AddStringToObject(meta, "name", ref.file_name);
+            }
+            if (ref.mime_type[0]) {
+                cJSON_AddStringToObject(meta, "mime_type", ref.mime_type);
+            }
+            if (resolved_path[0]) {
+                cJSON_AddStringToObject(meta, "file_path", resolved_path);
+            }
+            if (doc_meta[0]) {
+                cJSON *doc_meta_root = cJSON_Parse(doc_meta);
+                if (doc_meta_root) {
+                    feishu_merge_json_object(meta, doc_meta_root);
+                    cJSON_Delete(doc_meta_root);
+                }
+            }
+            *out_meta_json = cJSON_PrintUnformatted(meta);
+            cJSON_Delete(meta);
+        }
+    }
+
+    ESP_LOGI(TAG, "Feishu %s gateway parse success message=%s bytes=%u",
+             message_type, ref.message_id, (unsigned int)media_len);
+    return true;
+}
+#else
+static bool feishu_try_build_gateway_media_text(cJSON *message,
+                                                const char *message_type,
+                                                char *out_text,
+                                                size_t out_text_size,
+                                                char *out_file_id,
+                                                size_t out_file_id_size,
+                                                char *out_file_path,
+                                                size_t out_file_path_size,
+                                                char **out_meta_json)
+{
+    (void)message;
+    (void)message_type;
+    (void)out_text;
+    (void)out_text_size;
+    (void)out_file_id;
+    (void)out_file_id_size;
+    (void)out_file_path;
+    (void)out_file_path_size;
+    if (out_meta_json) {
+        *out_meta_json = NULL;
+    }
+    return false;
+}
+#endif
+
 static bool feishu_build_media_summary(cJSON *message,
                                        const char *message_type,
                                        char *summary,
@@ -900,6 +1636,7 @@ static void feishu_push_inbound(const char *chat_id,
                                 const char *content,
                                 const char *media_type,
                                 const char *file_id,
+                                const char *file_path,
                                 const char *meta_json)
 {
     if (!chat_id || !chat_id[0] || !content || !content[0]) {
@@ -914,6 +1651,9 @@ static void feishu_push_inbound(const char *chat_id,
             sizeof(msg.media_type) - 1);
     if (file_id && file_id[0]) {
         strncpy(msg.file_id, file_id, sizeof(msg.file_id) - 1);
+    }
+    if (file_path && file_path[0]) {
+        strncpy(msg.file_path, file_path, sizeof(msg.file_path) - 1);
     }
     msg.content = strdup(content);
     if (!msg.content) {
@@ -1067,9 +1807,11 @@ static esp_err_t feishu_events_handler(httpd_req_t *req)
     char chat_id[MIMI_CHAT_ID_MAX_LEN] = {0};
     char message_type[16] = {0};
     char text[1024] = {0};
-    char media_summary[1024] = {0};
+    char media_text[1024] = {0};
     char media_file_id[96] = {0};
+    char media_file_path[128] = {0};
     char *media_meta_json = NULL;
+    bool media_from_gateway = false;
     if (cJSON_IsObject(message)) {
         cJSON *chat_id_item = cJSON_GetObjectItem(message, "chat_id");
         cJSON *message_type_item = cJSON_GetObjectItem(message, "message_type");
@@ -1084,10 +1826,17 @@ static esp_err_t feishu_events_handler(httpd_req_t *req)
             feishu_extract_text_from_content(content_item->valuestring, text, sizeof(text));
         }
         if (message_type[0] && strcmp(message_type, "text") != 0) {
-            feishu_build_media_summary(message, message_type,
-                                       media_summary, sizeof(media_summary),
-                                       media_file_id, sizeof(media_file_id),
-                                       &media_meta_json);
+            media_from_gateway = feishu_try_build_gateway_media_text(message, message_type,
+                                                                     media_text, sizeof(media_text),
+                                                                     media_file_id, sizeof(media_file_id),
+                                                                     media_file_path, sizeof(media_file_path),
+                                                                     &media_meta_json);
+            if (!media_from_gateway) {
+                feishu_build_media_summary(message, message_type,
+                                           media_text, sizeof(media_text),
+                                           media_file_id, sizeof(media_file_id),
+                                           &media_meta_json);
+            }
         }
     }
 
@@ -1099,15 +1848,17 @@ static esp_err_t feishu_events_handler(httpd_req_t *req)
     }
 
     if (strcmp(message_type, "text") != 0) {
-        if (media_summary[0]) {
-            ESP_LOGI(TAG, "Feishu %s summary from %s: %.60s",
+        if (media_text[0]) {
+            ESP_LOGI(TAG, "Feishu %s %s from %s: %.60s",
                      message_type[0] ? message_type : "media",
+                     media_from_gateway ? "gateway_parse" : "summary",
                      chat_id,
-                     media_summary);
+                     media_text);
             feishu_push_inbound(chat_id,
-                                media_summary,
+                                media_text,
                                 feishu_get_bus_media_type(message_type),
                                 media_file_id,
+                                media_file_path,
                                 media_meta_json);
         } else {
             ESP_LOGI(TAG, "Ignore unsupported Feishu message type=%s chat=%s",
@@ -1124,7 +1875,7 @@ static esp_err_t feishu_events_handler(httpd_req_t *req)
     }
 
     ESP_LOGI(TAG, "Feishu text from %s: %.60s", chat_id, text);
-    feishu_push_inbound(chat_id, text, "text", NULL, NULL);
+    feishu_push_inbound(chat_id, text, "text", NULL, NULL, NULL);
     free(media_meta_json);
     return feishu_send_http_json(req, NULL, "{\"code\":0}");
 }

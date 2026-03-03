@@ -312,7 +312,8 @@ mimi> clear_proxy                    # 清除代理
 #### 5. 当前边界
 
 - 文本消息会原样进入 Agent
-- 图片 / 文件 / 语音 / 贴纸 / 其他飞书媒体消息会退化成摘要文本，再进入 Agent
+- 默认情况下，图片 / 文件 / 语音 / 贴纸 / 其他飞书媒体消息会退化成摘要文本，再进入 Agent
+- 若启用 `MIMI_FEISHU_GATEWAY_MEDIA_ENABLED=1` 并启动 `voice_gateway.py`，飞书 `image/file` 会先下载资源，再走 vision / doc 解析；`audio/sticker/其他` 仍保持摘要模式
 - 飞书出站发送使用 `chat_id`
 - 飞书重复投递会按 `event_id/message_id` 做轻量去重，避免同一条文本被重复送进 Agent
 
@@ -335,13 +336,17 @@ python3 tools/voice_gateway.py \
 - 文档解析入口：`http://<你的电脑IP>:8091/doc_upload`
 - 默认会尝试从 `main/mimi_secrets.h` 读取视觉 API 配置；如需覆盖，可传 `--vision-endpoint/--vision-api-key/--vision-model`
 
-要让 Telegram 真正启用这些扩展，还需要把 `main/mimi_config.h` 中的：
+要让固件真正启用这些扩展，还需要把 `main/mimi_config.h` 中的：
 
 ```c
 #define MIMI_TELEGRAM_GATEWAY_MEDIA_ENABLED 1
+#define MIMI_FEISHU_GATEWAY_MEDIA_ENABLED   1
 ```
 
-重新编译烧录。默认值是 `0`，即只保留文本与媒体摘要模式。
+重新编译烧录。默认值都为 `0`，即只保留文本与媒体摘要模式。开启后：
+
+- Telegram 会恢复语音 / 图片 / 文件的真实 STT / vision / doc 解析
+- 飞书会为 `image/file` 启用真实下载 + vision / doc 解析，其他媒体类型仍走摘要
 
 ### 文档解析回归冒烟测试
 
@@ -467,12 +472,13 @@ MimiClaw 内置 cron 调度器，让 AI 可以自主安排任务。LLM 可以通
 ## 其他功能
 
 - **WebSocket 网关** — 端口 18789，局域网内用任意 WebSocket 客户端连接
-- **飞书 Bot** — 文本消息回调入口 `/feishu/events`，与 WebSocket 复用同一个 HTTP 服务
+- **飞书 Bot** — 回调入口 `/feishu/events`，默认文本直通、媒体摘要；可选为 `image/file` 开启真实 gateway 解析
 - **OTA 更新** — WiFi 远程刷固件，无需 USB
 - **双核** — 网络 I/O 和 AI 处理分别跑在不同 CPU 核心
 - **HTTP 代理** — CONNECT 隧道，适配受限网络
 - **工具调用** — ReAct Agent 循环，Anthropic tool use 协议
 - **Telegram 媒体处理** — 默认无网关模式下，语音/图片/文件会退化为媒体摘要；启用 `MIMI_TELEGRAM_GATEWAY_MEDIA_ENABLED=1` 并启动 `voice_gateway.py` 后，才会开启真实 STT / vision / doc_upload 扩展
+- **飞书媒体处理** — 默认无网关模式下走媒体摘要；启用 `MIMI_FEISHU_GATEWAY_MEDIA_ENABLED=1` 并启动 `voice_gateway.py` 后，`image/file` 会下载资源并走真实 vision / doc_upload 扩展
 
 ## 工程化增强路线（P0，进行中）
 
