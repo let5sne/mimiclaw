@@ -54,6 +54,7 @@ static char s_app_id[96] = MIMI_SECRET_FEISHU_APP_ID;
 static char s_app_secret[128] = MIMI_SECRET_FEISHU_APP_SECRET;
 static char s_verify_token[128] = MIMI_SECRET_FEISHU_VERIFY_TOKEN;
 static char s_encrypt_key[128] = MIMI_SECRET_FEISHU_ENCRYPT_KEY;
+static char s_open_api_base[160] = MIMI_SECRET_FEISHU_OPEN_API_BASE;
 static char s_tenant_token[256] = {0};
 static int64_t s_tenant_token_expire_us = 0;
 static bool s_started = false;
@@ -66,6 +67,39 @@ static void safe_copy(char *dst, size_t dst_size, const char *src)
     if (!src) src = "";
     strncpy(dst, src, dst_size - 1);
     dst[dst_size - 1] = '\0';
+}
+
+static void feishu_copy_base_url(char *dst, size_t dst_size, const char *src)
+{
+    if (!dst || dst_size == 0) {
+        return;
+    }
+    safe_copy(dst, dst_size, src);
+    size_t len = strlen(dst);
+    while (len > 0 && dst[len - 1] == '/') {
+        dst[len - 1] = '\0';
+        len--;
+    }
+}
+
+static esp_err_t feishu_build_open_api_url(const char *path, char *out_url, size_t out_size)
+{
+    if (!path || !path[0] || !out_url || out_size < 16) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    char base[160] = {0};
+    feishu_copy_base_url(base, sizeof(base),
+                         s_open_api_base[0] ? s_open_api_base : MIMI_SECRET_FEISHU_OPEN_API_BASE);
+    if (base[0] == '\0') {
+        feishu_copy_base_url(base, sizeof(base), "https://open.feishu.cn");
+    }
+
+    snprintf(out_url, out_size, "%s%s%s",
+             base,
+             path[0] == '/' ? "" : "/",
+             path);
+    return ESP_OK;
 }
 
 static bool feishu_is_configured(void)
@@ -388,13 +422,18 @@ static esp_err_t feishu_refresh_tenant_token(void)
 
     int status = 0;
     char *resp = NULL;
-    esp_err_t err = feishu_post_json(
-        "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
-        NULL,
-        post_data,
-        MIMI_FEISHU_HTTP_TIMEOUT_MS,
-        &status,
-        &resp);
+    char url[256] = {0};
+    esp_err_t err = feishu_build_open_api_url("/open-apis/auth/v3/tenant_access_token/internal",
+                                              url, sizeof(url));
+    if (err == ESP_OK) {
+        err = feishu_post_json(
+            url,
+            NULL,
+            post_data,
+            MIMI_FEISHU_HTTP_TIMEOUT_MS,
+            &status,
+            &resp);
+    }
     free(post_data);
     if (err != ESP_OK) {
         return err;
@@ -494,13 +533,18 @@ static esp_err_t feishu_send_text_once(const char *chat_id, const char *text, bo
 
     int status = 0;
     char *resp = NULL;
-    err = feishu_post_json(
-        "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id",
-        s_tenant_token,
-        post_data,
-        MIMI_FEISHU_HTTP_TIMEOUT_MS,
-        &status,
-        &resp);
+    char url[256] = {0};
+    err = feishu_build_open_api_url("/open-apis/im/v1/messages?receive_id_type=chat_id",
+                                    url, sizeof(url));
+    if (err == ESP_OK) {
+        err = feishu_post_json(
+            url,
+            s_tenant_token,
+            post_data,
+            MIMI_FEISHU_HTTP_TIMEOUT_MS,
+            &status,
+            &resp);
+    }
     free(post_data);
     if (err != ESP_OK) {
         return err;
@@ -1159,10 +1203,15 @@ static esp_err_t feishu_download_message_resource_once(const feishu_media_ref_t 
         return err;
     }
 
-    char url[512] = {0};
-    snprintf(url, sizeof(url),
-             "https://open.feishu.cn/open-apis/im/v1/messages/%s/resources/%s",
+    char path[256] = {0};
+    snprintf(path, sizeof(path),
+             "/open-apis/im/v1/messages/%s/resources/%s",
              ref->message_id, ref->file_key);
+    char url[512] = {0};
+    err = feishu_build_open_api_url(path, url, sizeof(url));
+    if (err != ESP_OK) {
+        return err;
+    }
 
     http_resp_t resp = {
         .buf = calloc(1, 4096),
@@ -1886,10 +1935,13 @@ esp_err_t feishu_bot_init(void)
     safe_copy(s_app_secret, sizeof(s_app_secret), MIMI_SECRET_FEISHU_APP_SECRET);
     safe_copy(s_verify_token, sizeof(s_verify_token), MIMI_SECRET_FEISHU_VERIFY_TOKEN);
     safe_copy(s_encrypt_key, sizeof(s_encrypt_key), MIMI_SECRET_FEISHU_ENCRYPT_KEY);
+    feishu_copy_base_url(s_open_api_base, sizeof(s_open_api_base), MIMI_SECRET_FEISHU_OPEN_API_BASE);
     feishu_load_str_from_nvs(MIMI_NVS_KEY_FEISHU_APP_ID, s_app_id, sizeof(s_app_id));
     feishu_load_str_from_nvs(MIMI_NVS_KEY_FEISHU_SECRET, s_app_secret, sizeof(s_app_secret));
     feishu_load_str_from_nvs(MIMI_NVS_KEY_FEISHU_VERIFY, s_verify_token, sizeof(s_verify_token));
     feishu_load_str_from_nvs(MIMI_NVS_KEY_FEISHU_ENCRYPT, s_encrypt_key, sizeof(s_encrypt_key));
+    feishu_load_str_from_nvs(MIMI_NVS_KEY_FEISHU_OPENAPI, s_open_api_base, sizeof(s_open_api_base));
+    feishu_copy_base_url(s_open_api_base, sizeof(s_open_api_base), s_open_api_base);
     feishu_invalidate_tenant_token();
 
     if (!feishu_is_configured()) {
@@ -1897,9 +1949,10 @@ esp_err_t feishu_bot_init(void)
         return ESP_OK;
     }
 
-    ESP_LOGI(TAG, "Feishu bot configured (verify_token=%s, encrypt_key=%s)",
+    ESP_LOGI(TAG, "Feishu bot configured (verify_token=%s, encrypt_key=%s, open_api_base=%s)",
              s_verify_token[0] ? "configured" : "open",
-             s_encrypt_key[0] ? "configured" : "open");
+             s_encrypt_key[0] ? "configured" : "open",
+             s_open_api_base[0] ? s_open_api_base : "https://open.feishu.cn");
     return ESP_OK;
 }
 
@@ -2065,5 +2118,39 @@ esp_err_t feishu_clear_encrypt_key(void)
     }
     safe_copy(s_encrypt_key, sizeof(s_encrypt_key), MIMI_SECRET_FEISHU_ENCRYPT_KEY);
     ESP_LOGI(TAG, "Feishu encrypt key cleared");
+    return ESP_OK;
+}
+
+esp_err_t feishu_set_open_api_base(const char *base_url)
+{
+    if (!base_url || !base_url[0] || strlen(base_url) >= sizeof(s_open_api_base)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    char normalized[160] = {0};
+    feishu_copy_base_url(normalized, sizeof(normalized), base_url);
+    if (normalized[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    esp_err_t err = feishu_nvs_write_str(MIMI_NVS_KEY_FEISHU_OPENAPI, normalized);
+    if (err != ESP_OK) {
+        return err;
+    }
+    feishu_copy_base_url(s_open_api_base, sizeof(s_open_api_base), normalized);
+    feishu_invalidate_tenant_token();
+    ESP_LOGI(TAG, "Feishu OpenAPI base updated: %s", s_open_api_base);
+    return ESP_OK;
+}
+
+esp_err_t feishu_clear_open_api_base(void)
+{
+    esp_err_t err = feishu_nvs_erase_key(MIMI_NVS_KEY_FEISHU_OPENAPI);
+    if (err != ESP_OK) {
+        return err;
+    }
+    feishu_copy_base_url(s_open_api_base, sizeof(s_open_api_base), MIMI_SECRET_FEISHU_OPEN_API_BASE);
+    feishu_invalidate_tenant_token();
+    ESP_LOGI(TAG, "Feishu OpenAPI base cleared");
     return ESP_OK;
 }

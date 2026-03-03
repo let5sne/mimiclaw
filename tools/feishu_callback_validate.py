@@ -86,21 +86,42 @@ def expect_http(report: dict[str, Any], challenge: str) -> list[str]:
     return errs
 
 
-def expect_logs(report: dict[str, Any], log_text: str, scenario: str) -> list[str]:
+def expect_logs(report: dict[str, Any], log_text: str, scenario: str, expect_media_mode: str) -> list[str]:
     errs: list[str] = []
     if not log_text:
         return errs
 
+    case_names = {str(item.get("name", "")) for item in report.get("results", [])}
+
     def require(substr: str, label: str) -> None:
         if substr not in log_text:
+            errs.append(f"日志缺少关键字: {label}")
+
+    def require_any(substrings: tuple[str, ...], label: str) -> None:
+        if not any(substr in log_text for substr in substrings):
             errs.append(f"日志缺少关键字: {label}")
 
     if scenario in ("text", "all"):
         require("Feishu text from", "文本入站日志")
     if scenario in ("duplicate", "all"):
         require("Skip duplicate Feishu event", "重复事件去重日志")
-    if scenario in ("image", "file", "audio", "sticker", "all"):
-        require("summary from", "媒体摘要入站日志")
+
+    image_or_file = bool({"image", "file"} & case_names)
+    summary_only_media = bool({"audio", "sticker"} & case_names)
+
+    if expect_media_mode == "gateway":
+        if image_or_file:
+            require("gateway_parse from", "image/file gateway 解析日志")
+        if summary_only_media:
+            require("summary from", "audio/sticker 摘要日志")
+    elif expect_media_mode == "summary":
+        if scenario in ("image", "file", "audio", "sticker", "all"):
+            require("summary from", "媒体摘要入站日志")
+    else:
+        if image_or_file:
+            require_any(("summary from", "gateway_parse from"), "image/file 入站日志")
+        if summary_only_media:
+            require("summary from", "audio/sticker 摘要日志")
 
     return errs
 
@@ -136,6 +157,12 @@ def parse_args() -> argparse.Namespace:
         "--log-file",
         default="",
         help="可选：串口日志文件路径。提供后会校验文本/去重/媒体摘要关键日志。",
+    )
+    parser.add_argument(
+        "--expect-media-mode",
+        default="auto",
+        choices=["auto", "summary", "gateway"],
+        help="媒体日志期望模式：auto=接受 summary/gateway，summary=强制摘要，gateway=要求 image/file 走 gateway",
     )
     parser.add_argument(
         "--log-wait-ms",
@@ -185,7 +212,7 @@ def main() -> int:
     if log_path:
         time.sleep(max(args.log_wait_ms, 0) / 1000.0)
         log_text = read_text_tail(log_path, log_start)
-        errs.extend(expect_logs(report, log_text, args.scenario))
+        errs.extend(expect_logs(report, log_text, args.scenario, args.expect_media_mode))
 
     if errs:
         print("校验失败：")

@@ -14,6 +14,7 @@ LOG_FILE=""
 MONITOR_COMMAND=""
 ENCRYPTED=0
 MONITOR_WARMUP=3
+EXPECT_MEDIA_MODE="${FEISHU_EXPECT_MEDIA_MODE:-auto}"
 
 print_help() {
   cat <<EOF
@@ -21,6 +22,7 @@ print_help() {
   ./tools/run_feishu_validate_live.sh [--port PORT] [--url URL] [--scenario NAME]
                                       [--verify-token TOKEN] [--encrypt-key KEY]
                                       [--encrypted] [--log-file PATH]
+                                      [--expect-media-mode MODE]
                                       [--monitor-command CMD]
 
 流程:
@@ -36,6 +38,7 @@ print_help() {
   --encrypt-key KEY   飞书 Encrypt Key
   --encrypted         使用加密回调模式
   --log-file PATH     monitor 日志输出路径，默认自动生成到 ${DEFAULT_LOG_DIR}
+  --expect-media-mode 媒体模式期望：auto|summary|gateway，默认: ${EXPECT_MEDIA_MODE}
   --monitor-command   可选：自定义 monitor 命令字符串，用于离线测试脚本编排
   --warmup SEC        monitor 启动后等待秒数，默认: ${MONITOR_WARMUP}
   -h, --help          显示帮助
@@ -70,6 +73,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --log-file)
       LOG_FILE="$2"
+      shift 2
+      ;;
+    --expect-media-mode)
+      EXPECT_MEDIA_MODE="$2"
       shift 2
       ;;
     --monitor-command)
@@ -120,6 +127,7 @@ VALIDATE_CMD=(
   --scenario "${SCENARIO}"
   --verify-token "${VERIFY_TOKEN}"
   --log-file "${LOG_FILE}"
+  --expect-media-mode "${EXPECT_MEDIA_MODE}"
 )
 
 if [[ -n "${ENCRYPT_KEY}" ]]; then
@@ -144,5 +152,5 @@ echo "启动后台 monitor: port=${PORT:-custom} log=${LOG_FILE}"
 MON_PID="$!"
 sleep "${MONITOR_WARMUP}"
 
-echo "开始飞书回放校验: scenario=${SCENARIO} base_url=${BASE_URL}"
+echo "开始飞书回放校验: scenario=${SCENARIO} base_url=${BASE_URL} expect_media_mode=${EXPECT_MEDIA_MODE}"
 "${VALIDATE_CMD[@]}"

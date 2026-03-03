@@ -34,3 +34,9 @@ esp_err_t feishu_clear_verify_token(void);
  */
 esp_err_t feishu_set_encrypt_key(const char *key);
 esp_err_t feishu_clear_encrypt_key(void);
+
+/**
+ * 运行时更新飞书 OpenAPI 基地址。
+ */
+esp_err_t feishu_set_open_api_base(const char *base_url);
+esp_err_t feishu_clear_open_api_base(void);

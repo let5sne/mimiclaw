@@ -87,6 +87,11 @@ static struct {
     struct arg_end *end;
 } feishu_encrypt_args;
 
+static struct {
+    struct arg_str *base_url;
+    struct arg_end *end;
+} feishu_openapi_args;
+
 static int cmd_set_tg_token(int argc, char **argv)
 {
     int nerrors = arg_parse(argc, argv, (void **)&tg_token_args);
@@ -187,6 +192,36 @@ static int cmd_clear_feishu_encrypt_key(int argc, char **argv)
     }
 
     printf("Feishu encrypt key cleared.\n");
+    return 0;
+}
+
+static int cmd_set_feishu_open_api_base(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&feishu_openapi_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, feishu_openapi_args.end, argv[0]);
+        return 1;
+    }
+
+    esp_err_t err = feishu_set_open_api_base(feishu_openapi_args.base_url->sval[0]);
+    if (err != ESP_OK) {
+        printf("Failed to save Feishu OpenAPI base: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("Feishu OpenAPI base saved.\n");
+    return 0;
+}
+
+static int cmd_clear_feishu_open_api_base(int argc, char **argv)
+{
+    esp_err_t err = feishu_clear_open_api_base();
+    if (err != ESP_OK) {
+        printf("Failed to clear Feishu OpenAPI base: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("Feishu OpenAPI base cleared.\n");
     return 0;
 }
 
@@ -1020,6 +1055,7 @@ static int cmd_config_show(int argc, char **argv)
     print_config("Feishu Sec", MIMI_NVS_FEISHU, MIMI_NVS_KEY_FEISHU_SECRET, MIMI_SECRET_FEISHU_APP_SECRET, true);
     print_config("Feishu Vfy", MIMI_NVS_FEISHU, MIMI_NVS_KEY_FEISHU_VERIFY, MIMI_SECRET_FEISHU_VERIFY_TOKEN, true);
     print_config("Feishu Enc", MIMI_NVS_FEISHU, MIMI_NVS_KEY_FEISHU_ENCRYPT, MIMI_SECRET_FEISHU_ENCRYPT_KEY, true);
+    print_config("Feishu API", MIMI_NVS_FEISHU, MIMI_NVS_KEY_FEISHU_OPENAPI, MIMI_SECRET_FEISHU_OPEN_API_BASE, false);
     print_config("API Key",    MIMI_NVS_LLM,    MIMI_NVS_KEY_API_KEY,  MIMI_SECRET_API_KEY,    true);
     print_config("Model",      MIMI_NVS_LLM,    MIMI_NVS_KEY_MODEL,    MIMI_SECRET_MODEL,      false);
     print_config("Provider",   MIMI_NVS_LLM,    MIMI_NVS_KEY_PROVIDER, MIMI_SECRET_MODEL_PROVIDER, false);
@@ -1524,6 +1560,25 @@ esp_err_t serial_cli_init(void)
         .func = &cmd_clear_feishu_encrypt_key,
     };
     esp_console_cmd_register(&clear_feishu_encrypt_cmd);
+
+    /* set_feishu_open_api_base */
+    feishu_openapi_args.base_url = arg_str1(NULL, NULL, "<base_url>", "Feishu OpenAPI base URL");
+    feishu_openapi_args.end = arg_end(1);
+    esp_console_cmd_t feishu_openapi_cmd = {
+        .command = "set_feishu_open_api_base",
+        .help = "Set Feishu OpenAPI base URL",
+        .func = &cmd_set_feishu_open_api_base,
+        .argtable = &feishu_openapi_args,
+    };
+    esp_console_cmd_register(&feishu_openapi_cmd);
+
+    /* clear_feishu_open_api_base */
+    esp_console_cmd_t clear_feishu_openapi_cmd = {
+        .command = "clear_feishu_open_api_base",
+        .help = "Clear Feishu OpenAPI base URL",
+        .func = &cmd_clear_feishu_open_api_base,
+    };
+    esp_console_cmd_register(&clear_feishu_openapi_cmd);
 
     /* set_api_key */
     api_key_args.key = arg_str1(NULL, NULL, "<key>", "LLM API key");

@@ -209,12 +209,14 @@ mimi> clear_proxy                    # 清除代理
 #define MIMI_SECRET_FEISHU_APP_SECRET    "xxx"
 #define MIMI_SECRET_FEISHU_VERIFY_TOKEN  "mimiclaw-feishu"
 #define MIMI_SECRET_FEISHU_ENCRYPT_KEY   ""   // 可留空；启用加密回调时与飞书后台保持一致
+#define MIMI_SECRET_FEISHU_OPEN_API_BASE "https://open.feishu.cn"
 ```
 
 说明：
 
 - 飞书配置既可写在编译时默认值里，也可通过 CLI 在运行时覆盖
 - 如果你在飞书开放平台配置了 `Verify Token` / `Encrypt Key`，这里必须保持一致
+- `MIMI_SECRET_FEISHU_OPEN_API_BASE` 默认保持官方地址；只有本地 stub 联调时才需要覆盖
 
 #### 2. 在飞书开放平台配置应用
 
@@ -276,7 +278,41 @@ mimi> clear_proxy                    # 清除代理
 
 - 脚本默认把请求打到 `http://127.0.0.1:18789/feishu/events`
 - `duplicate` 场景会复用同一个 `event_id/message_id` 连发两次，用来验证固件去重
-- `image/file/audio/sticker` 场景不会下载真实媒体，只验证“回调 -> 摘要文本 -> Agent”这条降级链路
+- 在默认配置下，`image/file/audio/sticker` 只验证“回调 -> 摘要文本 -> Agent”这条降级链路
+
+#### 4.2 本地验证 `image/file` 真实下载 + gateway 解析
+
+如果你已经启用了 `MIMI_FEISHU_GATEWAY_MEDIA_ENABLED=1`，还可以用本地 OpenAPI stub 把 `image/file` 的真实下载分支也跑通。
+
+1. 在设备 CLI 中把飞书 OpenAPI 基地址指到开发机：
+
+```text
+mimi> set_feishu_open_api_base http://<你的电脑IP>:19091
+```
+
+2. 在开发机启动本地飞书 OpenAPI stub：
+
+```bash
+python3 tools/feishu_openapi_stub.py --host 0.0.0.0 --port 19091
+```
+
+3. 另一个终端启动 `voice_gateway.py`
+
+4. 再执行带 gateway 断言的校验：
+
+```bash
+./tools/run_feishu_validate.sh \
+  --scenario image \
+  --verify-token mimiclaw-feishu \
+  --log-file ./logs/monitor.log \
+  --expect-media-mode gateway
+```
+
+说明：
+
+- stub 内置 `image_key=img_replay_demo` 和 `file_key=file_replay_demo`
+- `--expect-media-mode gateway` 会要求日志里出现 `gateway_parse from`
+- 如果你想回到官方飞书地址，可执行 `mimi> clear_feishu_open_api_base`
 
 如果你已经把串口日志保存到文件，还可以直接做“回放 + 校验”：
 
@@ -380,6 +416,7 @@ mimi> set_tg_token 123456:ABC...   # 换 Telegram Bot Token
 mimi> set_feishu_app cli_xxx secret_xxx   # 设置飞书 app_id / app_secret
 mimi> set_feishu_verify_token token_xxx   # 设置飞书 Verify Token
 mimi> set_feishu_encrypt_key key_xxx      # 设置飞书 Encrypt Key
+mimi> set_feishu_open_api_base http://127.0.0.1:19091  # 覆盖飞书 OpenAPI 基地址（联调用）
 mimi> set_api_key sk-ant-api03-... # 换 API Key（Anthropic 或 OpenAI）
 mimi> set_model_provider openai    # 切换提供商（anthropic|openai）
 mimi> set_model gpt-4o             # 换模型
@@ -393,6 +430,7 @@ mimi> config_reset                 # 清除 NVS，恢复编译时默认值
 说明：
 
 - 现在支持通过 CLI 更新飞书 `app_id/app_secret/verify_token/encrypt_key`
+- 现在支持通过 CLI 更新飞书 `app_id/app_secret/verify_token/encrypt_key/open_api_base`
 - 已保存到 NVS 的飞书配置会覆盖编译时默认值
 
 **调试与运维：**

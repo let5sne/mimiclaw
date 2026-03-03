@@ -192,6 +192,7 @@ This branch defaults to a **no external voice gateway** build. Text chat works w
 #define MIMI_SECRET_FEISHU_APP_SECRET    "xxx"
 #define MIMI_SECRET_FEISHU_VERIFY_TOKEN  "mimiclaw-feishu"
 #define MIMI_SECRET_FEISHU_ENCRYPT_KEY   ""   // optional; must match Feishu if encrypted callbacks are enabled
+#define MIMI_SECRET_FEISHU_OPEN_API_BASE "https://open.feishu.cn"
 ```
 
 2. In the Feishu Open Platform:
@@ -202,6 +203,7 @@ This branch defaults to a **no external voice gateway** build. Text chat works w
 - set request URL to `https://<public-address>/feishu/events`
 - set `Verify Token` to the same value as `MIMI_SECRET_FEISHU_VERIFY_TOKEN`
 - leave `Encrypt Key` empty for plaintext callbacks, or set it to match `MIMI_SECRET_FEISHU_ENCRYPT_KEY`
+- keep `MIMI_SECRET_FEISHU_OPEN_API_BASE` on the official host unless you are using the local OpenAPI stub for validation
 
 This firmware now supports **encrypted Feishu event payloads**:
 
@@ -251,7 +253,41 @@ Notes:
 
 - the script targets `http://127.0.0.1:18789/feishu/events` by default
 - the `duplicate` scenario sends the same `event_id/message_id` twice to verify firmware deduplication
-- `image/file/audio/sticker` scenarios do not download real media; they only validate the callback -> summary text -> Agent downgrade path
+- under the default configuration, `image/file/audio/sticker` only validate the callback -> summary text -> Agent downgrade path
+
+#### 4.2 Local `image/file` download + gateway validation
+
+If you already enabled `MIMI_FEISHU_GATEWAY_MEDIA_ENABLED=1`, you can also exercise the real `image/file` download branch with a local OpenAPI stub.
+
+1. Point the device to your dev machine from the serial CLI:
+
+```text
+mimi> set_feishu_open_api_base http://<your-host-ip>:19091
+```
+
+2. Start the local Feishu OpenAPI stub:
+
+```bash
+python3 tools/feishu_openapi_stub.py --host 0.0.0.0 --port 19091
+```
+
+3. In another terminal, start `voice_gateway.py`
+
+4. Run validation with gateway expectations:
+
+```bash
+./tools/run_feishu_validate.sh \
+  --scenario image \
+  --verify-token mimiclaw-feishu \
+  --log-file ./logs/monitor.log \
+  --expect-media-mode gateway
+```
+
+Notes:
+
+- the stub includes `image_key=img_replay_demo` and `file_key=file_replay_demo`
+- `--expect-media-mode gateway` requires `gateway_parse from` to appear in logs
+- run `mimi> clear_feishu_open_api_base` to switch the device back to the official Feishu host
 
 If you already save serial logs to a file, you can also run replay + validation together:
 
@@ -355,6 +391,7 @@ mimi> set_tg_token 123456:ABC...   # change Telegram bot token
 mimi> set_feishu_app cli_xxx secret_xxx   # set Feishu app_id / app_secret
 mimi> set_feishu_verify_token token_xxx   # set Feishu Verify Token
 mimi> set_feishu_encrypt_key key_xxx      # set Feishu Encrypt Key
+mimi> set_feishu_open_api_base http://127.0.0.1:19091  # override Feishu OpenAPI base (useful for local validation)
 mimi> set_api_key sk-ant-api03-... # change API key (Anthropic or OpenAI)
 mimi> set_model_provider openai    # switch provider (anthropic|openai)
 mimi> set_model gpt-4o             # change LLM model
@@ -367,7 +404,7 @@ mimi> config_reset                 # clear NVS, revert to build-time defaults
 
 Note:
 
-- Feishu `app_id/app_secret/verify_token/encrypt_key` can now be updated via CLI
+- Feishu `app_id/app_secret/verify_token/encrypt_key/open_api_base` can now be updated via CLI
 - NVS-stored Feishu config overrides build-time defaults
 
 **Debug & maintenance:**

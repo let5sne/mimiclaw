@@ -28,6 +28,9 @@
 #ifndef MIMI_SECRET_FEISHU_ENCRYPT_KEY
 #define MIMI_SECRET_FEISHU_ENCRYPT_KEY ""
 #endif
+#ifndef MIMI_SECRET_FEISHU_OPEN_API_BASE
+#define MIMI_SECRET_FEISHU_OPEN_API_BASE "https://open.feishu.cn"
+#endif
 #ifndef MIMI_SECRET_API_KEY
 #define MIMI_SECRET_API_KEY         ""
 #endif
@@ -224,6 +227,7 @@
 #define MIMI_NVS_KEY_FEISHU_SECRET   "app_secret"
 #define MIMI_NVS_KEY_FEISHU_VERIFY   "verify_token"
 #define MIMI_NVS_KEY_FEISHU_ENCRYPT  "encrypt_key"
+#define MIMI_NVS_KEY_FEISHU_OPENAPI  "openapi_base"
 #define MIMI_NVS_KEY_API_KEY         "api_key"
 #define MIMI_NVS_KEY_MODEL           "model"
 #define MIMI_NVS_KEY_PROVIDER        "provider"

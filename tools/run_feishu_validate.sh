@@ -10,12 +10,14 @@ VERIFY_TOKEN="${FEISHU_REPLAY_VERIFY_TOKEN:-mimiclaw-feishu}"
 ENCRYPT_KEY="${FEISHU_REPLAY_ENCRYPT_KEY:-}"
 LOG_FILE="${FEISHU_REPLAY_LOG_FILE:-}"
 ENCRYPTED=0
+EXPECT_MEDIA_MODE="${FEISHU_EXPECT_MEDIA_MODE:-auto}"
 
 print_help() {
   cat <<EOF
 用法:
   ./tools/run_feishu_validate.sh [--url URL] [--scenario NAME] [--verify-token TOKEN]
                                  [--encrypt-key KEY] [--encrypted] [--log-file PATH]
+                                 [--expect-media-mode MODE]
 
 参数:
   --url URL           设备 HTTP 服务地址，默认: ${DEFAULT_BASE_URL}
@@ -24,6 +26,7 @@ print_help() {
   --encrypt-key KEY   飞书 Encrypt Key
   --encrypted         使用加密回调模式
   --log-file PATH     可选：串口日志文件，用于校验去重和媒体摘要日志
+  --expect-media-mode 媒体模式期望：auto|summary|gateway，默认: ${EXPECT_MEDIA_MODE}
   -h, --help          显示帮助
 EOF
 }
@@ -54,6 +57,10 @@ while [[ $# -gt 0 ]]; do
       LOG_FILE="$2"
       shift 2
       ;;
+    --expect-media-mode)
+      EXPECT_MEDIA_MODE="$2"
+      shift 2
+      ;;
     -h|--help)
       print_help
       exit 0
@@ -71,6 +78,7 @@ CMD=(
   --base-url "${BASE_URL}"
   --scenario "${SCENARIO}"
   --verify-token "${VERIFY_TOKEN}"
+  --expect-media-mode "${EXPECT_MEDIA_MODE}"
 )
 
 if [[ -n "${ENCRYPT_KEY}" ]]; then
@@ -83,5 +91,5 @@ if [[ -n "${LOG_FILE}" ]]; then
   CMD+=(--log-file "${LOG_FILE}")
 fi
 
-echo "运行飞书回放校验: scenario=${SCENARIO} base_url=${BASE_URL} encrypted=${ENCRYPTED}"
+echo "运行飞书回放校验: scenario=${SCENARIO} base_url=${BASE_URL} encrypted=${ENCRYPTED} expect_media_mode=${EXPECT_MEDIA_MODE}"
 "${CMD[@]}"
