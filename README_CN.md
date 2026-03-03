@@ -278,6 +278,22 @@ mimi> clear_proxy                    # 清除代理
 - `duplicate` 场景会复用同一个 `event_id/message_id` 连发两次，用来验证固件去重
 - `image/file/audio/sticker` 场景不会下载真实媒体，只验证“回调 -> 摘要文本 -> Agent”这条降级链路
 
+如果你已经把串口日志保存到文件，还可以直接做“回放 + 校验”：
+
+```bash
+./tools/run_feishu_validate.sh \
+  --scenario all \
+  --verify-token mimiclaw-feishu \
+  --log-file ./logs/monitor.log
+```
+
+这个校验脚本会检查：
+
+- HTTP 返回是否符合预期
+- `url_verification` 是否返回正确 `challenge`
+- `duplicate` 场景是否在日志里出现 `Skip duplicate Feishu event`
+- 文本/媒体场景是否在日志里出现对应入站关键字
+
 #### 5. 当前边界
 
 - 文本消息会原样进入 Agent

@@ -63,6 +63,16 @@ class ReplayCase:
     message_id: str = ""
 
 
+@dataclass
+class ReplayResult:
+    name: str
+    status: int
+    response: str
+    encrypted: bool
+    event_id: str = ""
+    message_id: str = ""
+
+
 def compact_json(data: dict[str, Any]) -> str:
     return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
 
@@ -360,6 +370,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="打印请求和响应体，便于对照调试",
     )
+    parser.add_argument(
+        "--json-output",
+        default="",
+        help="把结构化结果写入 JSON 文件",
+    )
     return parser.parse_args()
 
 
@@ -373,6 +388,7 @@ def main() -> int:
 
     print(f"开始回放: endpoint={url} cases={len(cases)} encrypted={'yes' if args.encrypted else 'no'}")
     failures = 0
+    results: list[ReplayResult] = []
 
     for idx, case in enumerate(cases, start=1):
         headers = build_signature_headers(case.payload, args.encrypt_key if case.encrypted else "")
@@ -380,6 +396,16 @@ def main() -> int:
         ok = 200 <= status < 300
         if not ok:
             failures += 1
+        results.append(
+            ReplayResult(
+                name=case.name,
+                status=status,
+                response=body,
+                encrypted=case.encrypted,
+                event_id=case.event_id,
+                message_id=case.message_id,
+            )
+        )
 
         print(
             f"[{idx}/{len(cases)}] {case.name}: "
@@ -390,6 +416,28 @@ def main() -> int:
             print(f"  response={body}")
         elif body:
             print(f"  response={body}")
+
+    if args.json_output:
+        report = {
+            "endpoint": url,
+            "scenario": args.scenario,
+            "encrypted": bool(args.encrypted),
+            "failures": failures,
+            "total": len(results),
+            "results": [
+                {
+                    "name": item.name,
+                    "status": item.status,
+                    "response": item.response,
+                    "encrypted": item.encrypted,
+                    "event_id": item.event_id,
+                    "message_id": item.message_id,
+                }
+                for item in results
+            ],
+        }
+        with open(args.json_output, "w", encoding="utf-8") as f:
+            json.dump(report, f, ensure_ascii=False, indent=2)
 
     print(f"结果: pass={len(cases) - failures}, fail={failures}, total={len(cases)}")
     return 0 if failures == 0 else 1

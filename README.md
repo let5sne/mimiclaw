@@ -253,6 +253,22 @@ Notes:
 - the `duplicate` scenario sends the same `event_id/message_id` twice to verify firmware deduplication
 - `image/file/audio/sticker` scenarios do not download real media; they only validate the callback -> summary text -> Agent downgrade path
 
+If you already save serial logs to a file, you can also run replay + validation together:
+
+```bash
+./tools/run_feishu_validate.sh \
+  --scenario all \
+  --verify-token mimiclaw-feishu \
+  --log-file ./logs/monitor.log
+```
+
+The validator checks:
+
+- HTTP responses for each replayed callback
+- the returned `challenge` for `url_verification`
+- whether `duplicate` produces `Skip duplicate Feishu event` in logs
+- whether text/media scenarios produce the expected ingress log markers
+
 Current limits:
 
 - text messages go to the Agent as-is
