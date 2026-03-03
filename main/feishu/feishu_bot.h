@@ -28,3 +28,9 @@ esp_err_t feishu_clear_app_credentials(void);
  */
 esp_err_t feishu_set_verify_token(const char *token);
 esp_err_t feishu_clear_verify_token(void);
+
+/**
+ * 运行时更新飞书 Encrypt Key。
+ */
+esp_err_t feishu_set_encrypt_key(const char *key);
+esp_err_t feishu_clear_encrypt_key(void);

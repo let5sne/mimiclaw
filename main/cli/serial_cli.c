@@ -82,6 +82,11 @@ static struct {
     struct arg_end *end;
 } feishu_verify_args;
 
+static struct {
+    struct arg_str *key;
+    struct arg_end *end;
+} feishu_encrypt_args;
+
 static int cmd_set_tg_token(int argc, char **argv)
 {
     int nerrors = arg_parse(argc, argv, (void **)&tg_token_args);
@@ -152,6 +157,36 @@ static int cmd_clear_feishu_verify_token(int argc, char **argv)
     }
 
     printf("Feishu verify token cleared.\n");
+    return 0;
+}
+
+static int cmd_set_feishu_encrypt_key(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&feishu_encrypt_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, feishu_encrypt_args.end, argv[0]);
+        return 1;
+    }
+
+    esp_err_t err = feishu_set_encrypt_key(feishu_encrypt_args.key->sval[0]);
+    if (err != ESP_OK) {
+        printf("Failed to save Feishu encrypt key: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("Feishu encrypt key saved.\n");
+    return 0;
+}
+
+static int cmd_clear_feishu_encrypt_key(int argc, char **argv)
+{
+    esp_err_t err = feishu_clear_encrypt_key();
+    if (err != ESP_OK) {
+        printf("Failed to clear Feishu encrypt key: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("Feishu encrypt key cleared.\n");
     return 0;
 }
 
@@ -984,6 +1019,7 @@ static int cmd_config_show(int argc, char **argv)
     print_config("Feishu App", MIMI_NVS_FEISHU, MIMI_NVS_KEY_FEISHU_APP_ID, MIMI_SECRET_FEISHU_APP_ID, false);
     print_config("Feishu Sec", MIMI_NVS_FEISHU, MIMI_NVS_KEY_FEISHU_SECRET, MIMI_SECRET_FEISHU_APP_SECRET, true);
     print_config("Feishu Vfy", MIMI_NVS_FEISHU, MIMI_NVS_KEY_FEISHU_VERIFY, MIMI_SECRET_FEISHU_VERIFY_TOKEN, true);
+    print_config("Feishu Enc", MIMI_NVS_FEISHU, MIMI_NVS_KEY_FEISHU_ENCRYPT, MIMI_SECRET_FEISHU_ENCRYPT_KEY, true);
     print_config("API Key",    MIMI_NVS_LLM,    MIMI_NVS_KEY_API_KEY,  MIMI_SECRET_API_KEY,    true);
     print_config("Model",      MIMI_NVS_LLM,    MIMI_NVS_KEY_MODEL,    MIMI_SECRET_MODEL,      false);
     print_config("Provider",   MIMI_NVS_LLM,    MIMI_NVS_KEY_PROVIDER, MIMI_SECRET_MODEL_PROVIDER, false);
@@ -1469,6 +1505,25 @@ esp_err_t serial_cli_init(void)
         .func = &cmd_clear_feishu_verify_token,
     };
     esp_console_cmd_register(&clear_feishu_verify_cmd);
+
+    /* set_feishu_encrypt_key */
+    feishu_encrypt_args.key = arg_str1(NULL, NULL, "<key>", "Feishu encrypt key");
+    feishu_encrypt_args.end = arg_end(1);
+    esp_console_cmd_t feishu_encrypt_cmd = {
+        .command = "set_feishu_encrypt_key",
+        .help = "Set Feishu encrypt key",
+        .func = &cmd_set_feishu_encrypt_key,
+        .argtable = &feishu_encrypt_args,
+    };
+    esp_console_cmd_register(&feishu_encrypt_cmd);
+
+    /* clear_feishu_encrypt_key */
+    esp_console_cmd_t clear_feishu_encrypt_cmd = {
+        .command = "clear_feishu_encrypt_key",
+        .help = "Clear Feishu encrypt key",
+        .func = &cmd_clear_feishu_encrypt_key,
+    };
+    esp_console_cmd_register(&clear_feishu_encrypt_cmd);
 
     /* set_api_key */
     api_key_args.key = arg_str1(NULL, NULL, "<key>", "LLM API key");

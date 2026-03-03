@@ -141,6 +141,7 @@ cp main/mimi_secrets.h.example main/mimi_secrets.h
 #define MIMI_SECRET_FEISHU_APP_ID   ""              // 只用 Telegram 时可留空
 #define MIMI_SECRET_FEISHU_APP_SECRET ""
 #define MIMI_SECRET_FEISHU_VERIFY_TOKEN ""
+#define MIMI_SECRET_FEISHU_ENCRYPT_KEY ""
 #define MIMI_SECRET_API_KEY         "sk-ant-api03-xxxxx"
 #define MIMI_SECRET_MODEL_PROVIDER  "anthropic"     // "anthropic" 或 "openai"
 #define MIMI_SECRET_SEARCH_KEY      ""              // 可选：Brave Search API key
@@ -207,12 +208,13 @@ mimi> clear_proxy                    # 清除代理
 #define MIMI_SECRET_FEISHU_APP_ID        "cli_xxx"
 #define MIMI_SECRET_FEISHU_APP_SECRET    "xxx"
 #define MIMI_SECRET_FEISHU_VERIFY_TOKEN  "mimiclaw-feishu"
+#define MIMI_SECRET_FEISHU_ENCRYPT_KEY   ""   // 可留空；启用加密回调时与飞书后台保持一致
 ```
 
 说明：
 
-- 飞书配置目前只支持**编译时写入**
-- 如果你在飞书开放平台配置了 `Verify Token`，这里必须保持一致
+- 飞书配置既可写在编译时默认值里，也可通过 CLI 在运行时覆盖
+- 如果你在飞书开放平台配置了 `Verify Token` / `Encrypt Key`，这里必须保持一致
 
 #### 2. 在飞书开放平台配置应用
 
@@ -221,9 +223,13 @@ mimi> clear_proxy                    # 清除代理
 - 订阅事件 `im.message.receive_v1`
 - 请求地址填 `https://<你的公网地址>/feishu/events`
 - `Verify Token` 填成和 `MIMI_SECRET_FEISHU_VERIFY_TOKEN` 一样
-- `Encrypt Key` 先留空或关闭
+- `Encrypt Key` 可留空；如果启用，就填成和 `MIMI_SECRET_FEISHU_ENCRYPT_KEY` 一样
 
-当前固件**不支持加密事件体**。如果启用了 `Encrypt Key`，设备会返回 `501 Not Implemented`。
+当前固件已经支持**飞书加密事件体**：
+
+- 未配置 `Encrypt Key` 时，按明文事件体处理
+- 配置了 `Encrypt Key` 时，会校验 `X-Lark-Signature`，再解密 `encrypt` 字段
+- 仍建议保留 `Verify Token`，这样 URL 校验和普通事件都能多一道来源校验
 
 #### 3. 保证设备可被飞书回调
 
@@ -234,6 +240,7 @@ mimi> clear_proxy                    # 清除代理
 #### 4. 烧录后的联调步骤
 
 - 打开串口监控，确认日志里出现 `Feishu callback registered at /feishu/events`
+- 如果启用了 `Encrypt Key`，额外确认 URL 校验和事件推送都返回成功
 - 在飞书里给机器人发送 `hello`
 - 预期现象：
   - 飞书开放平台事件订阅页显示回调成功
@@ -304,6 +311,7 @@ mimi> wifi_set MySSID MyPassword   # 换 WiFi
 mimi> set_tg_token 123456:ABC...   # 换 Telegram Bot Token
 mimi> set_feishu_app cli_xxx secret_xxx   # 设置飞书 app_id / app_secret
 mimi> set_feishu_verify_token token_xxx   # 设置飞书 Verify Token
+mimi> set_feishu_encrypt_key key_xxx      # 设置飞书 Encrypt Key
 mimi> set_api_key sk-ant-api03-... # 换 API Key（Anthropic 或 OpenAI）
 mimi> set_model_provider openai    # 切换提供商（anthropic|openai）
 mimi> set_model gpt-4o             # 换模型
@@ -316,7 +324,7 @@ mimi> config_reset                 # 清除 NVS，恢复编译时默认值
 
 说明：
 
-- 现在支持通过 CLI 更新飞书 `app_id/app_secret/verify_token`
+- 现在支持通过 CLI 更新飞书 `app_id/app_secret/verify_token/encrypt_key`
 - 已保存到 NVS 的飞书配置会覆盖编译时默认值
 
 **调试与运维：**

@@ -141,6 +141,7 @@ Edit `main/mimi_secrets.h`:
 #define MIMI_SECRET_FEISHU_APP_ID   ""
 #define MIMI_SECRET_FEISHU_APP_SECRET ""
 #define MIMI_SECRET_FEISHU_VERIFY_TOKEN ""
+#define MIMI_SECRET_FEISHU_ENCRYPT_KEY ""
 #define MIMI_SECRET_API_KEY         "sk-ant-api03-xxxxx"
 #define MIMI_SECRET_MODEL_PROVIDER  "anthropic"     // "anthropic" or "openai"
 #define MIMI_SECRET_SEARCH_KEY      ""              // optional: Brave Search API key
@@ -190,6 +191,7 @@ This branch defaults to a **no external voice gateway** build. Text chat works w
 #define MIMI_SECRET_FEISHU_APP_ID        "cli_xxx"
 #define MIMI_SECRET_FEISHU_APP_SECRET    "xxx"
 #define MIMI_SECRET_FEISHU_VERIFY_TOKEN  "mimiclaw-feishu"
+#define MIMI_SECRET_FEISHU_ENCRYPT_KEY   ""   // optional; must match Feishu if encrypted callbacks are enabled
 ```
 
 2. In the Feishu Open Platform:
@@ -199,9 +201,13 @@ This branch defaults to a **no external voice gateway** build. Text chat works w
 - subscribe to event `im.message.receive_v1`
 - set request URL to `https://<public-address>/feishu/events`
 - set `Verify Token` to the same value as `MIMI_SECRET_FEISHU_VERIFY_TOKEN`
-- leave `Encrypt Key` empty / disabled
+- leave `Encrypt Key` empty for plaintext callbacks, or set it to match `MIMI_SECRET_FEISHU_ENCRYPT_KEY`
 
-This firmware currently does **not** support encrypted event payloads.
+This firmware now supports **encrypted Feishu event payloads**:
+
+- if `Encrypt Key` is empty, callbacks are handled as plaintext events
+- if `Encrypt Key` is configured, the firmware validates `X-Lark-Signature` and decrypts the `encrypt` field
+- keeping `Verify Token` enabled is still recommended for an extra source check on URL verification and normal events
 
 3. Make the device reachable from Feishu:
 
@@ -212,6 +218,7 @@ This firmware currently does **not** support encrypted event payloads.
 4. Smoke test after flashing:
 
 - check serial logs for `Feishu callback registered at /feishu/events`
+- if `Encrypt Key` is enabled, confirm both URL verification and event delivery succeed in the Feishu console
 - send `hello` to the bot in Feishu
 - expect a text reply from MimiClaw
 
@@ -277,6 +284,7 @@ mimi> wifi_set MySSID MyPassword   # change WiFi network
 mimi> set_tg_token 123456:ABC...   # change Telegram bot token
 mimi> set_feishu_app cli_xxx secret_xxx   # set Feishu app_id / app_secret
 mimi> set_feishu_verify_token token_xxx   # set Feishu Verify Token
+mimi> set_feishu_encrypt_key key_xxx      # set Feishu Encrypt Key
 mimi> set_api_key sk-ant-api03-... # change API key (Anthropic or OpenAI)
 mimi> set_model_provider openai    # switch provider (anthropic|openai)
 mimi> set_model gpt-4o             # change LLM model
@@ -289,7 +297,7 @@ mimi> config_reset                 # clear NVS, revert to build-time defaults
 
 Note:
 
-- Feishu `app_id/app_secret/verify_token` can now be updated via CLI
+- Feishu `app_id/app_secret/verify_token/encrypt_key` can now be updated via CLI
 - NVS-stored Feishu config overrides build-time defaults
 
 **Debug & maintenance:**

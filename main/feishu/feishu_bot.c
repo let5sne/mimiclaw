@@ -8,6 +8,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <stdlib.h>
 
 #include "esp_crt_bundle.h"
@@ -15,6 +16,9 @@
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "mbedtls/aes.h"
+#include "mbedtls/base64.h"
+#include "mbedtls/sha256.h"
 #include "nvs.h"
 #include "cJSON.h"
 
@@ -32,6 +36,7 @@ typedef struct {
 static char s_app_id[96] = MIMI_SECRET_FEISHU_APP_ID;
 static char s_app_secret[128] = MIMI_SECRET_FEISHU_APP_SECRET;
 static char s_verify_token[128] = MIMI_SECRET_FEISHU_VERIFY_TOKEN;
+static char s_encrypt_key[128] = MIMI_SECRET_FEISHU_ENCRYPT_KEY;
 static char s_tenant_token[256] = {0};
 static int64_t s_tenant_token_expire_us = 0;
 static bool s_started = false;
@@ -103,6 +108,161 @@ static void feishu_load_str_from_nvs(const char *key, char *dst, size_t dst_size
         safe_copy(dst, dst_size, tmp);
     }
     nvs_close(nvs);
+}
+
+static bool feishu_get_header(httpd_req_t *req, const char *name, char *out, size_t out_size)
+{
+    if (!req || !name || !out || out_size == 0) {
+        return false;
+    }
+    out[0] = '\0';
+
+    size_t len = httpd_req_get_hdr_value_len(req, name);
+    if (len == 0 || len >= out_size) {
+        return false;
+    }
+    return httpd_req_get_hdr_value_str(req, name, out, out_size) == ESP_OK && out[0] != '\0';
+}
+
+static bool feishu_get_signature_headers(httpd_req_t *req,
+                                         char *timestamp, size_t timestamp_size,
+                                         char *nonce, size_t nonce_size,
+                                         char *signature, size_t signature_size)
+{
+    bool got_timestamp = feishu_get_header(req, "X-Lark-Request-Timestamp",
+                                           timestamp, timestamp_size) ||
+                         feishu_get_header(req, "x-lark-request-timestamp",
+                                           timestamp, timestamp_size);
+    bool got_nonce = feishu_get_header(req, "X-Lark-Request-Nonce",
+                                       nonce, nonce_size) ||
+                     feishu_get_header(req, "x-lark-request-nonce",
+                                       nonce, nonce_size);
+    bool got_signature = feishu_get_header(req, "X-Lark-Signature",
+                                           signature, signature_size) ||
+                         feishu_get_header(req, "x-lark-signature",
+                                           signature, signature_size);
+    return got_timestamp && got_nonce && got_signature;
+}
+
+static bool feishu_sha256_bytes(const unsigned char *input, size_t input_len, unsigned char *digest)
+{
+    if (!input || !digest) {
+        return false;
+    }
+    return mbedtls_sha256(input, input_len, digest, 0) == 0;
+}
+
+static bool feishu_signature_matches(httpd_req_t *req, const char *body_json)
+{
+    if (s_encrypt_key[0] == '\0') {
+        return true;
+    }
+    if (!req || !body_json) {
+        return false;
+    }
+
+    char timestamp[64] = {0};
+    char nonce[64] = {0};
+    char signature[80] = {0};
+    if (!feishu_get_signature_headers(req, timestamp, sizeof(timestamp),
+                                      nonce, sizeof(nonce),
+                                      signature, sizeof(signature))) {
+        ESP_LOGW(TAG, "Missing Feishu signature headers");
+        return false;
+    }
+
+    size_t content_len = strlen(timestamp) + strlen(nonce) + strlen(s_encrypt_key) + strlen(body_json);
+    char *content = calloc(1, content_len + 1);
+    if (!content) {
+        return false;
+    }
+    snprintf(content, content_len + 1, "%s%s%s%s", timestamp, nonce, s_encrypt_key, body_json);
+
+    unsigned char digest[32] = {0};
+    char hex[65] = {0};
+    bool ok = false;
+    if (feishu_sha256_bytes((const unsigned char *)content, strlen(content), digest)) {
+        for (size_t i = 0; i < sizeof(digest); i++) {
+            snprintf(hex + i * 2, sizeof(hex) - i * 2, "%02x", digest[i]);
+        }
+        ok = strcasecmp(hex, signature) == 0;
+    }
+    free(content);
+    return ok;
+}
+
+static esp_err_t feishu_decrypt_payload(const char *encrypted_b64, char **out_json)
+{
+    if (!encrypted_b64 || !encrypted_b64[0] || !out_json || s_encrypt_key[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *out_json = NULL;
+
+    unsigned char hashed_key[32] = {0};
+    if (!feishu_sha256_bytes((const unsigned char *)s_encrypt_key, strlen(s_encrypt_key), hashed_key)) {
+        return ESP_FAIL;
+    }
+
+    size_t enc_len = 0;
+    if (mbedtls_base64_decode(NULL, 0, &enc_len,
+                              (const unsigned char *)encrypted_b64,
+                              strlen(encrypted_b64)) != MBEDTLS_ERR_BASE64_BUFFER_TOO_SMALL) {
+        return ESP_FAIL;
+    }
+
+    unsigned char *enc_buf = calloc(1, enc_len + 1);
+    if (!enc_buf) {
+        return ESP_ERR_NO_MEM;
+    }
+    if (mbedtls_base64_decode(enc_buf, enc_len, &enc_len,
+                              (const unsigned char *)encrypted_b64,
+                              strlen(encrypted_b64)) != 0) {
+        free(enc_buf);
+        return ESP_FAIL;
+    }
+    if (enc_len <= 16 || ((enc_len - 16) % 16) != 0) {
+        free(enc_buf);
+        return ESP_FAIL;
+    }
+
+    unsigned char iv[16] = {0};
+    memcpy(iv, enc_buf, 16);
+    size_t cipher_len = enc_len - 16;
+    unsigned char *plain = calloc(1, cipher_len + 1);
+    if (!plain) {
+        free(enc_buf);
+        return ESP_ERR_NO_MEM;
+    }
+    memcpy(plain, enc_buf + 16, cipher_len);
+    free(enc_buf);
+
+    mbedtls_aes_context aes;
+    mbedtls_aes_init(&aes);
+    int ret = mbedtls_aes_setkey_dec(&aes, hashed_key, 256);
+    if (ret == 0) {
+        ret = mbedtls_aes_crypt_cbc(&aes, MBEDTLS_AES_DECRYPT, cipher_len, iv, plain, plain);
+    }
+    mbedtls_aes_free(&aes);
+    if (ret != 0) {
+        free(plain);
+        return ESP_FAIL;
+    }
+
+    unsigned char pad = plain[cipher_len - 1];
+    if (pad == 0 || pad > 16 || pad > cipher_len) {
+        free(plain);
+        return ESP_FAIL;
+    }
+    for (size_t i = 0; i < pad; i++) {
+        if (plain[cipher_len - 1 - i] != pad) {
+            free(plain);
+            return ESP_FAIL;
+        }
+    }
+    plain[cipher_len - pad] = '\0';
+
+    *out_json = (char *)plain;
+    return ESP_OK;
 }
 
 static esp_err_t http_event_handler(esp_http_client_event_t *evt)
@@ -493,15 +653,50 @@ static esp_err_t feishu_events_handler(httpd_req_t *req)
     }
 
     cJSON *root = cJSON_Parse(body);
-    free(body);
     if (!root) {
+        free(body);
         return feishu_send_http_json(req, "400 Bad Request", "{\"code\":400}");
     }
 
-    if (cJSON_GetObjectItem(root, "encrypt")) {
+    char *canonical_body = cJSON_PrintUnformatted(root);
+    if (!canonical_body) {
         cJSON_Delete(root);
-        ESP_LOGW(TAG, "Encrypted Feishu callback is not supported in this build");
-        return feishu_send_http_json(req, "501 Not Implemented", "{\"code\":501}");
+        free(body);
+        return feishu_send_http_json(req, "500 Internal Server Error", "{\"code\":500}");
+    }
+
+    if (!feishu_signature_matches(req, canonical_body)) {
+        free(canonical_body);
+        cJSON_Delete(root);
+        free(body);
+        ESP_LOGW(TAG, "Feishu callback signature mismatch");
+        return feishu_send_http_json(req, "401 Unauthorized", "{\"code\":401}");
+    }
+    free(canonical_body);
+    free(body);
+
+    if (cJSON_GetObjectItem(root, "encrypt")) {
+        cJSON *encrypt = cJSON_GetObjectItem(root, "encrypt");
+        if (!cJSON_IsString(encrypt) || !encrypt->valuestring || s_encrypt_key[0] == '\0') {
+            cJSON_Delete(root);
+            ESP_LOGW(TAG, "Encrypted Feishu callback received but encrypt_key is missing");
+            return feishu_send_http_json(req, "401 Unauthorized", "{\"code\":401}");
+        }
+
+        char *decrypted_json = NULL;
+        esp_err_t decrypt_err = feishu_decrypt_payload(encrypt->valuestring, &decrypted_json);
+        cJSON_Delete(root);
+        if (decrypt_err != ESP_OK || !decrypted_json) {
+            ESP_LOGW(TAG, "Decrypt Feishu callback failed: %s", esp_err_to_name(decrypt_err));
+            return feishu_send_http_json(req, "400 Bad Request", "{\"code\":400}");
+        }
+
+        root = cJSON_Parse(decrypted_json);
+        free(decrypted_json);
+        if (!root) {
+            ESP_LOGW(TAG, "Parse decrypted Feishu callback failed");
+            return feishu_send_http_json(req, "400 Bad Request", "{\"code\":400}");
+        }
     }
 
     char payload_token[128] = {0};
@@ -613,9 +808,11 @@ esp_err_t feishu_bot_init(void)
     safe_copy(s_app_id, sizeof(s_app_id), MIMI_SECRET_FEISHU_APP_ID);
     safe_copy(s_app_secret, sizeof(s_app_secret), MIMI_SECRET_FEISHU_APP_SECRET);
     safe_copy(s_verify_token, sizeof(s_verify_token), MIMI_SECRET_FEISHU_VERIFY_TOKEN);
+    safe_copy(s_encrypt_key, sizeof(s_encrypt_key), MIMI_SECRET_FEISHU_ENCRYPT_KEY);
     feishu_load_str_from_nvs(MIMI_NVS_KEY_FEISHU_APP_ID, s_app_id, sizeof(s_app_id));
     feishu_load_str_from_nvs(MIMI_NVS_KEY_FEISHU_SECRET, s_app_secret, sizeof(s_app_secret));
     feishu_load_str_from_nvs(MIMI_NVS_KEY_FEISHU_VERIFY, s_verify_token, sizeof(s_verify_token));
+    feishu_load_str_from_nvs(MIMI_NVS_KEY_FEISHU_ENCRYPT, s_encrypt_key, sizeof(s_encrypt_key));
     feishu_invalidate_tenant_token();
 
     if (!feishu_is_configured()) {
@@ -623,8 +820,9 @@ esp_err_t feishu_bot_init(void)
         return ESP_OK;
     }
 
-    ESP_LOGI(TAG, "Feishu bot configured (verify_token=%s)",
-             s_verify_token[0] ? "configured" : "open");
+    ESP_LOGI(TAG, "Feishu bot configured (verify_token=%s, encrypt_key=%s)",
+             s_verify_token[0] ? "configured" : "open",
+             s_encrypt_key[0] ? "configured" : "open");
     return ESP_OK;
 }
 
@@ -731,6 +929,12 @@ esp_err_t feishu_clear_app_credentials(void)
     safe_copy(s_app_id, sizeof(s_app_id), MIMI_SECRET_FEISHU_APP_ID);
     safe_copy(s_app_secret, sizeof(s_app_secret), MIMI_SECRET_FEISHU_APP_SECRET);
     feishu_invalidate_tenant_token();
+    if (feishu_is_configured()) {
+        err = feishu_bot_start();
+        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+            return err;
+        }
+    }
     ESP_LOGI(TAG, "Feishu app credentials cleared");
     return ESP_OK;
 }
@@ -758,5 +962,31 @@ esp_err_t feishu_clear_verify_token(void)
     }
     safe_copy(s_verify_token, sizeof(s_verify_token), MIMI_SECRET_FEISHU_VERIFY_TOKEN);
     ESP_LOGI(TAG, "Feishu verify token cleared");
+    return ESP_OK;
+}
+
+esp_err_t feishu_set_encrypt_key(const char *key)
+{
+    if (!key || strlen(key) >= sizeof(s_encrypt_key)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    esp_err_t err = feishu_nvs_write_str(MIMI_NVS_KEY_FEISHU_ENCRYPT, key);
+    if (err != ESP_OK) {
+        return err;
+    }
+    safe_copy(s_encrypt_key, sizeof(s_encrypt_key), key);
+    ESP_LOGI(TAG, "Feishu encrypt key updated");
+    return ESP_OK;
+}
+
+esp_err_t feishu_clear_encrypt_key(void)
+{
+    esp_err_t err = feishu_nvs_erase_key(MIMI_NVS_KEY_FEISHU_ENCRYPT);
+    if (err != ESP_OK) {
+        return err;
+    }
+    safe_copy(s_encrypt_key, sizeof(s_encrypt_key), MIMI_SECRET_FEISHU_ENCRYPT_KEY);
+    ESP_LOGI(TAG, "Feishu encrypt key cleared");
     return ESP_OK;
 }
