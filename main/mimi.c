@@ -17,6 +17,7 @@
 #include "bus/message_bus.h"
 #include "wifi/wifi_manager.h"
 #include "telegram/telegram_bot.h"
+#include "feishu/feishu_bot.h"
 #include "llm/llm_proxy.h"
 #include "agent/agent_loop.h"
 #include "memory/memory_store.h"
@@ -32,12 +33,207 @@
 #include "display/display.h"
 #include "display/font_cjk.h"
 #include "audio/audio.h"
+#include "status/status_led.h"
 #include "voice/voice_channel.h"
 #include "buttons/button_driver.h"
 #include "imu/imu_manager.h"
 #include "skills/skill_loader.h"
 
 static const char *TAG = "mimi";
+
+#if MIMI_VOICE_ENABLED && MIMI_AUDIO_ENABLED && MIMI_VOICE_MIRROR_TELEGRAM
+static size_t outbound_utf8_char_len(unsigned char c)
+{
+    if ((c & 0x80) == 0) return 1;
+    if ((c & 0xE0) == 0xC0) return 2;
+    if ((c & 0xF0) == 0xE0) return 3;
+    if ((c & 0xF8) == 0xF0) return 4;
+    return 1;
+}
+
+static bool outbound_match_utf8_token(const char *s, const char *token)
+{
+    return s && token && strncmp(s, token, strlen(token)) == 0;
+}
+
+static void outbound_append_compact_text(const char *src, char *dst, size_t dst_size)
+{
+    if (!src || !dst || dst_size == 0) return;
+
+    size_t out = 0;
+    bool prev_space = false;
+    bool at_line_start = true;
+
+    for (const char *p = src; *p != '\0' && out + 1 < dst_size;) {
+        unsigned char c = (unsigned char)*p;
+
+        if (c == '\r') {
+            p++;
+            continue;
+        }
+
+        if (c == '\n' || c == '\t' || c == ' ') {
+            if (out > 0 && !prev_space) {
+                dst[out++] = ' ';
+                prev_space = true;
+            }
+            at_line_start = true;
+            p++;
+            continue;
+        }
+
+        if (c == '#' || c == '*' || c == '`' || c == '_' || c == '~') {
+            p++;
+            continue;
+        }
+
+        if (c == '|') {
+            if (out > 0 && !prev_space) {
+                dst[out++] = ' ';
+                prev_space = true;
+            }
+            at_line_start = true;
+            p++;
+            continue;
+        }
+
+        if ((c == '-' || c == '+') && at_line_start) {
+            p++;
+            continue;
+        }
+
+        size_t char_len = outbound_utf8_char_len(c);
+        if (out + char_len >= dst_size) break;
+        memcpy(dst + out, p, char_len);
+        out += char_len;
+        p += char_len;
+        prev_space = false;
+        at_line_start = false;
+    }
+
+    while (out > 0 && dst[out - 1] == ' ') {
+        out--;
+    }
+    dst[out] = '\0';
+}
+
+static bool outbound_is_sentence_break(const char *s)
+{
+    return outbound_match_utf8_token(s, "。") ||
+           outbound_match_utf8_token(s, "！") ||
+           outbound_match_utf8_token(s, "？") ||
+           outbound_match_utf8_token(s, "!") ||
+           outbound_match_utf8_token(s, "?");
+}
+
+static bool outbound_is_soft_break(const char *s)
+{
+    return outbound_is_sentence_break(s) ||
+           outbound_match_utf8_token(s, "，") ||
+           outbound_match_utf8_token(s, "、") ||
+           outbound_match_utf8_token(s, "；") ||
+           outbound_match_utf8_token(s, ";") ||
+           outbound_match_utf8_token(s, ",") ||
+           outbound_match_utf8_token(s, "：") ||
+           outbound_match_utf8_token(s, ":") ||
+           outbound_match_utf8_token(s, " ");
+}
+
+static void outbound_build_voice_summary(const char *src, char *dst, size_t dst_size)
+{
+    static const char *suffix = "。详细内容已发到 Telegram。";
+    char compact[512] = {0};
+    size_t out = 0;
+    size_t last_sentence_end = 0;
+    size_t last_soft_break = 0;
+    int sentence_count = 0;
+    bool truncated = false;
+
+    if (!dst || dst_size == 0) return;
+    dst[0] = '\0';
+    if (!src || src[0] == '\0') return;
+
+    outbound_append_compact_text(src, compact, sizeof(compact));
+    if (compact[0] == '\0') return;
+
+    for (const char *p = compact; *p != '\0';) {
+        size_t char_len = outbound_utf8_char_len((unsigned char)*p);
+        if (out + char_len >= dst_size) {
+            truncated = true;
+            break;
+        }
+        if (out + char_len > MIMI_VOICE_SUMMARY_MAX_BYTES) {
+            truncated = true;
+            break;
+        }
+
+        memcpy(dst + out, p, char_len);
+        out += char_len;
+
+        if (outbound_is_sentence_break(p)) {
+            last_sentence_end = out;
+            sentence_count++;
+            if (sentence_count >= MIMI_VOICE_SUMMARY_MAX_SENTENCES) {
+                p += char_len;
+                truncated = (*p != '\0');
+                break;
+            }
+        } else if (outbound_is_soft_break(p)) {
+            last_soft_break = out;
+        }
+
+        p += char_len;
+    }
+
+    dst[out] = '\0';
+
+    if (truncated) {
+        size_t cutoff = out;
+        size_t suffix_len = strlen(suffix);
+        if (last_sentence_end > 0 && last_sentence_end + suffix_len < dst_size) {
+            cutoff = last_sentence_end;
+        } else if (last_soft_break > 0 && last_soft_break + suffix_len < dst_size) {
+            cutoff = last_soft_break;
+        }
+        while (cutoff > 0 && dst[cutoff - 1] == ' ') {
+            cutoff--;
+        }
+        dst[cutoff] = '\0';
+        if (cutoff + suffix_len < dst_size) {
+            memcpy(dst + cutoff, suffix, suffix_len + 1);
+        }
+    }
+}
+
+static void outbound_mirror_telegram_to_voice(const mimi_msg_t *msg, bool is_status)
+{
+    char summary[256] = {0};
+
+    if (!msg || is_status || !msg->content || msg->content[0] == '\0') {
+        return;
+    }
+    if (!voice_channel_is_connected()) {
+        return;
+    }
+    voice_state_t state = voice_channel_get_state();
+    if (state != VOICE_STATE_IDLE) {
+        ESP_LOGI(TAG, "Voice mirror skipped: channel busy (state=%d)",
+                 (int)state);
+        return;
+    }
+
+    outbound_build_voice_summary(msg->content, summary, sizeof(summary));
+    if (summary[0] == '\0') {
+        return;
+    }
+
+    ESP_LOGI(TAG, "Voice mirror summary: \"%.*s\"", 160, summary);
+    esp_err_t speak_ret = voice_channel_speak(summary);
+    if (speak_ret != ESP_OK) {
+        ESP_LOGW(TAG, "Voice mirror failed: %s", esp_err_to_name(speak_ret));
+    }
+}
+#endif
 
 static bool outbound_is_status_text(const char *text)
 {
@@ -61,7 +257,18 @@ static uint32_t outbound_send_retry_delay_ms(int attempt)
 static esp_err_t outbound_send_once(const mimi_msg_t *msg, bool is_status)
 {
     if (strcmp(msg->channel, MIMI_CHAN_TELEGRAM) == 0) {
-        return telegram_send_message(msg->chat_id, msg->content);
+        esp_err_t ret = telegram_send_message(msg->chat_id, msg->content);
+        if (ret != ESP_OK) {
+            return ret;
+        }
+#if MIMI_VOICE_ENABLED && MIMI_AUDIO_ENABLED && MIMI_VOICE_MIRROR_TELEGRAM
+        outbound_mirror_telegram_to_voice(msg, is_status);
+#endif
+        return ESP_OK;
+    }
+
+    if (strcmp(msg->channel, MIMI_CHAN_FEISHU) == 0) {
+        return feishu_send_message(msg->chat_id, msg->content);
     }
 
     if (strcmp(msg->channel, MIMI_CHAN_WEBSOCKET) == 0) {
@@ -237,6 +444,12 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     ESP_ERROR_CHECK(init_spiffs());
+    {
+        esp_err_t led_ret = status_led_init();
+        if (led_ret != ESP_OK) {
+            ESP_LOGW(TAG, "Status LED init failed: %s", esp_err_to_name(led_ret));
+        }
+    }
 
     /* Load CJK font (non-fatal if missing) */
     font_cjk_init("/spiffs/fonts/unifont_cjk.bin");
@@ -290,6 +503,7 @@ void app_main(void)
     ESP_ERROR_CHECK(http_proxy_init());
     ESP_ERROR_CHECK(access_control_init());
     ESP_ERROR_CHECK(telegram_bot_init());
+    ESP_ERROR_CHECK(feishu_bot_init());
     ESP_ERROR_CHECK(llm_proxy_init());
     ESP_ERROR_CHECK(tool_registry_init());
     ESP_ERROR_CHECK(agent_loop_init());
@@ -317,6 +531,7 @@ void app_main(void)
             ESP_ERROR_CHECK(telegram_bot_start());
             ESP_ERROR_CHECK(agent_loop_start());
             ESP_ERROR_CHECK(ws_server_start());
+            ESP_ERROR_CHECK(feishu_bot_start());
 
 #if MIMI_HEARTBEAT_ENABLED
             {

@@ -1,6 +1,7 @@
 #include "llm_proxy.h"
 #include "mimi_config.h"
 #include "proxy/http_proxy.h"
+#include "status/status_led.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -18,14 +19,23 @@ static const char *TAG = "llm";
 
 #define LLM_API_KEY_MAX_LEN 320
 #define LLM_MODEL_MAX_LEN   64
+#define LLM_API_URL_MAX_LEN 256
+#define LLM_API_HOST_MAX_LEN 128
+#define LLM_API_PATH_MAX_LEN 160
 #define LLM_DUMP_MAX_BYTES   (16 * 1024)
 #define LLM_DUMP_CHUNK_BYTES 320
 
 static char s_api_key[LLM_API_KEY_MAX_LEN] = {0};
 static char s_model[LLM_MODEL_MAX_LEN] = MIMI_LLM_DEFAULT_MODEL;
 static char s_provider[16] = MIMI_LLM_PROVIDER_DEFAULT;
+static char s_api_endpoint[LLM_API_URL_MAX_LEN] = {0};
+static char s_api_host[LLM_API_HOST_MAX_LEN] = {0};
+static char s_api_path[LLM_API_PATH_MAX_LEN] = {0};
+static uint16_t s_api_port = 443;
 static int s_last_http_status = 0;
 static char s_last_error_message[192] = {0};
+static char s_effective_api_url[LLM_API_URL_MAX_LEN + LLM_API_PATH_MAX_LEN] = {0};
+static char s_effective_api_path[LLM_API_PATH_MAX_LEN] = {0};
 
 static void llm_log_payload(const char *label, const char *payload)
 {
@@ -122,6 +132,86 @@ static void llm_record_last_error(int status, const char *raw_body)
     }
 }
 
+static void llm_clear_custom_endpoint(void)
+{
+    s_api_endpoint[0] = '\0';
+    s_api_host[0] = '\0';
+    s_api_path[0] = '\0';
+    s_api_port = 443;
+}
+
+static bool llm_set_custom_endpoint(const char *endpoint)
+{
+    llm_clear_custom_endpoint();
+
+    if (!endpoint || endpoint[0] == '\0') {
+        return false;
+    }
+
+    const char *rest = NULL;
+    if (strncmp(endpoint, "https://", 8) == 0) {
+        rest = endpoint + 8;
+        s_api_port = 443;
+    } else if (strncmp(endpoint, "http://", 7) == 0) {
+        rest = endpoint + 7;
+        s_api_port = 80;
+    } else {
+        ESP_LOGW(TAG, "Unsupported API endpoint scheme: %s", endpoint);
+        return false;
+    }
+
+    const char *slash = strchr(rest, '/');
+    size_t host_len = slash ? (size_t)(slash - rest) : strlen(rest);
+    if (host_len == 0 || host_len >= sizeof(s_api_host)) {
+        ESP_LOGW(TAG, "Invalid API endpoint host: %s", endpoint);
+        llm_clear_custom_endpoint();
+        return false;
+    }
+
+    char hostport[LLM_API_HOST_MAX_LEN] = {0};
+    memcpy(hostport, rest, host_len);
+    hostport[host_len] = '\0';
+
+    char *port_sep = strrchr(hostport, ':');
+    if (port_sep) {
+        *port_sep = '\0';
+        int port = atoi(port_sep + 1);
+        if (port <= 0 || port > 65535) {
+            ESP_LOGW(TAG, "Invalid API endpoint port: %s", endpoint);
+            llm_clear_custom_endpoint();
+            return false;
+        }
+        s_api_port = (uint16_t)port;
+    }
+
+    if (hostport[0] == '\0') {
+        ESP_LOGW(TAG, "Invalid API endpoint host: %s", endpoint);
+        llm_clear_custom_endpoint();
+        return false;
+    }
+
+    safe_copy(s_api_host, sizeof(s_api_host), hostport);
+    safe_copy(s_api_path, sizeof(s_api_path), slash ? slash : "/");
+    safe_copy(s_api_endpoint, sizeof(s_api_endpoint), endpoint);
+    return true;
+}
+
+static bool llm_error_is_auth(int status, const char *msg)
+{
+    if (status == 401 || status == 403) {
+        return true;
+    }
+    if (!msg || msg[0] == '\0') {
+        return false;
+    }
+    return strstr(msg, "invalid x-api-key") ||
+           strstr(msg, "authentication_error") ||
+           strstr(msg, "invalid_api_key") ||
+           strstr(msg, "Incorrect API key") ||
+           strstr(msg, "Unauthorized") ||
+           strstr(msg, "unauthorized");
+}
+
 /* ── Response buffer ──────────────────────────────────────────── */
 
 typedef struct {
@@ -180,19 +270,125 @@ static bool provider_is_openai(void)
     return strcmp(s_provider, "openai") == 0;
 }
 
+static bool str_ends_with(const char *s, const char *suffix)
+{
+    if (!s || !suffix) {
+        return false;
+    }
+    size_t slen = strlen(s);
+    size_t tlen = strlen(suffix);
+    if (tlen > slen) {
+        return false;
+    }
+    return strcmp(s + slen - tlen, suffix) == 0;
+}
+
+static const char *llm_default_request_path(void)
+{
+    return provider_is_openai() ? "/v1/chat/completions" : "/v1/messages";
+}
+
+static void llm_join_path_suffix(char *dst, size_t dst_size,
+                                 const char *base_path, const char *suffix)
+{
+    if (!dst || dst_size == 0) {
+        return;
+    }
+    dst[0] = '\0';
+    if (!base_path || !base_path[0]) {
+        safe_copy(dst, dst_size, suffix ? suffix : "");
+        return;
+    }
+
+    safe_copy(dst, dst_size, base_path);
+    size_t len = strlen(dst);
+    if (len > 0 && dst[len - 1] == '/') {
+        dst[len - 1] = '\0';
+        len--;
+    }
+    if (suffix && suffix[0]) {
+        strncat(dst, "/", dst_size - strlen(dst) - 1);
+        strncat(dst, suffix[0] == '/' ? (suffix + 1) : suffix,
+                dst_size - strlen(dst) - 1);
+    }
+}
+
+static const char *llm_build_effective_api_path(void)
+{
+    const char *default_path = llm_default_request_path();
+    if (!s_api_path[0]) {
+        safe_copy(s_effective_api_path, sizeof(s_effective_api_path), default_path);
+        return s_effective_api_path;
+    }
+
+    if (provider_is_openai()) {
+        if (str_ends_with(s_api_path, "/v1/chat/completions")) {
+            safe_copy(s_effective_api_path, sizeof(s_effective_api_path), s_api_path);
+            return s_effective_api_path;
+        }
+        if (str_ends_with(s_api_path, "/v1")) {
+            llm_join_path_suffix(s_effective_api_path, sizeof(s_effective_api_path),
+                                 s_api_path, "chat/completions");
+            return s_effective_api_path;
+        }
+        llm_join_path_suffix(s_effective_api_path, sizeof(s_effective_api_path),
+                             s_api_path, "v1/chat/completions");
+        return s_effective_api_path;
+    }
+
+    if (str_ends_with(s_api_path, "/v1/messages")) {
+        safe_copy(s_effective_api_path, sizeof(s_effective_api_path), s_api_path);
+        return s_effective_api_path;
+    }
+    llm_join_path_suffix(s_effective_api_path, sizeof(s_effective_api_path),
+                         s_api_path, "v1/messages");
+    return s_effective_api_path;
+}
+
 static const char *llm_api_url(void)
 {
+    if (s_api_endpoint[0]) {
+        const char *effective_path = llm_build_effective_api_path();
+        const char *scheme_sep = strstr(s_api_endpoint, "://");
+        const char *path_start = scheme_sep ? strchr(scheme_sep + 3, '/') : NULL;
+        if (!path_start) {
+            snprintf(s_effective_api_url, sizeof(s_effective_api_url),
+                     "%s%s", s_api_endpoint, effective_path);
+            return s_effective_api_url;
+        }
+
+        size_t base_len = (size_t)(path_start - s_api_endpoint);
+        if (base_len >= sizeof(s_effective_api_url)) {
+            base_len = sizeof(s_effective_api_url) - 1;
+        }
+        memcpy(s_effective_api_url, s_api_endpoint, base_len);
+        s_effective_api_url[base_len] = '\0';
+        strncat(s_effective_api_url, effective_path,
+                sizeof(s_effective_api_url) - strlen(s_effective_api_url) - 1);
+        return s_effective_api_url;
+    }
     return provider_is_openai() ? MIMI_OPENAI_API_URL : MIMI_LLM_API_URL;
 }
 
 static const char *llm_api_host(void)
 {
+    if (s_api_host[0]) {
+        return s_api_host;
+    }
     return provider_is_openai() ? "api.openai.com" : "api.anthropic.com";
 }
 
 static const char *llm_api_path(void)
 {
-    return provider_is_openai() ? "/v1/chat/completions" : "/v1/messages";
+    if (s_api_endpoint[0]) {
+        return llm_build_effective_api_path();
+    }
+    return llm_default_request_path();
+}
+
+static uint16_t llm_api_port(void)
+{
+    return s_api_port;
 }
 
 /* ── Init ─────────────────────────────────────────────────────── */
@@ -211,6 +407,7 @@ esp_err_t llm_proxy_init(void)
     if (MIMI_SECRET_MODEL_PROVIDER[0] != '\0') {
         safe_copy(s_provider, sizeof(s_provider), MIMI_SECRET_MODEL_PROVIDER);
     }
+    llm_set_custom_endpoint(MIMI_SECRET_API_ENDPOINT);
 
     /* NVS overrides take highest priority (set via CLI) */
     nvs_handle_t nvs;
@@ -230,13 +427,21 @@ esp_err_t llm_proxy_init(void)
         if (nvs_get_str(nvs, MIMI_NVS_KEY_PROVIDER, provider_tmp, &len) == ESP_OK && provider_tmp[0]) {
             safe_copy(s_provider, sizeof(s_provider), provider_tmp);
         }
+        char endpoint_tmp[LLM_API_URL_MAX_LEN] = {0};
+        len = sizeof(endpoint_tmp);
+        if (nvs_get_str(nvs, MIMI_NVS_KEY_ENDPOINT, endpoint_tmp, &len) == ESP_OK && endpoint_tmp[0]) {
+            llm_set_custom_endpoint(endpoint_tmp);
+        }
         nvs_close(nvs);
     }
 
     if (s_api_key[0]) {
-        ESP_LOGI(TAG, "LLM proxy initialized (provider: %s, model: %s)", s_provider, s_model);
+        ESP_LOGI(TAG, "LLM proxy initialized (provider: %s, model: %s, endpoint: %s)",
+                 s_provider, s_model, llm_api_url());
+        status_led_set_llm_state(STATUS_LED_SERVICE_UNKNOWN);
     } else {
-        ESP_LOGI(TAG, "No API key configured. Use CLI: set_api_key <KEY>");
+        ESP_LOGW(TAG, "No API key. Use CLI: set_api_key <KEY>");
+        status_led_set_llm_state(STATUS_LED_SERVICE_AUTH_ERROR);
     }
     return ESP_OK;
 }
@@ -282,7 +487,7 @@ static esp_err_t llm_http_direct(const char *post_data, resp_buf_t *rb, int *out
 
 static esp_err_t llm_http_via_proxy(const char *post_data, resp_buf_t *rb, int *out_status)
 {
-    proxy_conn_t *conn = proxy_conn_open(llm_api_host(), 443, 30000);
+    proxy_conn_t *conn = proxy_conn_open(llm_api_host(), llm_api_port(), 30000);
     if (!conn) return ESP_ERR_HTTP_CONNECT;
 
     int body_len = strlen(post_data);
@@ -619,6 +824,7 @@ esp_err_t llm_chat(const char *system_prompt, const char *messages_json,
     llm_clear_last_error();
 
     if (s_api_key[0] == '\0') {
+        status_led_set_llm_state(STATUS_LED_SERVICE_AUTH_ERROR);
         snprintf(response_buf, buf_size, "Error: No API key configured");
         return ESP_ERR_INVALID_STATE;
     }
@@ -683,6 +889,7 @@ esp_err_t llm_chat(const char *system_prompt, const char *messages_json,
 
     if (err != ESP_OK) {
         llm_record_last_error(0, esp_err_to_name(err));
+        status_led_set_llm_state(STATUS_LED_SERVICE_ERROR);
         ESP_LOGE(TAG, "HTTP request failed: %s", esp_err_to_name(err));
         llm_log_payload("LLM partial response", rb.data);
         resp_buf_free(&rb);
@@ -695,6 +902,9 @@ esp_err_t llm_chat(const char *system_prompt, const char *messages_json,
 
     if (status != 200) {
         llm_record_last_error(status, rb.data);
+        status_led_set_llm_state(llm_error_is_auth(status, s_last_error_message)
+                                     ? STATUS_LED_SERVICE_AUTH_ERROR
+                                     : STATUS_LED_SERVICE_ERROR);
         ESP_LOGE(TAG, "API returned status %d", status);
         snprintf(response_buf, buf_size, "API error (HTTP %d): %.200s",
                  status, rb.data ? rb.data : "");
@@ -723,6 +933,7 @@ esp_err_t llm_chat(const char *system_prompt, const char *messages_json,
     } else {
         ESP_LOGI(TAG, "LLM response: %d bytes", (int)strlen(response_buf));
     }
+    status_led_set_llm_state(STATUS_LED_SERVICE_OK);
 
     return ESP_OK;
 }
@@ -750,7 +961,10 @@ esp_err_t llm_chat_tools(const char *system_prompt,
     memset(resp, 0, sizeof(*resp));
     llm_clear_last_error();
 
-    if (s_api_key[0] == '\0') return ESP_ERR_INVALID_STATE;
+    if (s_api_key[0] == '\0') {
+        status_led_set_llm_state(STATUS_LED_SERVICE_AUTH_ERROR);
+        return ESP_ERR_INVALID_STATE;
+    }
 
     /* Build request body (non-streaming) */
     cJSON *body = cJSON_CreateObject();
@@ -809,6 +1023,7 @@ esp_err_t llm_chat_tools(const char *system_prompt,
 
     if (err != ESP_OK) {
         llm_record_last_error(0, esp_err_to_name(err));
+        status_led_set_llm_state(STATUS_LED_SERVICE_ERROR);
         ESP_LOGE(TAG, "HTTP request failed: %s", esp_err_to_name(err));
         llm_log_payload("LLM tools partial response", rb.data);
         resp_buf_free(&rb);
@@ -819,6 +1034,9 @@ esp_err_t llm_chat_tools(const char *system_prompt,
 
     if (status != 200) {
         llm_record_last_error(status, rb.data);
+        status_led_set_llm_state(llm_error_is_auth(status, s_last_error_message)
+                                     ? STATUS_LED_SERVICE_AUTH_ERROR
+                                     : STATUS_LED_SERVICE_ERROR);
         ESP_LOGE(TAG, "API error %d: %.500s", status, rb.data ? rb.data : "");
         resp_buf_free(&rb);
         return ESP_FAIL;
@@ -963,6 +1181,7 @@ esp_err_t llm_chat_tools(const char *system_prompt,
     ESP_LOGI(TAG, "Response: %d bytes text, %d tool calls, stop=%s",
              (int)resp->text_len, resp->call_count,
              resp->tool_use ? "tool_use" : "end_turn");
+    status_led_set_llm_state(STATUS_LED_SERVICE_OK);
 
     return ESP_OK;
 }
@@ -988,6 +1207,9 @@ esp_err_t llm_set_api_key(const char *api_key)
     nvs_close(nvs);
 
     safe_copy(s_api_key, sizeof(s_api_key), api_key);
+    status_led_set_llm_state(api_key && api_key[0]
+                                 ? STATUS_LED_SERVICE_UNKNOWN
+                                 : STATUS_LED_SERVICE_AUTH_ERROR);
     ESP_LOGI(TAG, "API key saved");
     return ESP_OK;
 }
@@ -1001,7 +1223,47 @@ esp_err_t llm_set_model(const char *model)
     nvs_close(nvs);
 
     safe_copy(s_model, sizeof(s_model), model);
+    status_led_set_llm_state(STATUS_LED_SERVICE_UNKNOWN);
     ESP_LOGI(TAG, "Model set to: %s", s_model);
+    return ESP_OK;
+}
+
+esp_err_t llm_set_api_endpoint(const char *endpoint)
+{
+    if (!endpoint || endpoint[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!llm_set_custom_endpoint(endpoint)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    nvs_handle_t nvs;
+    ESP_ERROR_CHECK(nvs_open(MIMI_NVS_LLM, NVS_READWRITE, &nvs));
+    ESP_ERROR_CHECK(nvs_set_str(nvs, MIMI_NVS_KEY_ENDPOINT, endpoint));
+    ESP_ERROR_CHECK(nvs_commit(nvs));
+    nvs_close(nvs);
+
+    status_led_set_llm_state(STATUS_LED_SERVICE_UNKNOWN);
+    ESP_LOGI(TAG, "API endpoint set to: %s", llm_api_url());
+    return ESP_OK;
+}
+
+esp_err_t llm_clear_api_endpoint(void)
+{
+    nvs_handle_t nvs;
+    ESP_ERROR_CHECK(nvs_open(MIMI_NVS_LLM, NVS_READWRITE, &nvs));
+    esp_err_t err = nvs_erase_key(nvs, MIMI_NVS_KEY_ENDPOINT);
+    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
+        nvs_close(nvs);
+        return err;
+    }
+    ESP_ERROR_CHECK(nvs_commit(nvs));
+    nvs_close(nvs);
+
+    llm_clear_custom_endpoint();
+    llm_set_custom_endpoint(MIMI_SECRET_API_ENDPOINT);
+    status_led_set_llm_state(STATUS_LED_SERVICE_UNKNOWN);
+    ESP_LOGI(TAG, "API endpoint reset to: %s", llm_api_url());
     return ESP_OK;
 }
 
@@ -1014,6 +1276,7 @@ esp_err_t llm_set_provider(const char *provider)
     nvs_close(nvs);
 
     safe_copy(s_provider, sizeof(s_provider), provider);
+    status_led_set_llm_state(STATUS_LED_SERVICE_UNKNOWN);
     ESP_LOGI(TAG, "Provider set to: %s", s_provider);
     return ESP_OK;
 }

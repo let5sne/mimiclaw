@@ -32,14 +32,23 @@ static const int ST7789_SPI_MODE = 3;
 static const int ST7789_FILL_LINES = 20;
 static const bool ST7789_MIRROR_X = false;
 static const bool ST7789_MIRROR_Y = false;
+static const int ST7789_WRAP_ASCII_SCALE = 1;
+static const int ST7789_WRAP_ASCII_W = 8;
+static const int ST7789_WRAP_CJK_CELL_W = 16;
+static const int ST7789_WRAP_CJK_CELL_H = 16;
+static const int ST7789_WRAP_LINE_HEIGHT = 18;
 
 static void st7789_fill_rect_internal(int x_start, int y_start, int x_end, int y_end, uint16_t color);
 static void st7789_draw_glyph_to_buffer(char c, int scale, uint16_t fg, uint16_t bg,
                                         uint16_t *dst, int dst_w, int dst_x);
 static uint32_t st7789_utf8_decode(const char **pp);
 static bool st7789_is_cjk(uint32_t cp);
+static int st7789_glyph_width(uint32_t cp, int ascii_scale, int cjk_cell_w);
 static void st7789_draw_cjk_to_buffer(const uint8_t *glyph, int target_w, int target_h,
                                       uint16_t fg, uint16_t bg, uint16_t *dst, int dst_w, int dst_x);
+static int st7789_count_wrapped_lines(const char *text, int max_width);
+static int st7789_wrapped_lines_per_page(int max_height);
+static int st7789_advance_width(uint32_t cp);
 
 static bool st7789_color_trans_done(esp_lcd_panel_io_handle_t panel_io,
                                     esp_lcd_panel_io_event_data_t *edata,
@@ -432,6 +441,17 @@ static bool st7789_is_cjk(uint32_t cp)
            (cp >= 0xFF00 && cp <= 0xFFEF);
 }
 
+static int st7789_glyph_width(uint32_t cp, int ascii_scale, int cjk_cell_w)
+{
+    if (cp == '\t') {
+        return 4 * 8 * ascii_scale;
+    }
+    if (st7789_is_cjk(cp)) {
+        return cjk_cell_w;
+    }
+    return 8 * ascii_scale;
+}
+
 /* 把 16x16 单色 CJK 字形映射到任意目标尺寸并写入目标缓冲。 */
 static void st7789_draw_cjk_to_buffer(const uint8_t *glyph, int target_w, int target_h,
                                       uint16_t fg, uint16_t bg, uint16_t *dst, int dst_w, int dst_x)
@@ -471,6 +491,17 @@ static void st7789_draw_ascii_char(int x, int y, char c, int scale,
     }
     st7789_draw_glyph_to_buffer(c, scale, fg, bg, s_fill_buf, cw, 0);
     st7789_draw_bitmap_sync(x, y, x + cw, y + ch, s_fill_buf);
+}
+
+static void st7789_draw_ascii_char_centered(int x, int y, char c, int scale, int line_height,
+                                            uint16_t fg, uint16_t bg)
+{
+    const int glyph_h = 8 * scale;
+    int draw_y = y;
+    if (line_height > glyph_h) {
+        draw_y += (line_height - glyph_h) / 2;
+    }
+    st7789_draw_ascii_char(x, draw_y, c, scale, fg, bg);
 }
 
 /* 绘制单个 CJK 码点（使用 16x16 字库，按目标单元尺寸缩放）。 */
@@ -594,6 +625,163 @@ void st7789_draw_text(int x, int y, const char *text, int scale,
 
         cx += cell_w;
     }
+}
+
+void st7789_draw_text_wrapped(int x, int y, const char *text,
+                              int max_width, int max_height,
+                              uint16_t fg, uint16_t bg)
+{
+    st7789_draw_text_wrapped_page(x, y, text, max_width, max_height, 0, fg, bg);
+}
+
+int st7789_get_text_page_count(const char *text, int max_width, int max_height)
+{
+    if (!text || !text[0]) return 0;
+
+    const int lines = st7789_count_wrapped_lines(text, max_width);
+    const int lines_per_page = st7789_wrapped_lines_per_page(max_height);
+    if (lines <= 0 || lines_per_page <= 0) return 0;
+    return (lines + lines_per_page - 1) / lines_per_page;
+}
+
+void st7789_draw_text_wrapped_page(int x, int y, const char *text,
+                                   int max_width, int max_height, int page_index,
+                                   uint16_t fg, uint16_t bg)
+{
+    if (!text || !text[0] || max_width <= 0 || max_height <= 0) return;
+
+    const int ascii_scale = ST7789_WRAP_ASCII_SCALE;
+    const int cjk_cell_w = ST7789_WRAP_CJK_CELL_W;
+    const int cjk_cell_h = ST7789_WRAP_CJK_CELL_H;
+    const int line_height = ST7789_WRAP_LINE_HEIGHT;
+    const int lines_per_page = st7789_wrapped_lines_per_page(max_height);
+    if (lines_per_page <= 0) return;
+
+    const int total_pages = st7789_get_text_page_count(text, max_width, max_height);
+    if (total_pages <= 0) return;
+    if (page_index < 0) page_index = 0;
+    if (page_index >= total_pages) page_index = total_pages - 1;
+
+    const int start_line = page_index * lines_per_page;
+    const int end_line = start_line + lines_per_page;
+    const int max_x = x + max_width;
+
+    int cx = x;
+    int current_line = 0;
+    const char *p = text;
+
+    while (*p) {
+        if (current_line >= end_line) break;
+
+        if (*p == '\n') {
+            ++p;
+            cx = x;
+            ++current_line;
+            continue;
+        }
+
+        uint32_t cp = st7789_utf8_decode(&p);
+        if (cp == 0) break;
+        if (cp == '\r') continue;
+
+        const int glyph_w = st7789_advance_width(cp);
+
+        if (cx > x && cx + glyph_w > max_x) {
+            cx = x;
+            ++current_line;
+            if (current_line >= end_line) break;
+            if (cp == ' ') continue;
+        }
+
+        if (current_line >= start_line) {
+            const int draw_y = y + (current_line - start_line) * line_height;
+            if (st7789_is_cjk(cp)) {
+                st7789_draw_cjk_char(cx, draw_y + (line_height - cjk_cell_h) / 2, cp,
+                                     cjk_cell_w, cjk_cell_h, fg, bg);
+            } else if (cp <= 0x7F) {
+                char draw_ch = (cp == '\t') ? ' ' : (char)cp;
+                st7789_draw_ascii_char_centered(cx, draw_y, draw_ch, ascii_scale, line_height, fg, bg);
+            } else {
+                st7789_draw_ascii_char_centered(cx, draw_y, '?', ascii_scale, line_height, fg, bg);
+            }
+        }
+
+        cx += glyph_w;
+        if (cx >= max_x) {
+            const char *lookahead = p;
+            while (*lookahead == '\r') {
+                ++lookahead;
+            }
+            if (*lookahead != '\0') {
+                cx = x;
+                ++current_line;
+            }
+        }
+    }
+}
+
+static int st7789_count_wrapped_lines(const char *text, int max_width)
+{
+    if (!text || !text[0] || max_width <= 0) return 0;
+
+    int lines = 1;
+    int cx = 0;
+    const char *p = text;
+
+    while (*p) {
+        if (*p == '\n') {
+            ++p;
+            cx = 0;
+            ++lines;
+            continue;
+        }
+
+        const uint32_t cp = st7789_utf8_decode(&p);
+        if (cp == 0) break;
+        if (cp == '\r') continue;
+
+        const int glyph_w = st7789_advance_width(cp);
+        if (cx > 0 && cx + glyph_w > max_width) {
+            cx = 0;
+            ++lines;
+            if (cp == ' ') continue;
+        }
+
+        cx += glyph_w;
+        if (cx >= max_width) {
+            const char *lookahead = p;
+            while (*lookahead == '\r') {
+                ++lookahead;
+            }
+            if (*lookahead != '\0') {
+                cx = 0;
+                ++lines;
+            }
+        }
+    }
+
+    return lines;
+}
+
+static int st7789_wrapped_lines_per_page(int max_height)
+{
+    if (max_height <= 0) return 0;
+    int lines_per_page = max_height / ST7789_WRAP_LINE_HEIGHT;
+    if (lines_per_page < 1) lines_per_page = 1;
+    return lines_per_page;
+}
+
+static int st7789_advance_width(uint32_t cp)
+{
+    if (cp == '\t') {
+        return 4 * ST7789_WRAP_ASCII_W;
+    }
+
+    int glyph_w = st7789_glyph_width(cp, ST7789_WRAP_ASCII_SCALE, ST7789_WRAP_CJK_CELL_W);
+    if (glyph_w <= 0) {
+        glyph_w = ST7789_WRAP_ASCII_W;
+    }
+    return glyph_w;
 }
 
 void st7789_render_status(display_status_t status)

@@ -2,6 +2,7 @@
 #include "mimi_config.h"
 #include "tools/tool_web_search.h"
 #include "tools/tool_get_time.h"
+#include "tools/tool_device_info.h"
 #include "tools/tool_files.h"
 #include "tools/tool_memory.h"
 #include "tools/tool_audio.h"
@@ -83,6 +84,18 @@ esp_err_t tool_registry_init(void)
     };
     register_tool(&gt);
 
+    /* Register get_device_info */
+    mimi_tool_t gdi = {
+        .name = "get_device_info",
+        .description = "Get real runtime hardware information for this device, including chip model, CPU frequency, flash size, PSRAM size, free memory, and key GPIO assignments. Use this instead of guessing hardware specs.",
+        .input_schema_json =
+            "{\"type\":\"object\","
+            "\"properties\":{},"
+            "\"required\":[]}",
+        .execute = tool_get_device_info_execute,
+    };
+    register_tool(&gdi);
+
     /* Register read_file */
     mimi_tool_t rf = {
         .name = "read_file",
@@ -98,10 +111,10 @@ esp_err_t tool_registry_init(void)
     /* Register write_file */
     mimi_tool_t wf = {
         .name = "write_file",
-        .description = "Write or overwrite a file on SPIFFS storage. Path must be under /spiffs/memory/ (other dirs only if build-time switches are enabled).",
+        .description = "Write or overwrite a file on SPIFFS storage. Path must be under /spiffs/memory/ or /spiffs/skills/ by default (other dirs only if build-time switches are enabled).",
         .input_schema_json =
             "{\"type\":\"object\","
-            "\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Absolute path under /spiffs/memory/ by default\"},"
+            "\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Absolute path under /spiffs/memory/ or /spiffs/skills/ by default\"},"
             "\"content\":{\"type\":\"string\",\"description\":\"File content to write\"}},"
             "\"required\":[\"path\",\"content\"]}",
         .execute = tool_write_file_execute,
@@ -111,10 +124,10 @@ esp_err_t tool_registry_init(void)
     /* Register edit_file */
     mimi_tool_t ef = {
         .name = "edit_file",
-        .description = "Find and replace text in a file on SPIFFS. Path must be under /spiffs/memory/ by default. Replaces first occurrence of old_string with new_string.",
+        .description = "Find and replace text in a file on SPIFFS. Path must be under /spiffs/memory/ or /spiffs/skills/ by default. Replaces first occurrence of old_string with new_string.",
         .input_schema_json =
             "{\"type\":\"object\","
-            "\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Absolute path under /spiffs/memory/ by default\"},"
+            "\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Absolute path under /spiffs/memory/ or /spiffs/skills/ by default\"},"
             "\"old_string\":{\"type\":\"string\",\"description\":\"Text to find\"},"
             "\"new_string\":{\"type\":\"string\",\"description\":\"Replacement text\"}},"
             "\"required\":[\"path\",\"old_string\",\"new_string\"]}",
@@ -194,8 +207,8 @@ esp_err_t tool_registry_init(void)
             "\"interval_s\":{\"type\":\"integer\",\"description\":\"Interval in seconds (required for 'every')\"},"
             "\"at_epoch\":{\"type\":\"integer\",\"description\":\"Unix timestamp to fire at (required for 'at')\"},"
             "\"message\":{\"type\":\"string\",\"description\":\"Message to inject when the job fires, triggering an agent turn\"},"
-            "\"channel\":{\"type\":\"string\",\"description\":\"Optional reply channel (e.g. 'telegram'). If omitted, current turn channel is used when available\"},"
-            "\"chat_id\":{\"type\":\"string\",\"description\":\"Optional reply chat_id. Required when channel='telegram'. If omitted during a Telegram turn, current chat_id is used\"}"
+            "\"channel\":{\"type\":\"string\",\"description\":\"Optional reply channel (e.g. 'telegram' or 'feishu'). If omitted, current turn channel is used when available\"},"
+            "\"chat_id\":{\"type\":\"string\",\"description\":\"Optional reply chat_id. Required when channel is 'telegram' or 'feishu'. If omitted during a chat turn, current chat_id is used\"}"
             "},"
             "\"required\":[\"name\",\"schedule_type\",\"message\"]}",
         .execute = tool_cron_add_execute,

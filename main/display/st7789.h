@@ -22,6 +22,13 @@ void st7789_draw_status_line(const char *icon, uint16_t icon_color,
                              uint16_t bg_color);
 void st7789_draw_text(int x, int y, const char *text, int scale,
                       uint16_t fg, uint16_t bg);
+void st7789_draw_text_wrapped(int x, int y, const char *text,
+                              int max_width, int max_height,
+                              uint16_t fg, uint16_t bg);
+int st7789_get_text_page_count(const char *text, int max_width, int max_height);
+void st7789_draw_text_wrapped_page(int x, int y, const char *text,
+                                   int max_width, int max_height, int page_index,
+                                   uint16_t fg, uint16_t bg);
 
 #ifdef __cplusplus
 }

@@ -46,7 +46,7 @@ typedef struct {
     int64_t due_ms;
     TimerHandle_t timer;
     char channel[16];
-    char chat_id[32];
+    char chat_id[MIMI_CHAT_ID_MAX_LEN];
     char note[96];
 } alarm_slot_t;
 
@@ -455,7 +455,7 @@ static void alarm_timer_cb(TimerHandle_t timer)
     if (!slot) return;
 
     char channel[16] = {0};
-    char chat_id[32] = {0};
+    char chat_id[MIMI_CHAT_ID_MAX_LEN] = {0};
     char note[96] = {0};
     uint32_t alarm_id = 0;
 

@@ -3,9 +3,11 @@
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "mimi_config.h"
 
 /* Channel identifiers */
 #define MIMI_CHAN_TELEGRAM   "telegram"
+#define MIMI_CHAN_FEISHU     "feishu"
 #define MIMI_CHAN_WEBSOCKET  "websocket"
 #define MIMI_CHAN_CLI        "cli"
 #define MIMI_CHAN_VOICE      "voice"
@@ -14,7 +16,7 @@
 /* Message types on the bus */
 typedef struct {
     char channel[16];       /* "telegram", "websocket", "cli" */
-    char chat_id[32];       /* Telegram chat_id or WS client id */
+    char chat_id[MIMI_CHAT_ID_MAX_LEN]; /* Telegram/Feishu chat_id 或 WS client id */
     char media_type[16];    /* "text"/"voice"/"photo"/"document" */
     char file_id[96];       /* Source media file id (if any) */
     char file_path[128];    /* Source media path (if any) */

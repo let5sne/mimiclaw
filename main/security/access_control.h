@@ -9,9 +9,14 @@
 esp_err_t access_control_init(void);
 
 /**
- * Telegram allowlist 校验。
+ * 通用发送者 allowlist 校验。
  * - allowlist 为空或为 "*" 时，默认放行。
  * - 否则 sender_id 必须命中逗号分隔列表。
+ */
+bool access_control_is_sender_allowed(const char *sender_id);
+
+/**
+ * Telegram allowlist 校验。
  */
 bool access_control_is_telegram_allowed(const char *sender_id);
 
@@ -38,4 +43,3 @@ esp_err_t access_control_set_allow_from(const char *allow_from);
 esp_err_t access_control_clear_allow_from(void);
 esp_err_t access_control_set_ws_token(const char *token);
 esp_err_t access_control_clear_ws_token(void);
-

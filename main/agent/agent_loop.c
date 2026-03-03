@@ -208,8 +208,8 @@ static void append_turn_context_prompt(char *prompt, size_t size, const mimi_msg
         "\n## Current Turn Context\n"
         "- source_channel: %s\n"
         "- source_chat_id: %s\n"
-        "- If using cron_add for Telegram in this turn, set channel='telegram' and chat_id to source_chat_id.\n"
-        "- Never use chat_id 'cron' for Telegram messages.\n",
+        "- If using cron_add for chat delivery in this turn, set channel to 'telegram' or 'feishu' and chat_id to source_chat_id.\n"
+        "- Never use chat_id 'cron' for Telegram or Feishu messages.\n",
         msg->channel[0] ? msg->channel : "(unknown)",
         msg->chat_id[0] ? msg->chat_id : "(empty)");
 
@@ -825,8 +825,8 @@ static void agent_loop_task(void *arg)
         if (err == ESP_OK && control_result.handled) {
             TickType_t outbound_stage_start = xTaskGetTickCount();
             if (control_result.response_text[0]) {
-                session_append(msg.chat_id, "user", msg.content);
-                session_append(msg.chat_id, "assistant", control_result.response_text);
+                session_append_ex(msg.channel, msg.chat_id, "user", msg.content);
+                session_append_ex(msg.channel, msg.chat_id, "assistant", control_result.response_text);
 
                 mimi_msg_t out = {0};
                 strncpy(out.channel, msg.channel, sizeof(out.channel) - 1);
@@ -876,8 +876,8 @@ static void agent_loop_task(void *arg)
         ESP_LOGI(TAG, "LLM turn context: channel=%s chat_id=%s", msg.channel, msg.chat_id);
 
         /* 2. Load session history into cJSON array */
-        session_get_history_json(msg.chat_id, history_json,
-                                 MIMI_LLM_STREAM_BUF_SIZE, MIMI_AGENT_MAX_HISTORY);
+        session_get_history_json_ex(msg.channel, msg.chat_id, history_json,
+                                    MIMI_LLM_STREAM_BUF_SIZE, MIMI_AGENT_MAX_HISTORY);
 
         cJSON *messages = cJSON_Parse(history_json);
         if (!messages) messages = cJSON_CreateArray();
@@ -1028,8 +1028,8 @@ static void agent_loop_task(void *arg)
         TickType_t outbound_stage_start = xTaskGetTickCount();
         if (final_text && final_text[0]) {
             /* Save to session (only user text + final assistant text) */
-            session_append(msg.chat_id, "user", user_text_for_llm);
-            session_append(msg.chat_id, "assistant", final_text);
+            session_append_ex(msg.channel, msg.chat_id, "user", user_text_for_llm);
+            session_append_ex(msg.channel, msg.chat_id, "assistant", final_text);
 
             /* Push response to outbound */
             mimi_msg_t out = {0};

@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include "esp_err.h"
+#include "mimi_config.h"
 #include "bus/message_bus.h"
 
 #ifdef __cplusplus
@@ -32,7 +33,7 @@ typedef struct {
     char capability[24];
     char request_id[40];
     char source_channel[16];
-    char source_chat_id[32];
+    char source_chat_id[MIMI_CHAT_ID_MAX_LEN];
     uint32_t delay_ms;
     uint32_t alarm_id;
     char note[96];
@@ -69,7 +70,7 @@ typedef struct {
     uint32_t alarm_id;
     uint32_t remaining_ms;
     char channel[16];
-    char chat_id[32];
+    char chat_id[MIMI_CHAT_ID_MAX_LEN];
     char note[96];
 } control_alarm_info_t;
 

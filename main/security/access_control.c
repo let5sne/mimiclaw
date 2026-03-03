@@ -139,13 +139,18 @@ esp_err_t access_control_init(void)
     return ESP_OK;
 }
 
-bool access_control_is_telegram_allowed(const char *sender_id)
+bool access_control_is_sender_allowed(const char *sender_id)
 {
     char allow_from[ALLOW_FROM_MAX_LEN];
     lock();
     safe_copy(allow_from, sizeof(allow_from), s_allow_from);
     unlock();
     return allow_from_match(allow_from, sender_id);
+}
+
+bool access_control_is_telegram_allowed(const char *sender_id)
+{
+    return access_control_is_sender_allowed(sender_id);
 }
 
 bool access_control_ws_token_required(void)

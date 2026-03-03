@@ -2,6 +2,7 @@
 #include "mimi_config.h"
 #include "wifi/wifi_manager.h"
 #include "telegram/telegram_bot.h"
+#include "feishu/feishu_bot.h"
 #include "llm/llm_proxy.h"
 #include "agent/agent_loop.h"
 #include "bus/message_bus.h"
@@ -72,6 +73,32 @@ static struct {
     struct arg_end *end;
 } tg_token_args;
 
+static struct {
+    struct arg_str *app_id;
+    struct arg_str *app_secret;
+    struct arg_end *end;
+} feishu_app_args;
+
+static struct {
+    struct arg_str *token;
+    struct arg_end *end;
+} feishu_verify_args;
+
+static struct {
+    struct arg_str *key;
+    struct arg_end *end;
+} feishu_encrypt_args;
+
+static struct {
+    struct arg_str *base_url;
+    struct arg_end *end;
+} feishu_openapi_args;
+
+static struct {
+    struct arg_str *mode;
+    struct arg_end *end;
+} feishu_mode_args;
+
 static int cmd_set_tg_token(int argc, char **argv)
 {
     int nerrors = arg_parse(argc, argv, (void **)&tg_token_args);
@@ -81,6 +108,157 @@ static int cmd_set_tg_token(int argc, char **argv)
     }
     telegram_set_token(tg_token_args.token->sval[0]);
     printf("Telegram bot token saved.\n");
+    return 0;
+}
+
+static int cmd_set_feishu_app(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&feishu_app_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, feishu_app_args.end, argv[0]);
+        return 1;
+    }
+
+    esp_err_t err = feishu_set_app_credentials(feishu_app_args.app_id->sval[0],
+                                               feishu_app_args.app_secret->sval[0]);
+    if (err != ESP_OK) {
+        printf("Failed to save Feishu app credentials: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("Feishu app credentials saved.\n");
+    return 0;
+}
+
+static int cmd_clear_feishu_app(int argc, char **argv)
+{
+    esp_err_t err = feishu_clear_app_credentials();
+    if (err != ESP_OK) {
+        printf("Failed to clear Feishu app credentials: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("Feishu app credentials cleared.\n");
+    return 0;
+}
+
+static int cmd_set_feishu_verify_token(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&feishu_verify_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, feishu_verify_args.end, argv[0]);
+        return 1;
+    }
+
+    esp_err_t err = feishu_set_verify_token(feishu_verify_args.token->sval[0]);
+    if (err != ESP_OK) {
+        printf("Failed to save Feishu verify token: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("Feishu verify token saved.\n");
+    return 0;
+}
+
+static int cmd_clear_feishu_verify_token(int argc, char **argv)
+{
+    esp_err_t err = feishu_clear_verify_token();
+    if (err != ESP_OK) {
+        printf("Failed to clear Feishu verify token: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("Feishu verify token cleared.\n");
+    return 0;
+}
+
+static int cmd_set_feishu_encrypt_key(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&feishu_encrypt_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, feishu_encrypt_args.end, argv[0]);
+        return 1;
+    }
+
+    esp_err_t err = feishu_set_encrypt_key(feishu_encrypt_args.key->sval[0]);
+    if (err != ESP_OK) {
+        printf("Failed to save Feishu encrypt key: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("Feishu encrypt key saved.\n");
+    return 0;
+}
+
+static int cmd_clear_feishu_encrypt_key(int argc, char **argv)
+{
+    esp_err_t err = feishu_clear_encrypt_key();
+    if (err != ESP_OK) {
+        printf("Failed to clear Feishu encrypt key: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("Feishu encrypt key cleared.\n");
+    return 0;
+}
+
+static int cmd_set_feishu_open_api_base(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&feishu_openapi_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, feishu_openapi_args.end, argv[0]);
+        return 1;
+    }
+
+    esp_err_t err = feishu_set_open_api_base(feishu_openapi_args.base_url->sval[0]);
+    if (err != ESP_OK) {
+        printf("Failed to save Feishu OpenAPI base: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("Feishu OpenAPI base saved.\n");
+    return 0;
+}
+
+static int cmd_clear_feishu_open_api_base(int argc, char **argv)
+{
+    esp_err_t err = feishu_clear_open_api_base();
+    if (err != ESP_OK) {
+        printf("Failed to clear Feishu OpenAPI base: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("Feishu OpenAPI base cleared.\n");
+    return 0;
+}
+
+static int cmd_set_feishu_receive_mode(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&feishu_mode_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, feishu_mode_args.end, argv[0]);
+        return 1;
+    }
+
+    esp_err_t err = feishu_set_receive_mode(feishu_mode_args.mode->sval[0]);
+    if (err != ESP_OK) {
+        printf("Failed to save Feishu receive mode: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("Feishu receive mode saved. If services are already running, reboot to fully apply.\n");
+    return 0;
+}
+
+static int cmd_clear_feishu_receive_mode(int argc, char **argv)
+{
+    esp_err_t err = feishu_clear_receive_mode();
+    if (err != ESP_OK) {
+        printf("Failed to clear Feishu receive mode: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("Feishu receive mode cleared. Reboot if you need to switch active ingress mode.\n");
     return 0;
 }
 
@@ -135,6 +313,40 @@ static int cmd_set_model_provider(int argc, char **argv)
     }
     llm_set_provider(provider_args.provider->sval[0]);
     printf("Model provider set.\n");
+    return 0;
+}
+
+/* --- set_api_endpoint command --- */
+static struct {
+    struct arg_str *endpoint;
+    struct arg_end *end;
+} api_endpoint_args;
+
+static int cmd_set_api_endpoint(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&api_endpoint_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, api_endpoint_args.end, argv[0]);
+        return 1;
+    }
+    esp_err_t err = llm_set_api_endpoint(api_endpoint_args.endpoint->sval[0]);
+    if (err != ESP_OK) {
+        printf("Invalid endpoint. Use full http(s) URL, e.g. https://example.com/v1/messages\n");
+        return 1;
+    }
+    printf("API endpoint set.\n");
+    return 0;
+}
+
+/* --- clear_api_endpoint command --- */
+static int cmd_clear_api_endpoint(int argc, char **argv)
+{
+    esp_err_t err = llm_clear_api_endpoint();
+    if (err != ESP_OK) {
+        printf("Failed to clear API endpoint: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+    printf("API endpoint cleared. Using build-time default.\n");
     return 0;
 }
 
@@ -899,7 +1111,7 @@ static int cmd_skill_search(int argc, char **argv)
 static void print_config(const char *label, const char *ns, const char *key,
                          const char *build_val, bool mask)
 {
-    char nvs_val[128] = {0};
+    char nvs_val[256] = {0};
     const char *source = "not set";
     const char *display = "(empty)";
 
@@ -933,9 +1145,16 @@ static int cmd_config_show(int argc, char **argv)
     print_config("WiFi SSID",  MIMI_NVS_WIFI,   MIMI_NVS_KEY_SSID,     MIMI_SECRET_WIFI_SSID,  false);
     print_config("WiFi Pass",  MIMI_NVS_WIFI,   MIMI_NVS_KEY_PASS,     MIMI_SECRET_WIFI_PASS,  true);
     print_config("TG Token",   MIMI_NVS_TG,     MIMI_NVS_KEY_TG_TOKEN, MIMI_SECRET_TG_TOKEN,   true);
+    print_config("Feishu App", MIMI_NVS_FEISHU, MIMI_NVS_KEY_FEISHU_APP_ID, MIMI_SECRET_FEISHU_APP_ID, false);
+    print_config("Feishu Sec", MIMI_NVS_FEISHU, MIMI_NVS_KEY_FEISHU_SECRET, MIMI_SECRET_FEISHU_APP_SECRET, true);
+    print_config("Feishu Vfy", MIMI_NVS_FEISHU, MIMI_NVS_KEY_FEISHU_VERIFY, MIMI_SECRET_FEISHU_VERIFY_TOKEN, true);
+    print_config("Feishu Enc", MIMI_NVS_FEISHU, MIMI_NVS_KEY_FEISHU_ENCRYPT, MIMI_SECRET_FEISHU_ENCRYPT_KEY, true);
+    print_config("Feishu API", MIMI_NVS_FEISHU, MIMI_NVS_KEY_FEISHU_OPENAPI, MIMI_SECRET_FEISHU_OPEN_API_BASE, false);
+    print_config("Feishu Rx",  MIMI_NVS_FEISHU, MIMI_NVS_KEY_FEISHU_MODE, MIMI_SECRET_FEISHU_RECEIVE_MODE, false);
     print_config("API Key",    MIMI_NVS_LLM,    MIMI_NVS_KEY_API_KEY,  MIMI_SECRET_API_KEY,    true);
     print_config("Model",      MIMI_NVS_LLM,    MIMI_NVS_KEY_MODEL,    MIMI_SECRET_MODEL,      false);
     print_config("Provider",   MIMI_NVS_LLM,    MIMI_NVS_KEY_PROVIDER, MIMI_SECRET_MODEL_PROVIDER, false);
+    print_config("Endpoint",   MIMI_NVS_LLM,    MIMI_NVS_KEY_ENDPOINT, MIMI_SECRET_API_ENDPOINT, false);
     print_config("Proxy Host", MIMI_NVS_PROXY,  MIMI_NVS_KEY_PROXY_HOST, MIMI_SECRET_PROXY_HOST, false);
     print_config("Proxy Port", MIMI_NVS_PROXY,  MIMI_NVS_KEY_PROXY_PORT, MIMI_SECRET_PROXY_PORT, false);
     print_config("Search Key", MIMI_NVS_SEARCH, MIMI_NVS_KEY_API_KEY,  MIMI_SECRET_SEARCH_KEY, true);
@@ -953,7 +1172,8 @@ static int cmd_config_reset(int argc, char **argv)
 {
     const char *namespaces[] = {
         MIMI_NVS_WIFI, MIMI_NVS_TG, MIMI_NVS_LLM, MIMI_NVS_PROXY, MIMI_NVS_SEARCH,
-        MIMI_NVS_VOICE, MIMI_NVS_SECURITY, MIMI_NVS_AUDIO, MIMI_NVS_NAMESPACE
+        MIMI_NVS_VOICE, MIMI_NVS_SECURITY, MIMI_NVS_AUDIO, MIMI_NVS_FEISHU,
+        MIMI_NVS_NAMESPACE
     };
     int ns_count = sizeof(namespaces) / sizeof(namespaces[0]);
     for (int i = 0; i < ns_count; i++) {
@@ -1383,6 +1603,102 @@ esp_err_t serial_cli_init(void)
     };
     esp_console_cmd_register(&tg_token_cmd);
 
+    /* set_feishu_app */
+    feishu_app_args.app_id = arg_str1(NULL, NULL, "<app_id>", "Feishu app id");
+    feishu_app_args.app_secret = arg_str1(NULL, NULL, "<app_secret>", "Feishu app secret");
+    feishu_app_args.end = arg_end(2);
+    esp_console_cmd_t feishu_app_cmd = {
+        .command = "set_feishu_app",
+        .help = "Set Feishu app_id and app_secret",
+        .func = &cmd_set_feishu_app,
+        .argtable = &feishu_app_args,
+    };
+    esp_console_cmd_register(&feishu_app_cmd);
+
+    /* clear_feishu_app */
+    esp_console_cmd_t clear_feishu_app_cmd = {
+        .command = "clear_feishu_app",
+        .help = "Clear Feishu app_id and app_secret",
+        .func = &cmd_clear_feishu_app,
+    };
+    esp_console_cmd_register(&clear_feishu_app_cmd);
+
+    /* set_feishu_verify_token */
+    feishu_verify_args.token = arg_str1(NULL, NULL, "<token>", "Feishu verify token");
+    feishu_verify_args.end = arg_end(1);
+    esp_console_cmd_t feishu_verify_cmd = {
+        .command = "set_feishu_verify_token",
+        .help = "Set Feishu verify token",
+        .func = &cmd_set_feishu_verify_token,
+        .argtable = &feishu_verify_args,
+    };
+    esp_console_cmd_register(&feishu_verify_cmd);
+
+    /* clear_feishu_verify_token */
+    esp_console_cmd_t clear_feishu_verify_cmd = {
+        .command = "clear_feishu_verify_token",
+        .help = "Clear Feishu verify token",
+        .func = &cmd_clear_feishu_verify_token,
+    };
+    esp_console_cmd_register(&clear_feishu_verify_cmd);
+
+    /* set_feishu_encrypt_key */
+    feishu_encrypt_args.key = arg_str1(NULL, NULL, "<key>", "Feishu encrypt key");
+    feishu_encrypt_args.end = arg_end(1);
+    esp_console_cmd_t feishu_encrypt_cmd = {
+        .command = "set_feishu_encrypt_key",
+        .help = "Set Feishu encrypt key",
+        .func = &cmd_set_feishu_encrypt_key,
+        .argtable = &feishu_encrypt_args,
+    };
+    esp_console_cmd_register(&feishu_encrypt_cmd);
+
+    /* clear_feishu_encrypt_key */
+    esp_console_cmd_t clear_feishu_encrypt_cmd = {
+        .command = "clear_feishu_encrypt_key",
+        .help = "Clear Feishu encrypt key",
+        .func = &cmd_clear_feishu_encrypt_key,
+    };
+    esp_console_cmd_register(&clear_feishu_encrypt_cmd);
+
+    /* set_feishu_open_api_base */
+    feishu_openapi_args.base_url = arg_str1(NULL, NULL, "<base_url>", "Feishu OpenAPI base URL");
+    feishu_openapi_args.end = arg_end(1);
+    esp_console_cmd_t feishu_openapi_cmd = {
+        .command = "set_feishu_open_api_base",
+        .help = "Set Feishu OpenAPI base URL",
+        .func = &cmd_set_feishu_open_api_base,
+        .argtable = &feishu_openapi_args,
+    };
+    esp_console_cmd_register(&feishu_openapi_cmd);
+
+    /* clear_feishu_open_api_base */
+    esp_console_cmd_t clear_feishu_openapi_cmd = {
+        .command = "clear_feishu_open_api_base",
+        .help = "Clear Feishu OpenAPI base URL",
+        .func = &cmd_clear_feishu_open_api_base,
+    };
+    esp_console_cmd_register(&clear_feishu_openapi_cmd);
+
+    /* set_feishu_receive_mode */
+    feishu_mode_args.mode = arg_str1(NULL, NULL, "<webhook|websocket>", "Feishu receive mode");
+    feishu_mode_args.end = arg_end(1);
+    esp_console_cmd_t feishu_mode_cmd = {
+        .command = "set_feishu_receive_mode",
+        .help = "Set Feishu receive mode: webhook or websocket",
+        .func = &cmd_set_feishu_receive_mode,
+        .argtable = &feishu_mode_args,
+    };
+    esp_console_cmd_register(&feishu_mode_cmd);
+
+    /* clear_feishu_receive_mode */
+    esp_console_cmd_t clear_feishu_mode_cmd = {
+        .command = "clear_feishu_receive_mode",
+        .help = "Clear Feishu receive mode and use build-time default",
+        .func = &cmd_clear_feishu_receive_mode,
+    };
+    esp_console_cmd_register(&clear_feishu_mode_cmd);
+
     /* set_api_key */
     api_key_args.key = arg_str1(NULL, NULL, "<key>", "LLM API key");
     api_key_args.end = arg_end(1);
@@ -1415,6 +1731,25 @@ esp_err_t serial_cli_init(void)
         .argtable = &provider_args,
     };
     esp_console_cmd_register(&provider_cmd);
+
+    /* set_api_endpoint */
+    api_endpoint_args.endpoint = arg_str1(NULL, NULL, "<url>", "Custom LLM API endpoint");
+    api_endpoint_args.end = arg_end(1);
+    esp_console_cmd_t endpoint_cmd = {
+        .command = "set_api_endpoint",
+        .help = "Set custom LLM API endpoint (e.g. Anthropic-compatible gateway)",
+        .func = &cmd_set_api_endpoint,
+        .argtable = &api_endpoint_args,
+    };
+    esp_console_cmd_register(&endpoint_cmd);
+
+    /* clear_api_endpoint */
+    esp_console_cmd_t clear_endpoint_cmd = {
+        .command = "clear_api_endpoint",
+        .help = "Clear custom LLM API endpoint and use build-time default",
+        .func = &cmd_clear_api_endpoint,
+    };
+    esp_console_cmd_register(&clear_endpoint_cmd);
 
     /* skill_list */
     esp_console_cmd_t skill_list_cmd = {
@@ -1568,7 +1903,7 @@ esp_err_t serial_cli_init(void)
     allow_from_args.end = arg_end(1);
     esp_console_cmd_t allow_from_cmd = {
         .command = "set_allow_from",
-        .help = "Set Telegram allowlist (example: set_allow_from 12345,67890)",
+        .help = "Set sender allowlist (example: set_allow_from 12345,ou_xxx)",
         .func = &cmd_set_allow_from,
         .argtable = &allow_from_args,
     };
@@ -1577,7 +1912,7 @@ esp_err_t serial_cli_init(void)
     /* clear_allow_from */
     esp_console_cmd_t clear_allow_from_cmd = {
         .command = "clear_allow_from",
-        .help = "Clear Telegram allowlist (open mode)",
+        .help = "Clear sender allowlist (open mode)",
         .func = &cmd_clear_allow_from,
     };
     esp_console_cmd_register(&clear_allow_from_cmd);

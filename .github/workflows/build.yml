@@ -23,3 +23,55 @@ jobs:
           idf.py set-target esp32s3
           idf.py fullclean
           idf.py build
+
+  doc-regression:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install doc regression dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r tools/requirements-doc.txt
+
+      - name: Start gateway in HTTP-only mode and run doc regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          LOG_FILE="$(mktemp)"
+          dump_log() {
+            echo "---- voice_gateway.log ----"
+            cat "${LOG_FILE}" || true
+          }
+          python tools/voice_gateway.py \
+            --http-only \
+            --skip-stt-model \
+            --host 127.0.0.1 \
+            --stt-port 8091 \
+            >"${LOG_FILE}" 2>&1 &
+          GW_PID=$!
+          cleanup() {
+            kill "${GW_PID}" >/dev/null 2>&1 || true
+            wait "${GW_PID}" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          trap dump_log ERR
+
+          for _ in $(seq 1 30); do
+            if curl -fsS "http://127.0.0.1:8091/health" >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+
+          curl -fsS "http://127.0.0.1:8091/health"
+          bash ./tools/run_doc_regression.sh --basic --base-url "http://127.0.0.1:8091"
+          bash ./tools/run_doc_regression.sh --office --base-url "http://127.0.0.1:8091"

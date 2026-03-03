@@ -1,6 +1,7 @@
 #pragma once
 
 #include "esp_err.h"
+#include "esp_http_server.h"
 
 /**
  * Initialize and start the WebSocket server on MIMI_WS_PORT.
@@ -23,6 +24,11 @@ esp_err_t ws_server_start(void);
  * @param text     Message text
  */
 esp_err_t ws_server_send(const char *chat_id, const char *text);
+
+/**
+ * 在已启动的 HTTP 服务器上注册额外 URI。
+ */
+esp_err_t ws_server_register_uri(const httpd_uri_t *uri);
 
 /**
  * Stop the WebSocket server.

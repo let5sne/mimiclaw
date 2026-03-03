@@ -25,3 +25,5 @@ esp_err_t telegram_send_message(const char *chat_id, const char *text);
  */
 esp_err_t telegram_set_token(const char *token);
 
+int telegram_get_last_error_code(void);
+const char *telegram_get_last_error_message(void);

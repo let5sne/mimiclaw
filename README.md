@@ -17,12 +17,12 @@
 
 **The world's first AI assistant(OpenClaw) on a $5 chip. No Linux. No Node.js. Just pure C**
 
-MimiClaw turns a tiny ESP32-S3 board into a personal AI assistant. Plug it into USB power, connect to WiFi, and talk to it through Telegram — it handles any task you throw at it and evolves over time with local memory — all on a chip the size of a thumb.
+MimiClaw turns a tiny ESP32-S3 board into a personal AI assistant. Plug it into USB power, connect to WiFi, and talk to it through Telegram or a Feishu bot — it handles any task you throw at it and evolves over time with local memory — all on a chip the size of a thumb.
 
 ## Meet MimiClaw
 
 - **Tiny** — No Linux, no Node.js, no bloat — just pure C
-- **Handy** — Message it from Telegram, it handles the rest
+- **Handy** — Message it from Telegram or Feishu, it handles the rest
 - **Loyal** — Learns from memory, remembers across reboots
 - **Energetic** — USB power, 0.5 W, runs 24/7
 - **Lovable** — One ESP32-S3 board, $5, nothing else
@@ -31,16 +31,27 @@ MimiClaw turns a tiny ESP32-S3 board into a personal AI assistant. Plug it into 
 
 ![](assets/mimiclaw.png)
 
-You send a message on Telegram. The ESP32-S3 picks it up over WiFi, feeds it into an agent loop — the LLM thinks, calls tools, reads memory — and sends the reply back. Supports both **Anthropic (Claude)** and **OpenAI (GPT)** as providers, switchable at runtime. Everything runs on a single $5 chip with all your data stored locally on flash.
+You send a message on Telegram, Feishu, or a LAN WebSocket client. The ESP32-S3 picks it up over WiFi, feeds it into an agent loop — the LLM thinks, calls tools, reads memory — and sends the reply back. Supports both **Anthropic (Claude)** and **OpenAI (GPT)** as providers, switchable at runtime. Everything runs on a single $5 chip with all your data stored locally on flash.
 
 ## Quick Start
 
+The default quick start uses **ESP32-S3-DevKitC-1** with **no external peripherals** attached. Plug into the correct **USB** port, configure WiFi/Bot/API key, flash the firmware, and verify from Telegram or Feishu.
+
+### Fast Path (5 Steps)
+
+1. Prepare an **ESP32-S3-DevKitC-1** and plug into the port labeled **USB** (not **COM**).
+2. Install ESP-IDF and clone this repository.
+3. Copy `main/mimi_secrets.h.example` to `main/mimi_secrets.h` and fill in WiFi, bot, and API key.
+4. Build and flash the firmware.
+5. Open Telegram or Feishu and send `/start` or `hello` to test the full agent path.
+
 ### What You Need
 
-- An **ESP32-S3 dev board** with 16 MB flash and 8 MB PSRAM (e.g. Xiaozhi AI board, ~$10)
+- An **ESP32-S3-DevKitC-1** (default quick-start board; use a variant with 16 MB flash and 8 MB PSRAM)
 - A **USB Type-C cable**
-- A **Telegram bot token** — talk to [@BotFather](https://t.me/BotFather) on Telegram to create one
+- A **Telegram bot token**, or a **Feishu self-built app** with bot capability and event subscription
 - An **Anthropic API key** — from [console.anthropic.com](https://console.anthropic.com), or an **OpenAI API key** — from [platform.openai.com](https://platform.openai.com)
+- No microphone, speaker, or display is required for the default quick start
 
 ### Install
 
@@ -126,7 +137,11 @@ Edit `main/mimi_secrets.h`:
 ```c
 #define MIMI_SECRET_WIFI_SSID       "YourWiFiName"
 #define MIMI_SECRET_WIFI_PASS       "YourWiFiPassword"
-#define MIMI_SECRET_TG_TOKEN        "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+#define MIMI_SECRET_TG_TOKEN        ""              // leave empty if you only use Feishu
+#define MIMI_SECRET_FEISHU_APP_ID   ""
+#define MIMI_SECRET_FEISHU_APP_SECRET ""
+#define MIMI_SECRET_FEISHU_VERIFY_TOKEN ""
+#define MIMI_SECRET_FEISHU_ENCRYPT_KEY ""
 #define MIMI_SECRET_API_KEY         "sk-ant-api03-xxxxx"
 #define MIMI_SECRET_MODEL_PROVIDER  "anthropic"     // "anthropic" or "openai"
 #define MIMI_SECRET_SEARCH_KEY      ""              // optional: Brave Search API key
@@ -149,7 +164,213 @@ ls /dev/ttyACM*          # Linux
 idf.py -p PORT flash monitor
 ```
 
-### Voice/Vision Gateway
+Recommended first check:
+
+- Telegram: send `/start` to confirm connectivity
+- Feishu: send `hello` to confirm callback ingress and outbound messaging
+- Send `hello` to test the full agent path
+
+> **Important: Plug into the correct USB port!** Most ESP32-S3 boards have two USB-C ports. You must use the one labeled **USB** (native USB Serial/JTAG), **not** the one labeled **COM** (external UART bridge). Plugging into the wrong port will cause flash/monitor failures.
+>
+> **Quick-start reference board**: the default path in this README assumes **ESP32-S3-DevKitC-1**. For the first boot, keep the board in its minimum form: **USB cable only, no microphone, no speaker, no display**.
+>
+> <details>
+> <summary>Show reference photo</summary>
+>
+> <img src="assets/esp32s3-usb-port.jpg" alt="Plug into the USB port, not COM" width="480" />
+>
+> </details>
+
+### Feishu Bot Setup
+
+This branch defaults to a **no external voice gateway** build. Text chat works without running `tools/voice_gateway.py`.
+
+1. Fill these build-time secrets in `main/mimi_secrets.h`:
+
+For a normal Feishu Bot setup, these are the fields that matter:
+
+- Required: `App ID`
+- Required: `App Secret`
+- Recommended: `Receive Mode`
+- Strongly recommended in `webhook` mode: `Verify Token`
+- Optional in `webhook` mode: `Encrypt Key`
+- Usually leave as-is: `Open API Base`
+
+```c
+#define MIMI_SECRET_FEISHU_APP_ID        "cli_xxx"              // required: Feishu App ID
+#define MIMI_SECRET_FEISHU_APP_SECRET    "xxx"                  // required: Feishu App Secret
+#define MIMI_SECRET_FEISHU_RECEIVE_MODE  "websocket"            // recommended: board-side long connection; or use webhook
+#define MIMI_SECRET_FEISHU_VERIFY_TOKEN  "mimiclaw-feishu"      // recommended in webhook mode
+#define MIMI_SECRET_FEISHU_ENCRYPT_KEY   ""                     // only needed for encrypted webhook callbacks
+#define MIMI_SECRET_FEISHU_OPEN_API_BASE "https://open.feishu.cn" // usually keep default; override only for local stub validation
+```
+
+- `App ID` and `App Secret` are mandatory for the bot to work
+- `MIMI_SECRET_FEISHU_RECEIVE_MODE` supports `websocket` and `webhook`
+- `websocket` is the recommended default: the board opens the long connection itself, so you do **not** need a public callback URL
+- only `webhook` mode needs `Verify Token`, `Encrypt Key`, `/feishu/events`, and a public callback path
+- `Verify Token` is not strictly required by Feishu, but this project strongly recommends setting it in webhook mode
+- leave `Encrypt Key` empty until plaintext webhook callbacks are working
+
+2. In the Feishu Open Platform:
+
+At minimum, fill in these items:
+
+- create a **self-built app**
+- enable **bot capability**
+- subscribe to event `im.message.receive_v1`
+- if receive mode is `websocket`:
+  - no `Request URL` is required
+  - no public callback address is required
+- if receive mode is `webhook`:
+  - set request URL to `https://<public-address>/feishu/events`
+  - set `Verify Token` to the same value as `MIMI_SECRET_FEISHU_VERIFY_TOKEN`
+  - leave `Encrypt Key` empty for plaintext callbacks, or set it to match `MIMI_SECRET_FEISHU_ENCRYPT_KEY`
+- keep `MIMI_SECRET_FEISHU_OPEN_API_BASE` on the official host unless you are using the local OpenAPI stub for validation
+
+This firmware now supports **encrypted Feishu event payloads**:
+
+- this applies only to `webhook`
+- if `Encrypt Key` is empty, callbacks are handled as plaintext events
+- if `Encrypt Key` is configured, the firmware validates `X-Lark-Signature` and decrypts the `encrypt` field
+- keeping `Verify Token` enabled is still recommended for an extra source check on URL verification and normal events
+
+Recommended minimum setup:
+
+1. Start with `App ID` and `App Secret`
+2. Set `Receive Mode` to `websocket`
+3. Only switch to `webhook` if you explicitly need callback mode
+4. Enable `Encrypt Key` only after webhook text ingress is stable
+
+3. Choose the ingress mode you want:
+
+- `websocket`:
+  - the device opens a long connection to Feishu itself
+  - no public callback is required
+  - the truly required fields are just `App ID` and `App Secret`
+- `webhook`:
+  - callback path is fixed at `/feishu/events`
+  - the shared HTTP service listens on port `18789`
+  - if your board is not public, add reverse proxy / port forwarding / tunnel to `http://<device-lan-ip>:18789/feishu/events`
+
+4. Smoke test after flashing:
+
+- watch serial logs
+- in `websocket` mode, look for `Feishu WebSocket long connection enabled` and `Feishu WS connected`
+- in `webhook` mode, look for `Feishu callback registered at /feishu/events`
+- if `Encrypt Key` is enabled in webhook mode, confirm both URL verification and event delivery succeed in the Feishu console
+- send `hello` to the bot in Feishu
+- expect a text reply from MimiClaw
+
+4.1 Local replay without the Feishu console
+
+If you only want to validate the device-side `/feishu/events` path, run this from your dev machine:
+
+```bash
+./tools/run_feishu_replay.sh --scenario all --verify-token mimiclaw-feishu
+```
+
+Common examples:
+
+```bash
+# replay plaintext text / duplicate / image / file / audio / sticker callbacks
+./tools/run_feishu_replay.sh --scenario all --verify-token mimiclaw-feishu
+
+# replay encrypted duplicate delivery
+./tools/run_feishu_replay.sh \
+  --scenario duplicate \
+  --verify-token mimiclaw-feishu \
+  --encrypt-key your_encrypt_key \
+  --encrypted
+
+# print request and response bodies for debugging
+./tools/run_feishu_replay.sh --scenario text --show-body
+```
+
+Notes:
+
+- the script targets `http://127.0.0.1:18789/feishu/events` by default
+- the `duplicate` scenario sends the same `event_id/message_id` twice to verify firmware deduplication
+- under the default configuration, `image/file/audio/sticker` only validate the callback -> summary text -> Agent downgrade path
+
+#### 4.2 Local `image/file` download + gateway validation
+
+If you already enabled `MIMI_FEISHU_GATEWAY_MEDIA_ENABLED=1`, you can also exercise the real `image/file` download branch with a local OpenAPI stub.
+
+1. Point the device to your dev machine from the serial CLI:
+
+```text
+mimi> set_feishu_open_api_base http://<your-host-ip>:19091
+```
+
+2. Start the local Feishu OpenAPI stub:
+
+```bash
+python3 tools/feishu_openapi_stub.py --host 0.0.0.0 --port 19091
+```
+
+3. In another terminal, start `voice_gateway.py`
+
+4. Run validation with gateway expectations:
+
+```bash
+./tools/run_feishu_validate.sh \
+  --scenario image \
+  --verify-token mimiclaw-feishu \
+  --log-file ./logs/monitor.log \
+  --expect-media-mode gateway
+```
+
+Notes:
+
+- the stub includes `image_key=img_replay_demo` and `file_key=file_replay_demo`
+- `--expect-media-mode gateway` requires `gateway_parse from` to appear in logs
+- run `mimi> clear_feishu_open_api_base` to switch the device back to the official Feishu host
+
+If you already save serial logs to a file, you can also run replay + validation together:
+
+```bash
+./tools/run_feishu_validate.sh \
+  --scenario all \
+  --verify-token mimiclaw-feishu \
+  --log-file ./logs/monitor.log
+```
+
+The validator checks:
+
+- HTTP responses for each replayed callback
+- the returned `challenge` for `url_verification`
+- whether `duplicate` produces `Skip duplicate Feishu event` in logs
+- whether text/media scenarios produce the expected ingress log markers
+
+If you want to run serial monitor + replay validation + log capture in one shot:
+
+```bash
+./tools/run_feishu_validate_live.sh \
+  --port /dev/ttyACM0 \
+  --scenario all \
+  --verify-token mimiclaw-feishu
+```
+
+Notes:
+
+- this script starts `idf.py -p PORT monitor` in the background
+- monitor output is written to `logs/feishu-validate-*.log`
+- when validation finishes, the monitor process is stopped and the log file is kept for review
+
+Current limits:
+
+- text messages go to the Agent as-is
+- by default, image / file / audio / sticker / other non-text Feishu messages are downgraded into summary text before entering the Agent
+- if you enable `MIMI_FEISHU_GATEWAY_MEDIA_ENABLED=1` and run `voice_gateway.py`, Feishu `image/file` messages are downloaded and sent through real vision / doc parsing; `audio/sticker/other` still stay in summary mode
+- outbound Feishu delivery uses `chat_id`
+- repeated Feishu deliveries are lightly deduplicated by `event_id/message_id` before entering the Agent
+
+### Optional: Voice/Vision Gateway
+
+This is an optional extension. The default no-gateway build does not depend on it.
+
+Not required for the default quick start. If you only want to get the board online, skip this section for now.
 
 Start the local gateway (STT + image analysis endpoint):
 
@@ -163,6 +384,18 @@ python3 tools/voice_gateway.py \
 - Vision endpoint: `http://<your-host-ip>:8091/vision_upload`
 - Document endpoint: `http://<your-host-ip>:8091/doc_upload`
 - By default, gateway tries loading API defaults from `main/mimi_secrets.h`; you can override via `--vision-endpoint/--vision-api-key/--vision-model`
+
+To actually enable these media extensions in firmware, also set these in `main/mimi_config.h` and rebuild:
+
+```c
+#define MIMI_TELEGRAM_GATEWAY_MEDIA_ENABLED 1
+#define MIMI_FEISHU_GATEWAY_MEDIA_ENABLED   1
+```
+
+Both defaults are `0`, which keeps the no-gateway text + summary behavior. After enabling them:
+
+- Telegram regains real STT / vision / doc parsing for voice / photos / documents
+- Feishu enables real download + vision / doc parsing for `image/file`, while other media types still fall back to summaries
 
 ### Document Regression Smoke Test
 
@@ -183,14 +416,6 @@ python3 tools/doc_regression.py \
 
 The script calls `/doc_upload` and validates format, extracted text length, keywords, parser prefix, and latency budget.
 `tools/doc_regression_manifest.office.example.json` includes a real `xlsx` sample and an optional `xls` case (`food_legacy.xls`) which is skipped when missing.
-> **Important: Plug into the correct USB port!** Most ESP32-S3 boards have two USB-C ports. You must use the one labeled **USB** (native USB Serial/JTAG), **not** the one labeled **COM** (external UART bridge). Plugging into the wrong port will cause flash/monitor failures.
->
-> <details>
-> <summary>Show reference photo</summary>
->
-> <img src="assets/esp32s3-usb-port.jpg" alt="Plug into the USB port, not COM" width="480" />
->
-> </details>
 
 ### CLI Commands (via UART/COM port)
 
@@ -201,6 +426,11 @@ Connect via serial to configure or debug. **Config commands** let you change set
 ```
 mimi> wifi_set MySSID MyPassword   # change WiFi network
 mimi> set_tg_token 123456:ABC...   # change Telegram bot token
+mimi> set_feishu_app cli_xxx secret_xxx   # set Feishu app_id / app_secret
+mimi> set_feishu_receive_mode websocket   # switch to board-side long connection
+mimi> set_feishu_verify_token token_xxx   # set Feishu Verify Token
+mimi> set_feishu_encrypt_key key_xxx      # set Feishu Encrypt Key
+mimi> set_feishu_open_api_base http://127.0.0.1:19091  # override Feishu OpenAPI base (useful for local validation)
 mimi> set_api_key sk-ant-api03-... # change API key (Anthropic or OpenAI)
 mimi> set_model_provider openai    # switch provider (anthropic|openai)
 mimi> set_model gpt-4o             # change LLM model
@@ -210,6 +440,11 @@ mimi> set_search_key BSA...        # set Brave Search API key
 mimi> config_show                  # show all config (masked)
 mimi> config_reset                 # clear NVS, revert to build-time defaults
 ```
+
+Note:
+
+- Feishu `app_id/app_secret/receive_mode/verify_token/encrypt_key/open_api_base` can now be updated via CLI
+- NVS-stored Feishu config overrides build-time defaults
 
 **Debug & maintenance:**
 
@@ -302,9 +537,10 @@ MimiClaw supports tool calling for both Anthropic and OpenAI — the LLM can cal
 |------|-------------|
 | `web_search` | Search the web via Brave Search API for current information |
 | `get_current_time` | Fetch current date/time via HTTP and set the system clock |
+| `get_device_info` | Read real runtime hardware information, including chip / CPU / flash / PSRAM / GPIO |
 | `read_file` | Read a SPIFFS file (path must start with `/spiffs/`) |
-| `write_file` | Write or overwrite a SPIFFS file (default allowlist: `/spiffs/memory/`) |
-| `edit_file` | Find-and-replace in a SPIFFS file (default allowlist: `/spiffs/memory/`) |
+| `write_file` | Write or overwrite a SPIFFS file (default allowlist: `/spiffs/memory/`, `/spiffs/skills/`) |
+| `edit_file` | Find-and-replace in a SPIFFS file (default allowlist: `/spiffs/memory/`, `/spiffs/skills/`) |
 | `list_dir` | List SPIFFS files, optionally filtered by prefix |
 | `memory_write_long_term` | Overwrite long-term memory (`/spiffs/memory/MEMORY.md`) |
 | `memory_append_today` | Append one note to today's daily memory |
@@ -329,11 +565,13 @@ This turns MimiClaw into a proactive assistant — write tasks to `HEARTBEAT.md`
 ## Also Included
 
 - **WebSocket gateway** on port 18789 — connect from your LAN with any WebSocket client
+- **Feishu Bot** — supports both board-side WebSocket long connection and `/feishu/events` webhook ingress; text passthrough and summary fallback by default, with optional real gateway parsing for `image/file`
 - **OTA updates** — flash new firmware over WiFi, no USB needed
 - **Dual-core** — network I/O and AI processing run on separate CPU cores
 - **HTTP proxy** — CONNECT tunnel support for restricted networks
 - **Tool use** — ReAct agent loop with Anthropic tool use protocol
-- **Telegram media handling** — `/start` local reply; voice uses real STT via voice gateway HTTP (`/stt_upload`); photos call cloud vision via `vision_upload` with structured output (`caption`/`ocr_text`/`objects`) and `file_id` cache dedupe; documents call `doc_upload` for parsing (`txt/pdf/docx/pptx/xls/xlsx/image-doc`), and when PDF/PPTX text extraction is too short it auto-falls back to page/image OCR via vision before summary fallback
+- **Telegram media handling** — in the default no-gateway mode, voice/photos/documents fall back to media summaries; if you enable `MIMI_TELEGRAM_GATEWAY_MEDIA_ENABLED=1` and run `voice_gateway.py`, Telegram can use real STT / vision / doc parsing again
+- **Feishu media handling** — in the default no-gateway mode, media falls back to summaries; if you enable `MIMI_FEISHU_GATEWAY_MEDIA_ENABLED=1` and run `voice_gateway.py`, Feishu `image/file` can use real download + vision / doc parsing
 
 ## P0 Hardening Roadmap (In Progress)
 

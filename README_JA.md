@@ -35,12 +35,23 @@ Telegramでメッセージを送ると、ESP32-S3がWiFi経由で受信し、エ
 
 ## クイックスタート
 
+デフォルトのクイックスタートは **ESP32-S3-DevKitC-1** を使用し、**外部周辺機器は接続しません**。まず正しい **USB** ポートに接続し、WiFi / Telegram / APIキーを設定してファームウェアを書き込み、Telegram から動作確認します。
+
+### 5ステップ最短経路
+
+1. **ESP32-S3-DevKitC-1** を用意し、**COM** ではなく **USB** と書かれたポートに接続します。
+2. ESP-IDF をインストールし、このリポジトリをクローンします。
+3. `main/mimi_secrets.h.example` を `main/mimi_secrets.h` にコピーし、WiFi、Telegram、APIキーを設定します。
+4. ファームウェアをビルドして書き込みます。
+5. Telegram で `/start` を送ってオンライン状態を確認し、続けて `hello` を送って完全な Agent 経路を確認します。
+
 ### 必要なもの
 
-- **ESP32-S3開発ボード**（16MB Flash + 8MB PSRAM搭載、例：小智AIボード、約$10）
+- **ESP32-S3-DevKitC-1**（デフォルトのクイックスタート用ボード。16MB Flash + 8MB PSRAM のバリアントを推奨）
 - **USB Type-Cケーブル**
 - **Telegram Botトークン** — Telegramで[@BotFather](https://t.me/BotFather)に話しかけて作成
 - **Anthropic APIキー** — [console.anthropic.com](https://console.anthropic.com)から取得、または **OpenAI APIキー** — [platform.openai.com](https://platform.openai.com)から取得
+- デフォルトのクイックスタートでは、マイク、スピーカー、ディスプレイは不要です
 
 ### インストール
 
@@ -149,7 +160,14 @@ ls /dev/ttyACM*          # Linux
 idf.py -p PORT flash monitor
 ```
 
+最初の確認手順:
+
+- `/start` を送って、ファームウェアがオンラインで Telegram 接続が正常か確認
+- `hello` を送って、完全な Agent 経路を確認
+
 > **重要：正しいUSBポートに接続してください！** ほとんどのESP32-S3ボードには2つのUSB-Cポートがあります。**USB**（ネイティブUSB Serial/JTAG）と書かれたポートを使用してください。**COM**（外部UARTブリッジ）と書かれたポートは使わないでください。間違ったポートに接続するとフラッシュ/モニターが失敗します。
+>
+> **クイックスタートの基準ボード**：この README の主経路は **ESP32-S3-DevKitC-1** を前提にしています。初回起動は最小構成のままにしてください：**USBケーブルのみ接続し、マイク、スピーカー、ディスプレイは接続しません**。
 >
 > <details>
 > <summary>参考画像を表示</summary>

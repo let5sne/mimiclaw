@@ -4,6 +4,7 @@
 #include "proxy/http_proxy.h"
 #include "security/access_control.h"
 #include "display/display.h"
+#include "status/status_led.h"
 #include "ui/config_screen.h"
 
 #include <string.h>
@@ -25,6 +26,8 @@ static const char *TG_START_HELP =
     "语音/图片/文件消息我也会识别类型并给出处理建议。";
 
 static char s_bot_token[128] = MIMI_SECRET_TG_TOKEN;
+static int s_last_error_code = 0;
+static char s_last_error_message[160] = {0};
 static int64_t s_update_offset = 0;
 static int64_t s_last_saved_offset = -1;
 static int64_t s_last_offset_save_us = 0;
@@ -33,6 +36,7 @@ static int64_t s_last_offset_save_us = 0;
 #define TG_OFFSET_SAVE_INTERVAL_US   (5LL * 1000 * 1000)
 #define TG_OFFSET_SAVE_STEP          10
 
+#if MIMI_TELEGRAM_GATEWAY_MEDIA_ENABLED
 #define TG_VISION_CACHE_SLOTS 8
 #define TG_VISION_TEXT_MAX    768
 
@@ -44,6 +48,7 @@ typedef struct {
 
 static tg_vision_cache_entry_t s_vision_cache[TG_VISION_CACHE_SLOTS];
 static uint32_t s_vision_cache_stamp = 0;
+#endif
 
 /* HTTP response accumulator */
 typedef struct {
@@ -51,6 +56,12 @@ typedef struct {
     size_t len;
     size_t cap;
 } http_resp_t;
+
+typedef struct {
+    char *buf;
+    size_t len;
+    size_t cap;
+} tg_text_buf_t;
 
 static void save_update_offset_if_needed(bool force)
 {
@@ -107,6 +118,343 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
         resp->buf[resp->len] = '\0';
     }
     return ESP_OK;
+}
+
+static bool tg_text_buf_reserve(tg_text_buf_t *buf, size_t extra)
+{
+    if (!buf) return false;
+    if (buf->len + extra + 1 <= buf->cap) return true;
+
+    size_t new_cap = (buf->cap > 0) ? buf->cap : 256;
+    while (buf->len + extra + 1 > new_cap) {
+        new_cap <<= 1;
+    }
+
+    char *tmp = realloc(buf->buf, new_cap);
+    if (!tmp) return false;
+    buf->buf = tmp;
+    buf->cap = new_cap;
+    return true;
+}
+
+static bool tg_text_buf_append_n(tg_text_buf_t *buf, const char *text, size_t n)
+{
+    if (!buf || !text) return false;
+    if (!tg_text_buf_reserve(buf, n)) return false;
+    memcpy(buf->buf + buf->len, text, n);
+    buf->len += n;
+    buf->buf[buf->len] = '\0';
+    return true;
+}
+
+static bool tg_text_buf_append(tg_text_buf_t *buf, const char *text)
+{
+    return tg_text_buf_append_n(buf, text, text ? strlen(text) : 0);
+}
+
+static bool tg_text_buf_append_char(tg_text_buf_t *buf, char c)
+{
+    if (!buf) return false;
+    if (!tg_text_buf_reserve(buf, 1)) return false;
+    buf->buf[buf->len++] = c;
+    buf->buf[buf->len] = '\0';
+    return true;
+}
+
+static bool tg_text_buf_append_html_escaped(tg_text_buf_t *buf, const char *text, size_t n)
+{
+    if (!buf || !text) return false;
+    for (size_t i = 0; i < n; ++i) {
+        switch (text[i]) {
+            case '&':
+                if (!tg_text_buf_append(buf, "&amp;")) return false;
+                break;
+            case '<':
+                if (!tg_text_buf_append(buf, "&lt;")) return false;
+                break;
+            case '>':
+                if (!tg_text_buf_append(buf, "&gt;")) return false;
+                break;
+            case '"':
+                if (!tg_text_buf_append(buf, "&quot;")) return false;
+                break;
+            default:
+                if (!tg_text_buf_append_char(buf, text[i])) return false;
+                break;
+        }
+    }
+    return true;
+}
+
+static const char *tg_find_substr_limited(const char *start, const char *needle, const char *limit)
+{
+    size_t needle_len = strlen(needle);
+    if (!start || !needle || needle_len == 0) return NULL;
+    for (const char *p = start; p && *p != '\0'; ++p) {
+        if (limit && p >= limit) break;
+        if (strncmp(p, needle, needle_len) == 0) {
+            if (!limit || p + needle_len <= limit) {
+                return p;
+            }
+            return NULL;
+        }
+    }
+    return NULL;
+}
+
+static const char *tg_find_char_limited(const char *start, char needle, const char *limit)
+{
+    if (!start) return NULL;
+    for (const char *p = start; *p != '\0'; ++p) {
+        if (limit && p >= limit) break;
+        if (*p == needle) return p;
+    }
+    return NULL;
+}
+
+static bool tg_markdown_append_heading(const char **pp, tg_text_buf_t *out)
+{
+    const char *p = *pp;
+    const char *line_end = strchr(p, '\n');
+    int level = 0;
+    const char *q = p;
+
+    if (!(p == NULL || *p == '\0') && (p == *pp)) {
+        while (*q == '#' && level < 3) {
+            level++;
+            q++;
+        }
+        if (level > 0 && *q == ' ') {
+            if (!line_end) line_end = p + strlen(p);
+            while (line_end > q && (line_end[-1] == ' ' || line_end[-1] == '\r')) {
+                line_end--;
+            }
+            if (!tg_text_buf_append(out, "<b>")) return false;
+            if (!tg_text_buf_append_html_escaped(out, q + 1, (size_t)(line_end - (q + 1)))) return false;
+            if (!tg_text_buf_append(out, "</b>")) return false;
+            *pp = strchr(*pp, '\n');
+            if (*pp) {
+                if (!tg_text_buf_append_char(out, '\n')) return false;
+                (*pp)++;
+            } else {
+                *pp = p + strlen(p);
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool tg_markdown_to_html(const char *src, char **out_html)
+{
+    tg_text_buf_t out = {0};
+    bool bold = false;
+    bool italic = false;
+    bool strike = false;
+    bool line_start = true;
+
+    if (!out_html) return false;
+    *out_html = NULL;
+    if (!src) return false;
+
+    for (const char *p = src; *p != '\0';) {
+        if (line_start) {
+            const char *saved = p;
+            if (tg_markdown_append_heading(&p, &out)) {
+                line_start = true;
+                continue;
+            }
+            p = saved;
+
+            if ((*p == '-' || *p == '*' || *p == '+') && p[1] == ' ') {
+                if (!tg_text_buf_append(&out, "• ")) goto fail;
+                p += 2;
+                line_start = false;
+                continue;
+            }
+
+            if (isdigit((unsigned char)*p)) {
+                const char *q = p;
+                while (isdigit((unsigned char)*q)) q++;
+                if (*q == '.' && q[1] == ' ') {
+                    if (!tg_text_buf_append_n(&out, p, (size_t)(q - p + 2))) goto fail;
+                    p = q + 2;
+                    line_start = false;
+                    continue;
+                }
+            }
+        }
+
+        if (strncmp(p, "```", 3) == 0) {
+            const char *block_start = p + 3;
+            const char *content_start = block_start;
+            const char *block_end = strstr(block_start, "```");
+            if (*content_start != '\0' && *content_start != '\n') {
+                const char *nl = strchr(content_start, '\n');
+                if (nl) {
+                    content_start = nl + 1;
+                }
+            } else if (*content_start == '\n') {
+                content_start++;
+            }
+            if (!block_end) block_end = p + strlen(p);
+            if (!tg_text_buf_append(&out, "<pre><code>")) goto fail;
+            if (!tg_text_buf_append_html_escaped(&out, content_start, (size_t)(block_end - content_start))) goto fail;
+            if (!tg_text_buf_append(&out, "</code></pre>")) goto fail;
+            p = (*block_end == '\0') ? block_end : block_end + 3;
+            line_start = false;
+            continue;
+        }
+
+        if (*p == '`') {
+            const char *end = strchr(p + 1, '`');
+            if (end) {
+                if (!tg_text_buf_append(&out, "<code>")) goto fail;
+                if (!tg_text_buf_append_html_escaped(&out, p + 1, (size_t)(end - (p + 1)))) goto fail;
+                if (!tg_text_buf_append(&out, "</code>")) goto fail;
+                p = end + 1;
+                line_start = false;
+                continue;
+            }
+        }
+
+        if (*p == '[') {
+            const char *label_end = strchr(p + 1, ']');
+            if (label_end && label_end[1] == '(') {
+                const char *url_end = strchr(label_end + 2, ')');
+                if (url_end) {
+                    if (!tg_text_buf_append(&out, "<a href=\"")) goto fail;
+                    if (!tg_text_buf_append_html_escaped(&out, label_end + 2, (size_t)(url_end - (label_end + 2)))) goto fail;
+                    if (!tg_text_buf_append(&out, "\">")) goto fail;
+                    if (!tg_text_buf_append_html_escaped(&out, p + 1, (size_t)(label_end - (p + 1)))) goto fail;
+                    if (!tg_text_buf_append(&out, "</a>")) goto fail;
+                    p = url_end + 1;
+                    line_start = false;
+                    continue;
+                }
+            }
+        }
+
+        if (strncmp(p, "**", 2) == 0 || strncmp(p, "__", 2) == 0) {
+            const char *marker = p;
+            const char *close = tg_find_substr_limited(p + 2, marker, NULL);
+            if (bold || close) {
+                if (!tg_text_buf_append(&out, bold ? "</b>" : "<b>")) goto fail;
+                bold = !bold;
+                p += 2;
+                continue;
+            }
+        }
+
+        if (strncmp(p, "~~", 2) == 0) {
+            const char *close = tg_find_substr_limited(p + 2, "~~", NULL);
+            if (strike || close) {
+                if (!tg_text_buf_append(&out, strike ? "</s>" : "<s>")) goto fail;
+                strike = !strike;
+                p += 2;
+                continue;
+            }
+        }
+
+        if (*p == '*' || *p == '_') {
+            char marker = *p;
+            const char *close = tg_find_char_limited(p + 1, marker, NULL);
+            if (italic || close) {
+                if (!tg_text_buf_append(&out, italic ? "</i>" : "<i>")) goto fail;
+                italic = !italic;
+                p++;
+                continue;
+            }
+        }
+
+        if (*p == '\r') {
+            p++;
+            continue;
+        }
+
+        if (*p == '\n') {
+            if (bold) {
+                if (!tg_text_buf_append(&out, "</b>")) goto fail;
+                bold = false;
+            }
+            if (italic) {
+                if (!tg_text_buf_append(&out, "</i>")) goto fail;
+                italic = false;
+            }
+            if (strike) {
+                if (!tg_text_buf_append(&out, "</s>")) goto fail;
+                strike = false;
+            }
+            if (!tg_text_buf_append_char(&out, '\n')) goto fail;
+            p++;
+            line_start = true;
+            continue;
+        }
+
+        if (!tg_text_buf_append_html_escaped(&out, p, 1)) goto fail;
+        line_start = false;
+        p++;
+    }
+
+    if (bold && !tg_text_buf_append(&out, "</b>")) goto fail;
+    if (italic && !tg_text_buf_append(&out, "</i>")) goto fail;
+    if (strike && !tg_text_buf_append(&out, "</s>")) goto fail;
+
+    *out_html = out.buf;
+    return true;
+
+fail:
+    free(out.buf);
+    return false;
+}
+
+static size_t tg_choose_chunk_size(const char *text, size_t remaining)
+{
+    const size_t limit = 3000;
+    if (!text || remaining <= limit) return remaining;
+
+    size_t chunk = limit;
+    for (size_t i = limit; i > (limit / 2); --i) {
+        char c = text[i];
+        if (c == '\n' || c == ' ') {
+            chunk = i;
+            break;
+        }
+    }
+    return chunk;
+}
+
+static void tg_safe_copy(char *dst, size_t dst_size, const char *src)
+{
+    if (!dst || dst_size == 0) return;
+    if (!src) {
+        dst[0] = '\0';
+        return;
+    }
+    size_t n = strnlen(src, dst_size - 1);
+    memcpy(dst, src, n);
+    dst[n] = '\0';
+}
+
+static void tg_clear_last_error(void)
+{
+    s_last_error_code = 0;
+    s_last_error_message[0] = '\0';
+}
+
+static void tg_record_last_error(int error_code, const char *message)
+{
+    s_last_error_code = error_code;
+    tg_safe_copy(s_last_error_message, sizeof(s_last_error_message), message);
+}
+
+static status_led_service_state_t tg_led_state_for_error(int error_code, const char *message)
+{
+    if (error_code == 401 ||
+        (message && (strstr(message, "Unauthorized") || strstr(message, "bot token")))) {
+        return STATUS_LED_SERVICE_AUTH_ERROR;
+    }
+    return STATUS_LED_SERVICE_ERROR;
 }
 
 /* ── Proxy path: manual HTTP over CONNECT tunnel ────────────── */
@@ -232,30 +580,52 @@ static char *tg_api_call(const char *method, const char *post_data)
     return tg_api_call_direct(method, post_data);
 }
 
-static int tg_response_is_ok(const char *resp, const char **out_desc)
+static int tg_response_is_ok(const char *resp, int *out_error_code,
+                             char *out_desc, size_t out_desc_size)
 {
-    static char s_desc_buf[160];
-    s_desc_buf[0] = '\0';
-    if (out_desc) {
-        *out_desc = NULL;
+    if (out_desc && out_desc_size > 0) {
+        out_desc[0] = '\0';
     }
 
     if (!resp) return 0;
     cJSON *root = cJSON_Parse(resp);
-    if (!root) return 0;
+    if (!root) {
+        if (out_error_code) *out_error_code = 0;
+        if (out_desc && out_desc_size > 0) {
+            tg_safe_copy(out_desc, out_desc_size, "invalid telegram response");
+        }
+        return 0;
+    }
     int ok = cJSON_IsTrue(cJSON_GetObjectItem(root, "ok")) ? 1 : 0;
-    if (!ok && out_desc) {
-        cJSON *desc = cJSON_GetObjectItem(root, "description");
-        if (cJSON_IsString(desc) && desc->valuestring) {
-            strncpy(s_desc_buf, desc->valuestring, sizeof(s_desc_buf) - 1);
-            s_desc_buf[sizeof(s_desc_buf) - 1] = '\0';
-            *out_desc = s_desc_buf;
+    if (out_error_code) {
+        cJSON *error_code = cJSON_GetObjectItem(root, "error_code");
+        *out_error_code = cJSON_IsNumber(error_code) ? error_code->valueint : 0;
+    }
+    if (out_desc && out_desc_size > 0) {
+        if (!ok) {
+            cJSON *desc = cJSON_GetObjectItem(root, "description");
+            tg_safe_copy(out_desc, out_desc_size,
+                         cJSON_IsString(desc) ? desc->valuestring : "telegram api error");
         }
     }
     cJSON_Delete(root);
     return ok;
 }
 
+typedef enum {
+    TG_STT_STAGE_NONE = 0,
+    TG_STT_STAGE_GET_FILE,
+    TG_STT_STAGE_DOWNLOAD,
+    TG_STT_STAGE_UPLOAD,
+} tg_stt_stage_t;
+
+typedef enum {
+    TG_MEDIA_KIND_NONE = 0,
+    TG_MEDIA_KIND_PHOTO,
+    TG_MEDIA_KIND_DOCUMENT,
+} tg_media_kind_t;
+
+#if MIMI_TELEGRAM_GATEWAY_MEDIA_ENABLED
 static int tg_find_http_header_end(const uint8_t *buf, size_t len)
 {
     if (!buf || len < 4) return -1;
@@ -275,19 +645,6 @@ static int tg_parse_http_status(const uint8_t *buf)
     sscanf((const char *)buf, "HTTP/%*d.%*d %d", &status);
     return status;
 }
-
-typedef enum {
-    TG_STT_STAGE_NONE = 0,
-    TG_STT_STAGE_GET_FILE,
-    TG_STT_STAGE_DOWNLOAD,
-    TG_STT_STAGE_UPLOAD,
-} tg_stt_stage_t;
-
-typedef enum {
-    TG_MEDIA_KIND_NONE = 0,
-    TG_MEDIA_KIND_PHOTO,
-    TG_MEDIA_KIND_DOCUMENT,
-} tg_media_kind_t;
 
 static const char *tg_stt_stage_name(tg_stt_stage_t stage)
 {
@@ -985,6 +1342,7 @@ static void tg_extract_document_info(cJSON *message, const char **out_name, cons
         *out_mime = mime_item->valuestring;
     }
 }
+#endif
 
 static bool tg_extract_sender_id(cJSON *message, char *sender_id, size_t size)
 {
@@ -1185,6 +1543,7 @@ static void tg_push_inbound(const char *chat_id, const char *content,
     }
 }
 
+#if MIMI_TELEGRAM_GATEWAY_MEDIA_ENABLED
 static bool tg_build_downloaded_media_summary(cJSON *message, tg_media_kind_t kind,
                                               const char *file_path, size_t media_len,
                                               char *out, size_t out_size)
@@ -1244,6 +1603,7 @@ static bool tg_build_downloaded_media_summary(cJSON *message, tg_media_kind_t ki
 
     return false;
 }
+#endif
 
 static void process_updates(const char *json_str)
 {
@@ -1309,6 +1669,7 @@ static void process_updates(const char *json_str)
             continue;
         }
 
+ #if MIMI_TELEGRAM_GATEWAY_MEDIA_ENABLED
         const char *voice_file_id = NULL;
         const char *voice_format = NULL;
         if (tg_extract_voice_file(message, &voice_file_id, &voice_format)) {
@@ -1476,6 +1837,7 @@ static void process_updates(const char *json_str)
                      tg_media_kind_name(media_kind), esp_err_to_name(media_err), chat_id_str,
                      media_file_id ? media_file_id : "");
         }
+ #endif
 
         char media_summary[1024];
         if (tg_build_media_summary(message, media_summary, sizeof(media_summary))) {
@@ -1497,6 +1859,8 @@ static void telegram_poll_task(void *arg)
     while (1) {
         if (s_bot_token[0] == '\0') {
             ESP_LOGW(TAG, "No bot token configured, waiting...");
+            tg_record_last_error(401, "No Telegram bot token configured");
+            status_led_set_telegram_state(STATUS_LED_SERVICE_AUTH_ERROR);
             vTaskDelay(pdMS_TO_TICKS(5000));
             continue;
         }
@@ -1508,9 +1872,22 @@ static void telegram_poll_task(void *arg)
 
         char *resp = tg_api_call(params, NULL);
         if (resp) {
-            process_updates(resp);
+            int error_code = 0;
+            char desc[160] = {0};
+            if (tg_response_is_ok(resp, &error_code, desc, sizeof(desc))) {
+                tg_clear_last_error();
+                status_led_set_telegram_state(STATUS_LED_SERVICE_OK);
+                process_updates(resp);
+            } else {
+                tg_record_last_error(error_code, desc);
+                status_led_set_telegram_state(tg_led_state_for_error(error_code, desc));
+                ESP_LOGW(TAG, "Telegram polling failed: code=%d desc=%s",
+                         error_code, desc[0] ? desc : "(unknown)");
+            }
             free(resp);
         } else {
+            tg_record_last_error(0, "Telegram request failed");
+            status_led_set_telegram_state(STATUS_LED_SERVICE_ERROR);
             /* Back off on error */
             vTaskDelay(pdMS_TO_TICKS(3000));
         }
@@ -1543,8 +1920,11 @@ esp_err_t telegram_bot_init(void)
 
     if (s_bot_token[0]) {
         ESP_LOGI(TAG, "Telegram bot token loaded (len=%d)", (int)strlen(s_bot_token));
+        status_led_set_telegram_state(STATUS_LED_SERVICE_UNKNOWN);
     } else {
-        ESP_LOGI(TAG, "No Telegram bot token configured. Use CLI: set_tg_token <TOKEN>");
+        ESP_LOGW(TAG, "No Telegram bot token. Use CLI: set_tg_token <TOKEN>");
+        tg_record_last_error(401, "No Telegram bot token configured");
+        status_led_set_telegram_state(STATUS_LED_SERVICE_AUTH_ERROR);
     }
     return ESP_OK;
 }
@@ -1564,6 +1944,8 @@ esp_err_t telegram_send_message(const char *chat_id, const char *text)
 {
     if (s_bot_token[0] == '\0') {
         ESP_LOGW(TAG, "Cannot send: no bot token");
+        tg_record_last_error(401, "No Telegram bot token configured");
+        status_led_set_telegram_state(STATUS_LED_SERVICE_AUTH_ERROR);
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -1573,95 +1955,108 @@ esp_err_t telegram_send_message(const char *chat_id, const char *text)
     int all_ok = 1;
 
     while (offset < text_len) {
-        size_t chunk = text_len - offset;
-        if (chunk > MIMI_TG_MAX_MSG_LEN) {
-            chunk = MIMI_TG_MAX_MSG_LEN;
+        size_t remaining = text_len - offset;
+        size_t chunk = tg_choose_chunk_size(text + offset, remaining);
+        if (chunk == 0 || chunk > remaining) {
+            chunk = remaining;
         }
 
-        /* Build JSON body */
-        cJSON *body = cJSON_CreateObject();
-        cJSON_AddStringToObject(body, "chat_id", chat_id);
-
-        /* Create null-terminated chunk */
         char *segment = malloc(chunk + 1);
         if (!segment) {
-            cJSON_Delete(body);
             return ESP_ERR_NO_MEM;
         }
         memcpy(segment, text + offset, chunk);
         segment[chunk] = '\0';
 
-        cJSON_AddStringToObject(body, "text", segment);
-        cJSON_AddStringToObject(body, "parse_mode", "Markdown");
+        char *html_segment = NULL;
+        bool html_ready = tg_markdown_to_html(segment, &html_segment);
+        bool sent_ok = false;
+        bool used_plain_fallback = false;
 
-        char *json_str = cJSON_PrintUnformatted(body);
-        cJSON_Delete(body);
-        free(segment);
+        if (html_ready && html_segment && strlen(html_segment) <= MIMI_TG_MAX_MSG_LEN) {
+            cJSON *body = cJSON_CreateObject();
+            if (body) {
+                cJSON_AddStringToObject(body, "chat_id", chat_id);
+                cJSON_AddStringToObject(body, "text", html_segment);
+                cJSON_AddStringToObject(body, "parse_mode", "HTML");
 
-        if (!json_str) {
-            all_ok = 0;
-            offset += chunk;
-            continue;
-        }
+                char *json_str = cJSON_PrintUnformatted(body);
+                cJSON_Delete(body);
 
-        ESP_LOGI(TAG, "Sending telegram chunk to %s (%d bytes)", chat_id, (int)chunk);
-        char *resp = tg_api_call("sendMessage", json_str);
-        free(json_str);
+                if (json_str) {
+                    ESP_LOGI(TAG, "Sending telegram HTML chunk to %s (%d bytes)", chat_id, (int)chunk);
+                    char *resp = tg_api_call("sendMessage", json_str);
+                    free(json_str);
 
-        int sent_ok = 0;
-        bool markdown_failed = false;
-        if (resp) {
-            const char *desc = NULL;
-            sent_ok = tg_response_is_ok(resp, &desc);
-            if (!sent_ok) {
-                markdown_failed = true;
-                ESP_LOGI(TAG, "Markdown rejected by Telegram for %s: %s",
-                         chat_id, desc ? desc : "unknown");
+                    if (resp) {
+                        int error_code = 0;
+                        char desc[160] = {0};
+                        sent_ok = tg_response_is_ok(resp, &error_code, desc, sizeof(desc));
+                        if (!sent_ok) {
+                            tg_record_last_error(error_code, desc);
+                            status_led_set_telegram_state(tg_led_state_for_error(error_code, desc));
+                            ESP_LOGI(TAG, "HTML rejected by Telegram for %s: %s",
+                                     chat_id, desc[0] ? desc : "unknown");
+                        }
+                        free(resp);
+                    } else {
+                        tg_record_last_error(0, "Telegram request failed");
+                        status_led_set_telegram_state(STATUS_LED_SERVICE_ERROR);
+                        ESP_LOGW(TAG, "HTML send failed: no HTTP response");
+                    }
+                }
             }
+        } else if (html_segment && strlen(html_segment) > MIMI_TG_MAX_MSG_LEN) {
+            ESP_LOGW(TAG, "HTML chunk expanded beyond Telegram limit; fallback to plain text");
         }
 
         if (!sent_ok) {
-            /* Retry without parse_mode */
             cJSON *body2 = cJSON_CreateObject();
-            cJSON_AddStringToObject(body2, "chat_id", chat_id);
-            char *seg2 = malloc(chunk + 1);
-            if (seg2) {
-                memcpy(seg2, text + offset, chunk);
-                seg2[chunk] = '\0';
-                cJSON_AddStringToObject(body2, "text", seg2);
-                free(seg2);
-            }
-            char *json2 = cJSON_PrintUnformatted(body2);
-            cJSON_Delete(body2);
-            if (json2) {
-                char *resp2 = tg_api_call("sendMessage", json2);
-                free(json2);
-                if (resp2) {
-                    const char *desc2 = NULL;
-                    sent_ok = tg_response_is_ok(resp2, &desc2);
-                    if (!sent_ok) {
-                        ESP_LOGE(TAG, "Plain send failed: %s", desc2 ? desc2 : "unknown");
-                        ESP_LOGE(TAG, "Telegram raw response: %.300s", resp2);
+            if (body2) {
+                cJSON_AddStringToObject(body2, "chat_id", chat_id);
+                cJSON_AddStringToObject(body2, "text", segment);
+                char *json2 = cJSON_PrintUnformatted(body2);
+                cJSON_Delete(body2);
+                if (json2) {
+                    char *resp2 = tg_api_call("sendMessage", json2);
+                    free(json2);
+                    if (resp2) {
+                        int error_code2 = 0;
+                        char desc2[160] = {0};
+                        sent_ok = tg_response_is_ok(resp2, &error_code2, desc2, sizeof(desc2));
+                        if (!sent_ok) {
+                            tg_record_last_error(error_code2, desc2);
+                            status_led_set_telegram_state(tg_led_state_for_error(error_code2, desc2));
+                            ESP_LOGE(TAG, "Plain send failed: %s", desc2[0] ? desc2 : "unknown");
+                            ESP_LOGE(TAG, "Telegram raw response: %.300s", resp2);
+                        } else {
+                            used_plain_fallback = true;
+                        }
+                        free(resp2);
+                    } else {
+                        tg_record_last_error(0, "Telegram request failed");
+                        status_led_set_telegram_state(STATUS_LED_SERVICE_ERROR);
+                        ESP_LOGE(TAG, "Plain send failed: no HTTP response");
                     }
-                    free(resp2);
                 } else {
-                    ESP_LOGE(TAG, "Plain send failed: no HTTP response");
+                    ESP_LOGE(TAG, "Plain send failed: no JSON body");
                 }
-            } else {
-                ESP_LOGE(TAG, "Plain send failed: no JSON body");
             }
         }
 
         if (!sent_ok) {
             all_ok = 0;
         } else {
-            if (markdown_failed) {
+            tg_clear_last_error();
+            status_led_set_telegram_state(STATUS_LED_SERVICE_OK);
+            if (used_plain_fallback) {
                 ESP_LOGI(TAG, "Plain-text fallback succeeded for %s", chat_id);
             }
             ESP_LOGI(TAG, "Telegram send success to %s (%d bytes)", chat_id, (int)chunk);
         }
 
-        free(resp);
+        free(html_segment);
+        free(segment);
         offset += chunk;
     }
 
@@ -1677,6 +2072,18 @@ esp_err_t telegram_set_token(const char *token)
     nvs_close(nvs);
 
     strncpy(s_bot_token, token, sizeof(s_bot_token) - 1);
+    tg_clear_last_error();
+    status_led_set_telegram_state(STATUS_LED_SERVICE_UNKNOWN);
     ESP_LOGI(TAG, "Telegram bot token saved");
     return ESP_OK;
+}
+
+int telegram_get_last_error_code(void)
+{
+    return s_last_error_code;
+}
+
+const char *telegram_get_last_error_message(void)
+{
+    return s_last_error_message;
 }

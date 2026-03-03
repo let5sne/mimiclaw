@@ -3,6 +3,7 @@
 #include "esp_err.h"
 #include <stdbool.h>
 #include <stdint.h>
+#include "mimi_config.h"
 
 /* Schedule types */
 typedef enum {
@@ -20,7 +21,7 @@ typedef struct {
     int64_t at_epoch;      /* For AT: unix timestamp */
     char message[256];     /* Message to inject into inbound queue */
     char channel[16];      /* Reply channel (default "system") */
-    char chat_id[32];      /* Reply chat_id (default "cron") */
+    char chat_id[MIMI_CHAT_ID_MAX_LEN]; /* Reply chat_id (default "cron") */
     int64_t last_run;      /* Last run epoch */
     int64_t next_run;      /* Next run epoch */
     bool delete_after_run; /* Remove job after firing (for AT jobs) */

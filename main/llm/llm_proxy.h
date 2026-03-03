@@ -27,6 +27,16 @@ esp_err_t llm_set_provider(const char *provider);
  */
 esp_err_t llm_set_model(const char *model);
 
+/**
+ * 保存自定义 LLM API endpoint 到 NVS。
+ */
+esp_err_t llm_set_api_endpoint(const char *endpoint);
+
+/**
+ * 清除自定义 LLM API endpoint，回退到编译期默认值。
+ */
+esp_err_t llm_clear_api_endpoint(void);
+
 /* ── Tool Use Support ──────────────────────────────────────────── */
 
 typedef struct {

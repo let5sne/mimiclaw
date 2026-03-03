@@ -58,6 +58,7 @@ static volatile bool s_drop_playback_frames = false;
 static volatile bool s_music_playback_active = false;
 static volatile int64_t s_last_playback_frame_ms = 0;
 static volatile bool s_resume_wake_after_playback = false;
+static volatile bool s_auto_followup_enabled = false;
 
 static esp_err_t ws_connect(void);
 
@@ -213,10 +214,12 @@ static void audio_event_handler(audio_event_type_t event, void *user_data)
     case AUDIO_EVENT_SPEECH_START:
         if (s_events) {
             int64_t now_ms = esp_timer_get_time() / 1000;
-            bool barge_in = (s_state == VOICE_STATE_PLAYING)
+            bool barge_in = s_auto_followup_enabled
+                            && (s_state == VOICE_STATE_PLAYING)
                             && !s_music_playback_active
                             && (now_ms - s_playback_started_ms > 800);
-            bool in_followup_window = (s_followup_deadline_ms > now_ms);
+            bool in_followup_window = s_auto_followup_enabled
+                                      && (s_followup_deadline_ms > now_ms);
             if (barge_in || in_followup_window) {
                 ESP_LOGI(TAG, "Speech start -> trigger capture (barge_in=%d followup=%d)",
                          barge_in ? 1 : 0, in_followup_window ? 1 : 0);
@@ -677,6 +680,9 @@ static void voice_task(void *arg)
         bool button_pressed = (bits & EVT_BUTTON_PRESS) != 0;
         if (wake_word_detected || button_pressed) {
             s_followup_deadline_ms = 0;
+            s_auto_followup_enabled = !button_pressed;
+            ESP_LOGI(TAG, "Voice trigger source: %s",
+                     button_pressed ? "button" : "wake_or_followup");
         }
 
         /* If button pressed, debounce */
@@ -1109,10 +1115,15 @@ esp_err_t voice_channel_speak(const char *text)
         ESP_LOGI(TAG, "TTS completed via EVT_TTS_DONE");
     }
 
-    s_followup_deadline_ms = (esp_timer_get_time() / 1000) + MIMI_VOICE_FOLLOWUP_WINDOW_MS;
+    if (s_auto_followup_enabled) {
+        s_followup_deadline_ms = (esp_timer_get_time() / 1000) + MIMI_VOICE_FOLLOWUP_WINDOW_MS;
+        ESP_LOGI(TAG, "Follow-up window opened for %d ms", MIMI_VOICE_FOLLOWUP_WINDOW_MS);
+    } else {
+        s_followup_deadline_ms = 0;
+        ESP_LOGI(TAG, "Follow-up window skipped for button-triggered turn");
+    }
     s_playback_started_ms = 0;
     s_last_playback_frame_ms = 0;
-    ESP_LOGI(TAG, "Follow-up window opened for %d ms", MIMI_VOICE_FOLLOWUP_WINDOW_MS);
     set_state(VOICE_STATE_IDLE);
     return ESP_OK;
 }

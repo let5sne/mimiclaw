@@ -16,6 +16,24 @@
 #ifndef MIMI_SECRET_TG_TOKEN
 #define MIMI_SECRET_TG_TOKEN        ""
 #endif
+#ifndef MIMI_SECRET_FEISHU_APP_ID
+#define MIMI_SECRET_FEISHU_APP_ID   ""
+#endif
+#ifndef MIMI_SECRET_FEISHU_APP_SECRET
+#define MIMI_SECRET_FEISHU_APP_SECRET ""
+#endif
+#ifndef MIMI_SECRET_FEISHU_VERIFY_TOKEN
+#define MIMI_SECRET_FEISHU_VERIFY_TOKEN ""
+#endif
+#ifndef MIMI_SECRET_FEISHU_ENCRYPT_KEY
+#define MIMI_SECRET_FEISHU_ENCRYPT_KEY ""
+#endif
+#ifndef MIMI_SECRET_FEISHU_OPEN_API_BASE
+#define MIMI_SECRET_FEISHU_OPEN_API_BASE "https://open.feishu.cn"
+#endif
+#ifndef MIMI_SECRET_FEISHU_RECEIVE_MODE
+#define MIMI_SECRET_FEISHU_RECEIVE_MODE "websocket"
+#endif
 #ifndef MIMI_SECRET_API_KEY
 #define MIMI_SECRET_API_KEY         ""
 #endif
@@ -64,6 +82,37 @@
 #define MIMI_TG_DOC_TIMEOUT_MS       45000
 #define MIMI_TG_CARD_SHOW_MS         3000
 #define MIMI_TG_CARD_BODY_SCALE      3
+
+/* Feishu Bot */
+#ifndef MIMI_FEISHU_ENABLED
+#define MIMI_FEISHU_ENABLED          1
+#endif
+#define MIMI_FEISHU_EVENTS_PATH      "/feishu/events"
+#define MIMI_FEISHU_EVENT_MAX_BYTES  6144
+#define MIMI_FEISHU_HTTP_TIMEOUT_MS  15000
+#define MIMI_FEISHU_TEXT_MAX_BYTES   3000
+#define MIMI_FEISHU_EVENT_ID_MAX_LEN 128
+#define MIMI_FEISHU_EVENT_DEDUP_SIZE 16
+#define MIMI_FEISHU_EVENT_DEDUP_TTL_MS (10 * 60 * 1000)
+#define MIMI_FEISHU_MEDIA_MAX_BYTES  (2 * 1024 * 1024)
+#define MIMI_FEISHU_WS_ENDPOINT_PATH "/callback/ws/endpoint"
+#define MIMI_FEISHU_WS_URL_MAX_BYTES 512
+#define MIMI_FEISHU_WS_FRAME_MAX_BYTES 8192
+#define MIMI_FEISHU_WS_HEADER_MAX    16
+#define MIMI_FEISHU_WS_ASSEMBLY_SLOTS 2
+#define MIMI_FEISHU_WS_ASSEMBLY_PARTS 8
+#define MIMI_FEISHU_WS_ASSEMBLY_TTL_MS 5000
+#define MIMI_FEISHU_WS_TASK_STACK    (8 * 1024)
+#define MIMI_FEISHU_WS_TASK_PRIO     5
+#define MIMI_FEISHU_WS_CLIENT_TASK_STACK (12 * 1024)
+#define MIMI_FEISHU_WS_BUFFER_SIZE   4096
+#define MIMI_FEISHU_WS_SEND_TIMEOUT_MS 5000
+#define MIMI_FEISHU_WS_RECONNECT_INTERVAL_MS 120000
+#define MIMI_FEISHU_WS_RECONNECT_NONCE_S 30
+#define MIMI_FEISHU_WS_PING_INTERVAL_S 120
+#ifndef MIMI_FEISHU_GATEWAY_MEDIA_ENABLED
+#define MIMI_FEISHU_GATEWAY_MEDIA_ENABLED 0
+#endif
 
 /* Agent Loop */
 #define MIMI_AGENT_STACK             (24 * 1024)
@@ -115,6 +164,7 @@
 #define MIMI_LLM_LOG_PREVIEW_BYTES   160
 
 /* Message Bus */
+#define MIMI_CHAT_ID_MAX_LEN         96
 #define MIMI_BUS_QUEUE_LEN           16
 #define MIMI_OUTBOUND_STACK          (12 * 1024)
 #define MIMI_OUTBOUND_PRIO           5
@@ -140,11 +190,15 @@
 #ifndef MIMI_FILE_WRITE_ALLOW_CONFIG_DIR
 #define MIMI_FILE_WRITE_ALLOW_CONFIG_DIR 0
 #endif
+#ifndef MIMI_FILE_WRITE_ALLOW_SKILLS_DIR
+#define MIMI_FILE_WRITE_ALLOW_SKILLS_DIR 1
+#endif
 #ifndef MIMI_FILE_WRITE_ALLOW_SESSION_DIR
 #define MIMI_FILE_WRITE_ALLOW_SESSION_DIR 0
 #endif
 #define MIMI_CONTEXT_BUF_SIZE        (16 * 1024)
 #define MIMI_SESSION_MAX_MSGS        20
+#define MIMI_MEMORY_RECENT_DAYS      5
 
 /* Cron / Heartbeat */
 #define MIMI_CRON_FILE               MIMI_SPIFFS_CONFIG_DIR "/cron.json"
@@ -196,15 +250,23 @@
 #define MIMI_NVS_SEARCH              "search_config"
 #define MIMI_NVS_SECURITY            "security_cfg"
 #define MIMI_NVS_CRON                "cron_cfg"
+#define MIMI_NVS_FEISHU              "feishu_cfg"
 #define MIMI_NVS_AUDIO               "audio_config"
 
 /* NVS Keys */
 #define MIMI_NVS_KEY_SSID            "ssid"
 #define MIMI_NVS_KEY_PASS            "password"
 #define MIMI_NVS_KEY_TG_TOKEN        "bot_token"
+#define MIMI_NVS_KEY_FEISHU_APP_ID   "app_id"
+#define MIMI_NVS_KEY_FEISHU_SECRET   "app_secret"
+#define MIMI_NVS_KEY_FEISHU_VERIFY   "verify_token"
+#define MIMI_NVS_KEY_FEISHU_ENCRYPT  "encrypt_key"
+#define MIMI_NVS_KEY_FEISHU_OPENAPI  "openapi_base"
+#define MIMI_NVS_KEY_FEISHU_MODE     "recv_mode"
 #define MIMI_NVS_KEY_API_KEY         "api_key"
 #define MIMI_NVS_KEY_MODEL           "model"
 #define MIMI_NVS_KEY_PROVIDER        "provider"
+#define MIMI_NVS_KEY_ENDPOINT        "endpoint"
 #define MIMI_NVS_KEY_PROXY_HOST      "host"
 #define MIMI_NVS_KEY_PROXY_PORT      "port"
 #define MIMI_NVS_KEY_ALLOW_FROM      "allow_from"
@@ -213,9 +275,26 @@
 #define MIMI_NVS_KEY_CRON_TASK       "task"
 #define MIMI_NVS_KEY_VOLUME          "volume"
 
+/* Status LED Configuration (ESP32-S3-DevKitC-1 onboard RGB LED) */
+#ifndef MIMI_STATUS_LED_ENABLED
+#define MIMI_STATUS_LED_ENABLED      1
+#endif
+
+#ifndef MIMI_STATUS_LED_PIN
+#define MIMI_STATUS_LED_PIN          38
+#endif
+
+#ifndef MIMI_STATUS_LED_BRIGHTNESS
+#define MIMI_STATUS_LED_BRIGHTNESS   48
+#endif
+
 /* Display Configuration */
 #ifndef MIMI_DISPLAY_ENABLED
 #define MIMI_DISPLAY_ENABLED         1  /* Set to 1 to enable display */
+#endif
+
+#ifndef MIMI_DISPLAY_UI_MODE
+#define MIMI_DISPLAY_UI_MODE         1  /* 0=文本调试模式, 1=虚拟形象模式 */
 #endif
 
 #ifndef MIMI_DISPLAY_TYPE
@@ -333,7 +412,7 @@
 
 /* Voice Channel Configuration */
 #ifndef MIMI_VOICE_ENABLED
-#define MIMI_VOICE_ENABLED           1  /* Set to 1 to enable push-to-talk voice */
+#define MIMI_VOICE_ENABLED           0  /* 无网关版本默认关闭外部语音链路 */
 #endif
 
 #ifndef MIMI_VOICE_BUTTON_PIN
@@ -356,6 +435,18 @@
 #define MIMI_VOICE_TTS_RATE          "-5%"
 #endif
 
+#ifndef MIMI_VOICE_MIRROR_TELEGRAM
+#define MIMI_VOICE_MIRROR_TELEGRAM   0   /* 无网关版本默认关闭 Telegram 语音镜像 */
+#endif
+
+#ifndef MIMI_VOICE_SUMMARY_MAX_BYTES
+#define MIMI_VOICE_SUMMARY_MAX_BYTES 160 /* 本地语音摘要的 UTF-8 字节上限 */
+#endif
+
+#ifndef MIMI_VOICE_SUMMARY_MAX_SENTENCES
+#define MIMI_VOICE_SUMMARY_MAX_SENTENCES 2
+#endif
+
 #define MIMI_VOICE_TASK_STACK        (8 * 1024)
 #define MIMI_VOICE_TASK_PRIO         5
 #define MIMI_VOICE_TASK_CORE         0
@@ -363,6 +454,11 @@
 /* NVS for voice config */
 #define MIMI_NVS_VOICE               "voice_config"
 #define MIMI_NVS_KEY_VOICE_GW        "gateway_url"
+
+/* Telegram 媒体扩展（依赖外部 voice gateway HTTP 能力） */
+#ifndef MIMI_TELEGRAM_GATEWAY_MEDIA_ENABLED
+#define MIMI_TELEGRAM_GATEWAY_MEDIA_ENABLED 0
+#endif
 
 /* Wake Word Configuration */
 #ifndef MIMI_AUDIO_WAKE_WORD
