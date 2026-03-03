@@ -247,6 +247,37 @@ mimi> clear_proxy                    # 清除代理
   - 设备日志出现 `Feishu text from ...`
   - Bot 返回一条文本回复
 
+#### 4.1 本地回放联调（不依赖飞书后台）
+
+如果你只想验证设备侧的 `/feishu/events` 处理链路，可以直接在开发机执行：
+
+```bash
+./tools/run_feishu_replay.sh --scenario all --verify-token mimiclaw-feishu
+```
+
+常见用法：
+
+```bash
+# 明文 text / duplicate / image / file / audio / sticker 全回放
+./tools/run_feishu_replay.sh --scenario all --verify-token mimiclaw-feishu
+
+# 只测加密重复投递
+./tools/run_feishu_replay.sh \
+  --scenario duplicate \
+  --verify-token mimiclaw-feishu \
+  --encrypt-key your_encrypt_key \
+  --encrypted
+
+# 打印请求与响应体，便于对照签名和事件结构
+./tools/run_feishu_replay.sh --scenario text --show-body
+```
+
+说明：
+
+- 脚本默认把请求打到 `http://127.0.0.1:18789/feishu/events`
+- `duplicate` 场景会复用同一个 `event_id/message_id` 连发两次，用来验证固件去重
+- `image/file/audio/sticker` 场景不会下载真实媒体，只验证“回调 -> 摘要文本 -> Agent”这条降级链路
+
 #### 5. 当前边界
 
 - 文本消息会原样进入 Agent

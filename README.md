@@ -222,6 +222,37 @@ This firmware now supports **encrypted Feishu event payloads**:
 - send `hello` to the bot in Feishu
 - expect a text reply from MimiClaw
 
+4.1 Local replay without the Feishu console
+
+If you only want to validate the device-side `/feishu/events` path, run this from your dev machine:
+
+```bash
+./tools/run_feishu_replay.sh --scenario all --verify-token mimiclaw-feishu
+```
+
+Common examples:
+
+```bash
+# replay plaintext text / duplicate / image / file / audio / sticker callbacks
+./tools/run_feishu_replay.sh --scenario all --verify-token mimiclaw-feishu
+
+# replay encrypted duplicate delivery
+./tools/run_feishu_replay.sh \
+  --scenario duplicate \
+  --verify-token mimiclaw-feishu \
+  --encrypt-key your_encrypt_key \
+  --encrypted
+
+# print request and response bodies for debugging
+./tools/run_feishu_replay.sh --scenario text --show-body
+```
+
+Notes:
+
+- the script targets `http://127.0.0.1:18789/feishu/events` by default
+- the `duplicate` scenario sends the same `event_id/message_id` twice to verify firmware deduplication
+- `image/file/audio/sticker` scenarios do not download real media; they only validate the callback -> summary text -> Agent downgrade path
+
 Current limits:
 
 - text messages go to the Agent as-is
