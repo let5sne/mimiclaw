@@ -16,6 +16,15 @@
 #ifndef MIMI_SECRET_TG_TOKEN
 #define MIMI_SECRET_TG_TOKEN        ""
 #endif
+#ifndef MIMI_SECRET_FEISHU_APP_ID
+#define MIMI_SECRET_FEISHU_APP_ID   ""
+#endif
+#ifndef MIMI_SECRET_FEISHU_APP_SECRET
+#define MIMI_SECRET_FEISHU_APP_SECRET ""
+#endif
+#ifndef MIMI_SECRET_FEISHU_VERIFY_TOKEN
+#define MIMI_SECRET_FEISHU_VERIFY_TOKEN ""
+#endif
 #ifndef MIMI_SECRET_API_KEY
 #define MIMI_SECRET_API_KEY         ""
 #endif
@@ -62,6 +71,15 @@
 #define MIMI_TG_CARD_SHOW_MS         3000
 #define MIMI_TG_CARD_BODY_SCALE      3
 
+/* Feishu Bot */
+#ifndef MIMI_FEISHU_ENABLED
+#define MIMI_FEISHU_ENABLED          1
+#endif
+#define MIMI_FEISHU_EVENTS_PATH      "/feishu/events"
+#define MIMI_FEISHU_EVENT_MAX_BYTES  6144
+#define MIMI_FEISHU_HTTP_TIMEOUT_MS  15000
+#define MIMI_FEISHU_TEXT_MAX_BYTES   3000
+
 /* Agent Loop */
 #define MIMI_AGENT_STACK             (24 * 1024)
 #define MIMI_AGENT_PRIO              6
@@ -103,6 +121,7 @@
 #define MIMI_LLM_LOG_PREVIEW_BYTES   160
 
 /* Message Bus */
+#define MIMI_CHAT_ID_MAX_LEN         96
 #define MIMI_BUS_QUEUE_LEN           16
 #define MIMI_OUTBOUND_STACK          (12 * 1024)
 #define MIMI_OUTBOUND_PRIO           5
@@ -339,7 +358,7 @@
 
 /* Voice Channel Configuration */
 #ifndef MIMI_VOICE_ENABLED
-#define MIMI_VOICE_ENABLED           1  /* Set to 1 to enable push-to-talk voice */
+#define MIMI_VOICE_ENABLED           0  /* 无网关版本默认关闭外部语音链路 */
 #endif
 
 #ifndef MIMI_VOICE_BUTTON_PIN
@@ -363,7 +382,7 @@
 #endif
 
 #ifndef MIMI_VOICE_MIRROR_TELEGRAM
-#define MIMI_VOICE_MIRROR_TELEGRAM   1   /* 1=Telegram 全文同时播报本地语音摘要 */
+#define MIMI_VOICE_MIRROR_TELEGRAM   0   /* 无网关版本默认关闭 Telegram 语音镜像 */
 #endif
 
 #ifndef MIMI_VOICE_SUMMARY_MAX_BYTES
@@ -381,6 +400,11 @@
 /* NVS for voice config */
 #define MIMI_NVS_VOICE               "voice_config"
 #define MIMI_NVS_KEY_VOICE_GW        "gateway_url"
+
+/* Telegram 媒体扩展（依赖外部 voice gateway HTTP 能力） */
+#ifndef MIMI_TELEGRAM_GATEWAY_MEDIA_ENABLED
+#define MIMI_TELEGRAM_GATEWAY_MEDIA_ENABLED 0
+#endif
 
 /* Wake Word Configuration */
 #ifndef MIMI_AUDIO_WAKE_WORD

@@ -14,6 +14,7 @@
 #include "bus/message_bus.h"
 #include "wifi/wifi_manager.h"
 #include "telegram/telegram_bot.h"
+#include "feishu/feishu_bot.h"
 #include "llm/llm_proxy.h"
 #include "agent/agent_loop.h"
 #include "memory/memory_store.h"
@@ -34,6 +35,7 @@
 
 static const char *TAG = "mimi";
 
+#if MIMI_VOICE_ENABLED && MIMI_AUDIO_ENABLED && MIMI_VOICE_MIRROR_TELEGRAM
 static size_t outbound_utf8_char_len(unsigned char c)
 {
     if ((c & 0x80) == 0) return 1;
@@ -197,7 +199,6 @@ static void outbound_build_voice_summary(const char *src, char *dst, size_t dst_
     }
 }
 
-#if MIMI_VOICE_ENABLED && MIMI_AUDIO_ENABLED && MIMI_VOICE_MIRROR_TELEGRAM
 static void outbound_mirror_telegram_to_voice(const mimi_msg_t *msg, bool is_status)
 {
     char summary[256] = {0};
@@ -258,6 +259,10 @@ static esp_err_t outbound_send_once(const mimi_msg_t *msg, bool is_status)
         outbound_mirror_telegram_to_voice(msg, is_status);
 #endif
         return ESP_OK;
+    }
+
+    if (strcmp(msg->channel, MIMI_CHAN_FEISHU) == 0) {
+        return feishu_send_message(msg->chat_id, msg->content);
     }
 
     if (strcmp(msg->channel, MIMI_CHAN_WEBSOCKET) == 0) {
@@ -473,6 +478,7 @@ void app_main(void)
     ESP_ERROR_CHECK(http_proxy_init());
     ESP_ERROR_CHECK(access_control_init());
     ESP_ERROR_CHECK(telegram_bot_init());
+    ESP_ERROR_CHECK(feishu_bot_init());
     ESP_ERROR_CHECK(llm_proxy_init());
     ESP_ERROR_CHECK(tool_registry_init());
     ESP_ERROR_CHECK(agent_loop_init());
@@ -500,6 +506,7 @@ void app_main(void)
             ESP_ERROR_CHECK(telegram_bot_start());
             ESP_ERROR_CHECK(agent_loop_start());
             ESP_ERROR_CHECK(ws_server_start());
+            ESP_ERROR_CHECK(feishu_bot_start());
 
 #if MIMI_HEARTBEAT_ENABLED
             {

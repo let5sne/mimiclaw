@@ -9,6 +9,7 @@ idf_component_register(
         "bus/message_bus.c"
         "wifi/wifi_manager.c"
         "telegram/telegram_bot.c"
+        "feishu/feishu_bot.c"
         "llm/llm_proxy.c"
         "agent/agent_loop.c"
         "agent/context_builder.c"

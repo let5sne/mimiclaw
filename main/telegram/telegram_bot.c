@@ -36,6 +36,7 @@ static int64_t s_last_offset_save_us = 0;
 #define TG_OFFSET_SAVE_INTERVAL_US   (5LL * 1000 * 1000)
 #define TG_OFFSET_SAVE_STEP          10
 
+#if MIMI_TELEGRAM_GATEWAY_MEDIA_ENABLED
 #define TG_VISION_CACHE_SLOTS 8
 #define TG_VISION_TEXT_MAX    768
 
@@ -47,6 +48,7 @@ typedef struct {
 
 static tg_vision_cache_entry_t s_vision_cache[TG_VISION_CACHE_SLOTS];
 static uint32_t s_vision_cache_stamp = 0;
+#endif
 
 /* HTTP response accumulator */
 typedef struct {
@@ -608,6 +610,20 @@ static int tg_response_is_ok(const char *resp, int *out_error_code,
     return ok;
 }
 
+typedef enum {
+    TG_STT_STAGE_NONE = 0,
+    TG_STT_STAGE_GET_FILE,
+    TG_STT_STAGE_DOWNLOAD,
+    TG_STT_STAGE_UPLOAD,
+} tg_stt_stage_t;
+
+typedef enum {
+    TG_MEDIA_KIND_NONE = 0,
+    TG_MEDIA_KIND_PHOTO,
+    TG_MEDIA_KIND_DOCUMENT,
+} tg_media_kind_t;
+
+#if MIMI_TELEGRAM_GATEWAY_MEDIA_ENABLED
 static int tg_find_http_header_end(const uint8_t *buf, size_t len)
 {
     if (!buf || len < 4) return -1;
@@ -627,19 +643,6 @@ static int tg_parse_http_status(const uint8_t *buf)
     sscanf((const char *)buf, "HTTP/%*d.%*d %d", &status);
     return status;
 }
-
-typedef enum {
-    TG_STT_STAGE_NONE = 0,
-    TG_STT_STAGE_GET_FILE,
-    TG_STT_STAGE_DOWNLOAD,
-    TG_STT_STAGE_UPLOAD,
-} tg_stt_stage_t;
-
-typedef enum {
-    TG_MEDIA_KIND_NONE = 0,
-    TG_MEDIA_KIND_PHOTO,
-    TG_MEDIA_KIND_DOCUMENT,
-} tg_media_kind_t;
 
 static const char *tg_stt_stage_name(tg_stt_stage_t stage)
 {
@@ -1337,6 +1340,7 @@ static void tg_extract_document_info(cJSON *message, const char **out_name, cons
         *out_mime = mime_item->valuestring;
     }
 }
+#endif
 
 static bool tg_extract_sender_id(cJSON *message, char *sender_id, size_t size)
 {
@@ -1537,6 +1541,7 @@ static void tg_push_inbound(const char *chat_id, const char *content,
     }
 }
 
+#if MIMI_TELEGRAM_GATEWAY_MEDIA_ENABLED
 static bool tg_build_downloaded_media_summary(cJSON *message, tg_media_kind_t kind,
                                               const char *file_path, size_t media_len,
                                               char *out, size_t out_size)
@@ -1596,6 +1601,7 @@ static bool tg_build_downloaded_media_summary(cJSON *message, tg_media_kind_t ki
 
     return false;
 }
+#endif
 
 static void process_updates(const char *json_str)
 {
@@ -1661,6 +1667,7 @@ static void process_updates(const char *json_str)
             continue;
         }
 
+ #if MIMI_TELEGRAM_GATEWAY_MEDIA_ENABLED
         const char *voice_file_id = NULL;
         const char *voice_format = NULL;
         if (tg_extract_voice_file(message, &voice_file_id, &voice_format)) {
@@ -1828,6 +1835,7 @@ static void process_updates(const char *json_str)
                      tg_media_kind_name(media_kind), esp_err_to_name(media_err), chat_id_str,
                      media_file_id ? media_file_id : "");
         }
+ #endif
 
         char media_summary[1024];
         if (tg_build_media_summary(message, media_summary, sizeof(media_summary))) {

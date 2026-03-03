@@ -16,7 +16,7 @@ static httpd_handle_t s_server = NULL;
 /* Simple client tracking */
 typedef struct {
     int fd;
-    char chat_id[32];
+    char chat_id[MIMI_CHAT_ID_MAX_LEN];
     bool active;
 } ws_client_t;
 
@@ -258,6 +258,14 @@ esp_err_t ws_server_send(const char *chat_id, const char *text)
     }
 
     return ret;
+}
+
+esp_err_t ws_server_register_uri(const httpd_uri_t *uri)
+{
+    if (!s_server || !uri) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return httpd_register_uri_handler(s_server, uri);
 }
 
 esp_err_t ws_server_stop(void)

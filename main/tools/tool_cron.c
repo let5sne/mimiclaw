@@ -46,10 +46,11 @@ esp_err_t tool_cron_add_execute(const char *input_json, char *output, size_t out
     if (channel) strncpy(job.channel, channel, sizeof(job.channel) - 1);
     if (chat_id) strncpy(job.chat_id, chat_id, sizeof(job.chat_id) - 1);
 
-    if (strcmp(job.channel, MIMI_CHAN_TELEGRAM) == 0 &&
+    if ((strcmp(job.channel, MIMI_CHAN_TELEGRAM) == 0 ||
+         strcmp(job.channel, MIMI_CHAN_FEISHU) == 0) &&
         (job.chat_id[0] == '\0' || strcmp(job.chat_id, "cron") == 0)) {
         snprintf(output, output_size,
-                 "Error: cron_add with channel='telegram' requires a valid chat_id");
+                 "Error: cron_add with channel='telegram' or 'feishu' requires a valid chat_id");
         cJSON_Delete(root);
         return ESP_ERR_INVALID_ARG;
     }
