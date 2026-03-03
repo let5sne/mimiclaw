@@ -302,6 +302,8 @@ python3 tools/doc_regression.py \
 ```
 mimi> wifi_set MySSID MyPassword   # 换 WiFi
 mimi> set_tg_token 123456:ABC...   # 换 Telegram Bot Token
+mimi> set_feishu_app cli_xxx secret_xxx   # 设置飞书 app_id / app_secret
+mimi> set_feishu_verify_token token_xxx   # 设置飞书 Verify Token
 mimi> set_api_key sk-ant-api03-... # 换 API Key（Anthropic 或 OpenAI）
 mimi> set_model_provider openai    # 切换提供商（anthropic|openai）
 mimi> set_model gpt-4o             # 换模型
@@ -314,8 +316,8 @@ mimi> config_reset                 # 清除 NVS，恢复编译时默认值
 
 说明：
 
-- 目前没有 `set_feishu_*` 系列命令
-- 飞书 `app_id/app_secret/verify_token` 修改后需要重新编译固件
+- 现在支持通过 CLI 更新飞书 `app_id/app_secret/verify_token`
+- 已保存到 NVS 的飞书配置会覆盖编译时默认值
 
 **调试与运维：**
 

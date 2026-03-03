@@ -2,6 +2,7 @@
 #include "mimi_config.h"
 #include "wifi/wifi_manager.h"
 #include "telegram/telegram_bot.h"
+#include "feishu/feishu_bot.h"
 #include "llm/llm_proxy.h"
 #include "agent/agent_loop.h"
 #include "memory/memory_store.h"
@@ -70,6 +71,17 @@ static struct {
     struct arg_end *end;
 } tg_token_args;
 
+static struct {
+    struct arg_str *app_id;
+    struct arg_str *app_secret;
+    struct arg_end *end;
+} feishu_app_args;
+
+static struct {
+    struct arg_str *token;
+    struct arg_end *end;
+} feishu_verify_args;
+
 static int cmd_set_tg_token(int argc, char **argv)
 {
     int nerrors = arg_parse(argc, argv, (void **)&tg_token_args);
@@ -79,6 +91,67 @@ static int cmd_set_tg_token(int argc, char **argv)
     }
     telegram_set_token(tg_token_args.token->sval[0]);
     printf("Telegram bot token saved.\n");
+    return 0;
+}
+
+static int cmd_set_feishu_app(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&feishu_app_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, feishu_app_args.end, argv[0]);
+        return 1;
+    }
+
+    esp_err_t err = feishu_set_app_credentials(feishu_app_args.app_id->sval[0],
+                                               feishu_app_args.app_secret->sval[0]);
+    if (err != ESP_OK) {
+        printf("Failed to save Feishu app credentials: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("Feishu app credentials saved.\n");
+    return 0;
+}
+
+static int cmd_clear_feishu_app(int argc, char **argv)
+{
+    esp_err_t err = feishu_clear_app_credentials();
+    if (err != ESP_OK) {
+        printf("Failed to clear Feishu app credentials: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("Feishu app credentials cleared.\n");
+    return 0;
+}
+
+static int cmd_set_feishu_verify_token(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&feishu_verify_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, feishu_verify_args.end, argv[0]);
+        return 1;
+    }
+
+    esp_err_t err = feishu_set_verify_token(feishu_verify_args.token->sval[0]);
+    if (err != ESP_OK) {
+        printf("Failed to save Feishu verify token: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("Feishu verify token saved.\n");
+    return 0;
+}
+
+static int cmd_clear_feishu_verify_token(int argc, char **argv)
+{
+    esp_err_t err = feishu_clear_verify_token();
+    if (err != ESP_OK) {
+        printf("Failed to clear Feishu verify token: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("Feishu verify token cleared.\n");
     return 0;
 }
 
@@ -908,6 +981,9 @@ static int cmd_config_show(int argc, char **argv)
     print_config("WiFi SSID",  MIMI_NVS_WIFI,   MIMI_NVS_KEY_SSID,     MIMI_SECRET_WIFI_SSID,  false);
     print_config("WiFi Pass",  MIMI_NVS_WIFI,   MIMI_NVS_KEY_PASS,     MIMI_SECRET_WIFI_PASS,  true);
     print_config("TG Token",   MIMI_NVS_TG,     MIMI_NVS_KEY_TG_TOKEN, MIMI_SECRET_TG_TOKEN,   true);
+    print_config("Feishu App", MIMI_NVS_FEISHU, MIMI_NVS_KEY_FEISHU_APP_ID, MIMI_SECRET_FEISHU_APP_ID, false);
+    print_config("Feishu Sec", MIMI_NVS_FEISHU, MIMI_NVS_KEY_FEISHU_SECRET, MIMI_SECRET_FEISHU_APP_SECRET, true);
+    print_config("Feishu Vfy", MIMI_NVS_FEISHU, MIMI_NVS_KEY_FEISHU_VERIFY, MIMI_SECRET_FEISHU_VERIFY_TOKEN, true);
     print_config("API Key",    MIMI_NVS_LLM,    MIMI_NVS_KEY_API_KEY,  MIMI_SECRET_API_KEY,    true);
     print_config("Model",      MIMI_NVS_LLM,    MIMI_NVS_KEY_MODEL,    MIMI_SECRET_MODEL,      false);
     print_config("Provider",   MIMI_NVS_LLM,    MIMI_NVS_KEY_PROVIDER, MIMI_SECRET_MODEL_PROVIDER, false);
@@ -928,7 +1004,7 @@ static int cmd_config_reset(int argc, char **argv)
 {
     const char *namespaces[] = {
         MIMI_NVS_WIFI, MIMI_NVS_TG, MIMI_NVS_LLM, MIMI_NVS_PROXY, MIMI_NVS_SEARCH,
-        MIMI_NVS_VOICE, MIMI_NVS_SECURITY, MIMI_NVS_AUDIO
+        MIMI_NVS_VOICE, MIMI_NVS_SECURITY, MIMI_NVS_AUDIO, MIMI_NVS_FEISHU
     };
     int ns_count = sizeof(namespaces) / sizeof(namespaces[0]);
     for (int i = 0; i < ns_count; i++) {
@@ -1355,6 +1431,45 @@ esp_err_t serial_cli_init(void)
     };
     esp_console_cmd_register(&tg_token_cmd);
 
+    /* set_feishu_app */
+    feishu_app_args.app_id = arg_str1(NULL, NULL, "<app_id>", "Feishu app id");
+    feishu_app_args.app_secret = arg_str1(NULL, NULL, "<app_secret>", "Feishu app secret");
+    feishu_app_args.end = arg_end(2);
+    esp_console_cmd_t feishu_app_cmd = {
+        .command = "set_feishu_app",
+        .help = "Set Feishu app_id and app_secret",
+        .func = &cmd_set_feishu_app,
+        .argtable = &feishu_app_args,
+    };
+    esp_console_cmd_register(&feishu_app_cmd);
+
+    /* clear_feishu_app */
+    esp_console_cmd_t clear_feishu_app_cmd = {
+        .command = "clear_feishu_app",
+        .help = "Clear Feishu app_id and app_secret",
+        .func = &cmd_clear_feishu_app,
+    };
+    esp_console_cmd_register(&clear_feishu_app_cmd);
+
+    /* set_feishu_verify_token */
+    feishu_verify_args.token = arg_str1(NULL, NULL, "<token>", "Feishu verify token");
+    feishu_verify_args.end = arg_end(1);
+    esp_console_cmd_t feishu_verify_cmd = {
+        .command = "set_feishu_verify_token",
+        .help = "Set Feishu verify token",
+        .func = &cmd_set_feishu_verify_token,
+        .argtable = &feishu_verify_args,
+    };
+    esp_console_cmd_register(&feishu_verify_cmd);
+
+    /* clear_feishu_verify_token */
+    esp_console_cmd_t clear_feishu_verify_cmd = {
+        .command = "clear_feishu_verify_token",
+        .help = "Clear Feishu verify token",
+        .func = &cmd_clear_feishu_verify_token,
+    };
+    esp_console_cmd_register(&clear_feishu_verify_cmd);
+
     /* set_api_key */
     api_key_args.key = arg_str1(NULL, NULL, "<key>", "LLM API key");
     api_key_args.end = arg_end(1);
@@ -1559,7 +1674,7 @@ esp_err_t serial_cli_init(void)
     allow_from_args.end = arg_end(1);
     esp_console_cmd_t allow_from_cmd = {
         .command = "set_allow_from",
-        .help = "Set Telegram allowlist (example: set_allow_from 12345,67890)",
+        .help = "Set sender allowlist (example: set_allow_from 12345,ou_xxx)",
         .func = &cmd_set_allow_from,
         .argtable = &allow_from_args,
     };
@@ -1568,7 +1683,7 @@ esp_err_t serial_cli_init(void)
     /* clear_allow_from */
     esp_console_cmd_t clear_allow_from_cmd = {
         .command = "clear_allow_from",
-        .help = "Clear Telegram allowlist (open mode)",
+        .help = "Clear sender allowlist (open mode)",
         .func = &cmd_clear_allow_from,
     };
     esp_console_cmd_register(&clear_allow_from_cmd);

@@ -275,6 +275,8 @@ Connect via serial to configure or debug. **Config commands** let you change set
 ```
 mimi> wifi_set MySSID MyPassword   # change WiFi network
 mimi> set_tg_token 123456:ABC...   # change Telegram bot token
+mimi> set_feishu_app cli_xxx secret_xxx   # set Feishu app_id / app_secret
+mimi> set_feishu_verify_token token_xxx   # set Feishu Verify Token
 mimi> set_api_key sk-ant-api03-... # change API key (Anthropic or OpenAI)
 mimi> set_model_provider openai    # switch provider (anthropic|openai)
 mimi> set_model gpt-4o             # change LLM model
@@ -287,8 +289,8 @@ mimi> config_reset                 # clear NVS, revert to build-time defaults
 
 Note:
 
-- there are currently no `set_feishu_*` CLI commands
-- changing Feishu `app_id/app_secret/verify_token` requires a rebuild
+- Feishu `app_id/app_secret/verify_token` can now be updated via CLI
+- NVS-stored Feishu config overrides build-time defaults
 
 **Debug & maintenance:**
 

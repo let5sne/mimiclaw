@@ -15,6 +15,7 @@
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "nvs.h"
 #include "cJSON.h"
 
 static const char *TAG = "feishu";
@@ -46,6 +47,62 @@ static void safe_copy(char *dst, size_t dst_size, const char *src)
 static bool feishu_is_configured(void)
 {
     return s_app_id[0] != '\0' && s_app_secret[0] != '\0';
+}
+
+static void feishu_invalidate_tenant_token(void)
+{
+    s_tenant_token[0] = '\0';
+    s_tenant_token_expire_us = 0;
+}
+
+static esp_err_t feishu_nvs_write_str(const char *key, const char *value)
+{
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open(MIMI_NVS_FEISHU, NVS_READWRITE, &nvs);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = nvs_set_str(nvs, key, value ? value : "");
+    if (err == ESP_OK) {
+        err = nvs_commit(nvs);
+    }
+    nvs_close(nvs);
+    return err;
+}
+
+static esp_err_t feishu_nvs_erase_key(const char *key)
+{
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open(MIMI_NVS_FEISHU, NVS_READWRITE, &nvs);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = nvs_erase_key(nvs, key);
+    if (err == ESP_OK || err == ESP_ERR_NVS_NOT_FOUND) {
+        err = nvs_commit(nvs);
+    }
+    nvs_close(nvs);
+    return err;
+}
+
+static void feishu_load_str_from_nvs(const char *key, char *dst, size_t dst_size)
+{
+    nvs_handle_t nvs;
+    if (!dst || dst_size == 0) {
+        return;
+    }
+    if (nvs_open(MIMI_NVS_FEISHU, NVS_READONLY, &nvs) != ESP_OK) {
+        return;
+    }
+    size_t len = dst_size;
+    char tmp[256] = {0};
+    if (dst_size > sizeof(tmp)) {
+        len = sizeof(tmp);
+    }
+    if (nvs_get_str(nvs, key, tmp, &len) == ESP_OK) {
+        safe_copy(dst, dst_size, tmp);
+    }
+    nvs_close(nvs);
 }
 
 static esp_err_t http_event_handler(esp_http_client_event_t *evt)
@@ -271,8 +328,7 @@ static esp_err_t feishu_send_text_once(const char *chat_id, const char *text, bo
     }
 
     if (status == 401) {
-        s_tenant_token[0] = '\0';
-        s_tenant_token_expire_us = 0;
+        feishu_invalidate_tenant_token();
         free(resp);
         err = feishu_ensure_tenant_token();
         if (err != ESP_OK) {
@@ -425,6 +481,11 @@ static void feishu_push_inbound(const char *chat_id, const char *content)
 
 static esp_err_t feishu_events_handler(httpd_req_t *req)
 {
+    if (!feishu_is_configured()) {
+        ESP_LOGW(TAG, "Ignore Feishu callback: app credentials are not configured");
+        return feishu_send_http_json(req, "503 Service Unavailable", "{\"code\":503}");
+    }
+
     char *body = NULL;
     esp_err_t err = feishu_read_http_body(req, &body);
     if (err != ESP_OK) {
@@ -552,6 +613,10 @@ esp_err_t feishu_bot_init(void)
     safe_copy(s_app_id, sizeof(s_app_id), MIMI_SECRET_FEISHU_APP_ID);
     safe_copy(s_app_secret, sizeof(s_app_secret), MIMI_SECRET_FEISHU_APP_SECRET);
     safe_copy(s_verify_token, sizeof(s_verify_token), MIMI_SECRET_FEISHU_VERIFY_TOKEN);
+    feishu_load_str_from_nvs(MIMI_NVS_KEY_FEISHU_APP_ID, s_app_id, sizeof(s_app_id));
+    feishu_load_str_from_nvs(MIMI_NVS_KEY_FEISHU_SECRET, s_app_secret, sizeof(s_app_secret));
+    feishu_load_str_from_nvs(MIMI_NVS_KEY_FEISHU_VERIFY, s_verify_token, sizeof(s_verify_token));
+    feishu_invalidate_tenant_token();
 
     if (!feishu_is_configured()) {
         ESP_LOGI(TAG, "Feishu bot disabled: app_id/app_secret not configured");
@@ -619,5 +684,79 @@ esp_err_t feishu_send_message(const char *chat_id, const char *text)
         }
         offset += chunk_len;
     }
+    return ESP_OK;
+}
+
+esp_err_t feishu_set_app_credentials(const char *app_id, const char *app_secret)
+{
+    if (!app_id || !app_secret ||
+        strlen(app_id) >= sizeof(s_app_id) ||
+        strlen(app_secret) >= sizeof(s_app_secret)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    esp_err_t err = feishu_nvs_write_str(MIMI_NVS_KEY_FEISHU_APP_ID, app_id);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = feishu_nvs_write_str(MIMI_NVS_KEY_FEISHU_SECRET, app_secret);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    safe_copy(s_app_id, sizeof(s_app_id), app_id);
+    safe_copy(s_app_secret, sizeof(s_app_secret), app_secret);
+    feishu_invalidate_tenant_token();
+
+    err = feishu_bot_start();
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        return err;
+    }
+
+    ESP_LOGI(TAG, "Feishu app credentials updated");
+    return ESP_OK;
+}
+
+esp_err_t feishu_clear_app_credentials(void)
+{
+    esp_err_t err = feishu_nvs_erase_key(MIMI_NVS_KEY_FEISHU_APP_ID);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = feishu_nvs_erase_key(MIMI_NVS_KEY_FEISHU_SECRET);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    safe_copy(s_app_id, sizeof(s_app_id), MIMI_SECRET_FEISHU_APP_ID);
+    safe_copy(s_app_secret, sizeof(s_app_secret), MIMI_SECRET_FEISHU_APP_SECRET);
+    feishu_invalidate_tenant_token();
+    ESP_LOGI(TAG, "Feishu app credentials cleared");
+    return ESP_OK;
+}
+
+esp_err_t feishu_set_verify_token(const char *token)
+{
+    if (!token || strlen(token) >= sizeof(s_verify_token)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    esp_err_t err = feishu_nvs_write_str(MIMI_NVS_KEY_FEISHU_VERIFY, token);
+    if (err != ESP_OK) {
+        return err;
+    }
+    safe_copy(s_verify_token, sizeof(s_verify_token), token);
+    ESP_LOGI(TAG, "Feishu verify token updated");
+    return ESP_OK;
+}
+
+esp_err_t feishu_clear_verify_token(void)
+{
+    esp_err_t err = feishu_nvs_erase_key(MIMI_NVS_KEY_FEISHU_VERIFY);
+    if (err != ESP_OK) {
+        return err;
+    }
+    safe_copy(s_verify_token, sizeof(s_verify_token), MIMI_SECRET_FEISHU_VERIFY_TOKEN);
+    ESP_LOGI(TAG, "Feishu verify token cleared");
     return ESP_OK;
 }

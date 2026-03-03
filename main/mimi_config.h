@@ -203,12 +203,16 @@
 #define MIMI_NVS_SEARCH              "search_config"
 #define MIMI_NVS_SECURITY            "security_cfg"
 #define MIMI_NVS_CRON                "cron_cfg"
+#define MIMI_NVS_FEISHU              "feishu_cfg"
 #define MIMI_NVS_AUDIO               "audio_config"
 
 /* NVS Keys */
 #define MIMI_NVS_KEY_SSID            "ssid"
 #define MIMI_NVS_KEY_PASS            "password"
 #define MIMI_NVS_KEY_TG_TOKEN        "bot_token"
+#define MIMI_NVS_KEY_FEISHU_APP_ID   "app_id"
+#define MIMI_NVS_KEY_FEISHU_SECRET   "app_secret"
+#define MIMI_NVS_KEY_FEISHU_VERIFY   "verify_token"
 #define MIMI_NVS_KEY_API_KEY         "api_key"
 #define MIMI_NVS_KEY_MODEL           "model"
 #define MIMI_NVS_KEY_PROVIDER        "provider"
