@@ -527,7 +527,7 @@ MimiClaw stores everything as plain text files you can read and edit:
 | `HEARTBEAT.md` | Task list the bot checks periodically and acts on autonomously |
 | `cron.json` | Scheduled jobs — recurring or one-shot tasks created by the AI |
 | `2026-02-05.md` | Daily notes — what happened today |
-| `tg_12345.jsonl` | Chat history — your conversation with the bot |
+| `sf0123456789abcdef.j` | Session history file in the current short hashed format (`s<channel><hash>.j`) |
 
 ## Tools
 
