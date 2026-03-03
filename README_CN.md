@@ -202,23 +202,36 @@ mimi> clear_proxy                    # 清除代理
 
 #### 1. 填写飞书配置
 
+正常接入飞书 Bot 时，你真正需要关心的是这 5 项：
+
+- **必填**：`App ID`
+- **必填**：`App Secret`
+- **强烈建议填写**：`Verify Token`
+- **可选**：`Encrypt Key`
+- **通常不用改**：`Open API Base`
+
 在 `main/mimi_secrets.h` 中填写：
 
 ```c
-#define MIMI_SECRET_FEISHU_APP_ID        "cli_xxx"
-#define MIMI_SECRET_FEISHU_APP_SECRET    "xxx"
-#define MIMI_SECRET_FEISHU_VERIFY_TOKEN  "mimiclaw-feishu"
-#define MIMI_SECRET_FEISHU_ENCRYPT_KEY   ""   // 可留空；启用加密回调时与飞书后台保持一致
-#define MIMI_SECRET_FEISHU_OPEN_API_BASE "https://open.feishu.cn"
+#define MIMI_SECRET_FEISHU_APP_ID        "cli_xxx"              // 必填：飞书应用 App ID
+#define MIMI_SECRET_FEISHU_APP_SECRET    "xxx"                  // 必填：飞书应用 App Secret
+#define MIMI_SECRET_FEISHU_VERIFY_TOKEN  "mimiclaw-feishu"      // 建议填写：事件订阅 Verify Token
+#define MIMI_SECRET_FEISHU_ENCRYPT_KEY   ""                     // 可选：启用加密回调时填写
+#define MIMI_SECRET_FEISHU_OPEN_API_BASE "https://open.feishu.cn" // 一般不要改；仅本地 stub 联调时覆盖
 ```
 
 说明：
 
+- `App ID` 和 `App Secret` 是飞书 Bot 正常收发消息的**必填项**
+- `Verify Token` 不是飞书开放平台强制项，但这个项目里**建议一定填写**，这样 URL 校验和普通事件都能做来源校验
+- `Encrypt Key` 可以先留空；如果你暂时只想先跑通文本回调，建议先不要开加密
 - 飞书配置既可写在编译时默认值里，也可通过 CLI 在运行时覆盖
 - 如果你在飞书开放平台配置了 `Verify Token` / `Encrypt Key`，这里必须保持一致
 - `MIMI_SECRET_FEISHU_OPEN_API_BASE` 默认保持官方地址；只有本地 stub 联调时才需要覆盖
 
 #### 2. 在飞书开放平台配置应用
+
+你在飞书后台至少要填这些内容：
 
 - 创建**自建应用**
 - 开启**机器人能力**
@@ -232,6 +245,13 @@ mimi> clear_proxy                    # 清除代理
 - 未配置 `Encrypt Key` 时，按明文事件体处理
 - 配置了 `Encrypt Key` 时，会校验 `X-Lark-Signature`，再解密 `encrypt` 字段
 - 仍建议保留 `Verify Token`，这样 URL 校验和普通事件都能多一道来源校验
+
+最小可用配置建议：
+
+1. 先只填 `App ID`、`App Secret`、`Verify Token`
+2. `Encrypt Key` 先留空
+3. 先把文本消息跑通
+4. 确认文本回调稳定后，再决定要不要开启加密回调
 
 #### 3. 保证设备可被飞书回调
 

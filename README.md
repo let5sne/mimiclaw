@@ -187,15 +187,29 @@ This branch defaults to a **no external voice gateway** build. Text chat works w
 
 1. Fill these build-time secrets in `main/mimi_secrets.h`:
 
+For a normal Feishu Bot setup, these are the fields that matter:
+
+- Required: `App ID`
+- Required: `App Secret`
+- Strongly recommended: `Verify Token`
+- Optional: `Encrypt Key`
+- Usually leave as-is: `Open API Base`
+
 ```c
-#define MIMI_SECRET_FEISHU_APP_ID        "cli_xxx"
-#define MIMI_SECRET_FEISHU_APP_SECRET    "xxx"
-#define MIMI_SECRET_FEISHU_VERIFY_TOKEN  "mimiclaw-feishu"
-#define MIMI_SECRET_FEISHU_ENCRYPT_KEY   ""   // optional; must match Feishu if encrypted callbacks are enabled
-#define MIMI_SECRET_FEISHU_OPEN_API_BASE "https://open.feishu.cn"
+#define MIMI_SECRET_FEISHU_APP_ID        "cli_xxx"              // required: Feishu App ID
+#define MIMI_SECRET_FEISHU_APP_SECRET    "xxx"                  // required: Feishu App Secret
+#define MIMI_SECRET_FEISHU_VERIFY_TOKEN  "mimiclaw-feishu"      // recommended: event subscription Verify Token
+#define MIMI_SECRET_FEISHU_ENCRYPT_KEY   ""                     // optional: only needed for encrypted callbacks
+#define MIMI_SECRET_FEISHU_OPEN_API_BASE "https://open.feishu.cn" // usually keep default; override only for local stub validation
 ```
 
+- `App ID` and `App Secret` are mandatory for the bot to work
+- `Verify Token` is not strictly required by Feishu, but this project strongly recommends setting it
+- leave `Encrypt Key` empty until plaintext callbacks are working
+
 2. In the Feishu Open Platform:
+
+At minimum, fill in these items:
 
 - create a **self-built app**
 - enable **bot capability**
@@ -210,6 +224,13 @@ This firmware now supports **encrypted Feishu event payloads**:
 - if `Encrypt Key` is empty, callbacks are handled as plaintext events
 - if `Encrypt Key` is configured, the firmware validates `X-Lark-Signature` and decrypts the `encrypt` field
 - keeping `Verify Token` enabled is still recommended for an extra source check on URL verification and normal events
+
+Recommended minimum setup:
+
+1. Start with `App ID`, `App Secret`, and `Verify Token`
+2. Leave `Encrypt Key` empty
+3. Get plaintext text callbacks working first
+4. Enable encrypted callbacks only after the text path is stable
 
 3. Make the device reachable from Feishu:
 
