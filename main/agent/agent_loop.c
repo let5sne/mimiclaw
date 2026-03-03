@@ -27,7 +27,7 @@ static const char *const WORKING_PHRASES[] = {
     "正在执行中，马上给你结果…",
 };
 
-#define TOOL_OUTPUT_SIZE  (8 * 1024)
+#define TOOL_OUTPUT_SIZE  (12 * 1024)
 #define TOOL_BUDGET_EXCEEDED_MSG "Error: tool result budget exceeded on device"
 #define ROUTE_HINT_VALUE_MAX_LEN 192
 #define SKILL_RULE_MAX 12
