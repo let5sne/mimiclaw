@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -13,48 +16,137 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+
+      - name: Ensure tagged commit is on main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" "origin/main"; then
+            echo "::error::Release tag must point to a commit already contained in origin/main."
+            exit 1
+          fi
 
       - name: Build firmware
         shell: bash
         run: |
-          . $IDF_PATH/export.sh
+          set -euo pipefail
+          . "$IDF_PATH/export.sh"
           idf.py set-target esp32s3
           idf.py build
+
+      - name: Resolve release partition metadata
+        id: partition_meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import csv
+          import os
+
+          with open("partitions.csv", newline="") as f:
+              rows = csv.reader(
+                  line for line in f if line.strip() and not line.lstrip().startswith("#")
+              )
+              for row in rows:
+                  name = row[0].strip()
+                  if name == "spiffs":
+                      spiffs_offset = row[3].strip()
+                      spiffs_size = row[4].strip()
+                      break
+              else:
+                  raise SystemExit("spiffs partition not found in partitions.csv")
+
+          sdkconfig = {}
+          with open("sdkconfig", encoding="utf-8") as f:
+              for line in f:
+                  line = line.strip()
+                  if not line or line.startswith("#") or "=" not in line:
+                      continue
+                  key, value = line.split("=", 1)
+                  sdkconfig[key] = value
+
+          page_size = sdkconfig.get("CONFIG_SPIFFS_PAGE_SIZE", "256")
+          obj_name_len = sdkconfig.get("CONFIG_SPIFFS_OBJ_NAME_LEN", "32")
+          meta_len = sdkconfig.get("CONFIG_SPIFFS_META_LENGTH", "4")
+          use_magic = "y" if sdkconfig.get("CONFIG_SPIFFS_USE_MAGIC") == "y" else "n"
+          use_magic_len = "y" if sdkconfig.get("CONFIG_SPIFFS_USE_MAGIC_LENGTH") == "y" else "n"
+
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env_file:
+              env_file.write(f"SPIFFS_OFFSET={spiffs_offset}\n")
+              env_file.write(f"SPIFFS_SIZE={spiffs_size}\n")
+              env_file.write(f"SPIFFS_PAGE_SIZE={page_size}\n")
+              env_file.write(f"SPIFFS_OBJ_NAME_LEN={obj_name_len}\n")
+              env_file.write(f"SPIFFS_META_LENGTH={meta_len}\n")
+              env_file.write(f"SPIFFS_USE_MAGIC={use_magic}\n")
+              env_file.write(f"SPIFFS_USE_MAGIC_LENGTH={use_magic_len}\n")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output_file:
+              output_file.write(f"spiffs_offset={spiffs_offset}\n")
+              output_file.write(f"spiffs_size={spiffs_size}\n")
+          PY
 
       - name: Prepare release artifacts
         shell: bash
         run: |
-          . $IDF_PATH/export.sh
+          set -euo pipefail
+          . "$IDF_PATH/export.sh"
           VERSION="${GITHUB_REF_NAME}"
 
-          # Generate merged firmware for single-command flashing
+          python "${IDF_PATH}/components/spiffs/spiffsgen.py" \
+            "${SPIFFS_SIZE}" \
+            "spiffs_data" \
+            "spiffs-${VERSION}.bin" \
+            --page-size "${SPIFFS_PAGE_SIZE}" \
+            --block-size 4096 \
+            --obj-name-len "${SPIFFS_OBJ_NAME_LEN}" \
+            --meta-len "${SPIFFS_META_LENGTH}" \
+            $([[ "${SPIFFS_USE_MAGIC}" == "y" ]] && echo --use-magic || echo --no-magic) \
+            $([[ "${SPIFFS_USE_MAGIC_LENGTH}" == "y" ]] && echo --use-magic-len || echo --no-magic-len)
+
+          FLASH_FLAGS_LINE="$(head -n 1 build/flash_args)"
+          read -r -a FLASH_FLAGS <<< "${FLASH_FLAGS_LINE}"
+          BIN_ARGS=()
+          while read -r offset path; do
+            [[ -n "${offset}" && -n "${path}" ]] || continue
+            BIN_ARGS+=("${offset}" "${path}")
+          done < <(tail -n +2 build/flash_args)
+          BIN_ARGS+=("${SPIFFS_OFFSET}" "spiffs-${VERSION}.bin")
+
+          # 基于真实 flash_args 生成单文件固件，避免 workflow 与工程参数漂移。
           esptool.py --chip esp32s3 merge_bin \
-            --flash_mode qio \
-            --flash_size 16MB \
-            --flash_freq 80m \
+            "${FLASH_FLAGS[@]}" \
             -o "mimiclaw-full-${VERSION}.bin" \
-            0x0     build/bootloader/bootloader.bin \
-            0x8000  build/partition_table/partition-table.bin \
-            0xf000  build/ota_data_initial.bin \
-            0x20000 build/mimiclaw.bin
+            "${BIN_ARGS[@]}"
 
           # Copy individual binaries with version suffix
           cp build/mimiclaw.bin              "mimiclaw-${VERSION}.bin"
           cp build/bootloader/bootloader.bin "bootloader-${VERSION}.bin"
           cp build/partition_table/partition-table.bin "partition-table-${VERSION}.bin"
           cp build/ota_data_initial.bin      "ota_data_initial-${VERSION}.bin"
+          {
+            printf '%s\n' "${FLASH_FLAGS_LINE}"
+            printf '0x0 bootloader-%s.bin\n' "${VERSION}"
+            printf '0x8000 partition-table-%s.bin\n' "${VERSION}"
+            printf '0xf000 ota_data_initial-%s.bin\n' "${VERSION}"
+            printf '0x20000 mimiclaw-%s.bin\n' "${VERSION}"
+            printf '%s spiffs-%s.bin\n' "${SPIFFS_OFFSET}" "${VERSION}"
+          } > "flash-${VERSION}.args"
 
       - name: Create Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b
         with:
           generate_release_notes: true
           body: |
             ## Flashing Guide
 
-            ### 1. Merged firmware (easiest)
+            ### 1. Merged firmware (recommended)
 
-            Download `mimiclaw-full-${{ github.ref_name }}.bin` and flash with a single command:
+            Download `mimiclaw-full-${{ github.ref_name }}.bin` and flash with a single command.
+            This merged image includes the application firmware and the SPIFFS bootstrap assets.
 
             ```bash
             esptool.py --chip esp32s3 -b 460800 write_flash 0x0 mimiclaw-full-${{ github.ref_name }}.bin
@@ -67,21 +159,49 @@ jobs:
               0x0     bootloader-${{ github.ref_name }}.bin \
               0x8000  partition-table-${{ github.ref_name }}.bin \
               0xf000  ota_data_initial-${{ github.ref_name }}.bin \
-              0x20000 mimiclaw-${{ github.ref_name }}.bin
+              0x20000 mimiclaw-${{ github.ref_name }}.bin \
+              ${{ steps.partition_meta.outputs.spiffs_offset }} spiffs-${{ github.ref_name }}.bin
             ```
 
-            ### 3. OTA update (for devices already running MimiClaw)
+            Or use the generated args file directly:
+
+            ```bash
+            esptool.py --chip esp32s3 -b 460800 write_flash @flash-${{ github.ref_name }}.args
+            ```
+
+            ### 3. Included and omitted partitions
+
+            Included:
+            - Bootloader
+            - Partition table
+            - OTA data
+            - App firmware
+            - SPIFFS bootstrap data (`spiffs_data/`)
+
+            Not included:
+            - `model` partition
+
+            Wake-word / WakeNet assets in the `model` partition must be provisioned separately.
+
+            ### 4. OTA update (for devices already running MimiClaw)
 
             Upload `mimiclaw-${{ github.ref_name }}.bin` via the OTA endpoint.
 
-            ### 4. First-time setup
+            ### 5. First-time setup
 
             After flashing, connect via serial (115200 baud) and configure:
 
             ```
-            wifi <ssid> <password>
-            tg_token <your-telegram-bot-token>
-            api_key <your-anthropic-api-key>
+            set_wifi <ssid> <password>
+            set_api_key <your-llm-api-key>
+
+            # Telegram (optional)
+            set_tg_token <your-telegram-bot-token>
+
+            # Feishu (optional)
+            set_feishu_app <app_id> <app_secret>
+            set_feishu_receive_mode websocket
+
             reboot
             ```
           files: |
@@ -90,3 +210,5 @@ jobs:
             bootloader-${{ github.ref_name }}.bin
             partition-table-${{ github.ref_name }}.bin
             ota_data_initial-${{ github.ref_name }}.bin
+            spiffs-${{ github.ref_name }}.bin
+            flash-${{ github.ref_name }}.args
