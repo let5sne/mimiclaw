@@ -227,6 +227,7 @@ Current limits:
 - text messages only
 - non-text events are ACKed but ignored
 - outbound Feishu delivery uses `chat_id`
+- repeated Feishu deliveries are lightly deduplicated by `event_id/message_id` before entering the Agent
 
 ### Optional: Voice/Vision Gateway
 

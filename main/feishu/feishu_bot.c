@@ -6,11 +6,13 @@
 #include "security/access_control.h"
 
 #include <stdbool.h>
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
 #include <stdlib.h>
 
+#include "freertos/FreeRTOS.h"
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
 #include "esp_http_server.h"
@@ -33,6 +35,11 @@ typedef struct {
     size_t cap;
 } http_resp_t;
 
+typedef struct {
+    char event_id[MIMI_FEISHU_EVENT_ID_MAX_LEN];
+    int64_t seen_at_us;
+} feishu_event_dedup_entry_t;
+
 static char s_app_id[96] = MIMI_SECRET_FEISHU_APP_ID;
 static char s_app_secret[128] = MIMI_SECRET_FEISHU_APP_SECRET;
 static char s_verify_token[128] = MIMI_SECRET_FEISHU_VERIFY_TOKEN;
@@ -40,6 +47,8 @@ static char s_encrypt_key[128] = MIMI_SECRET_FEISHU_ENCRYPT_KEY;
 static char s_tenant_token[256] = {0};
 static int64_t s_tenant_token_expire_us = 0;
 static bool s_started = false;
+static feishu_event_dedup_entry_t s_event_dedup[MIMI_FEISHU_EVENT_DEDUP_SIZE] = {0};
+static portMUX_TYPE s_event_dedup_lock = portMUX_INITIALIZER_UNLOCKED;
 
 static void safe_copy(char *dst, size_t dst_size, const char *src)
 {
@@ -619,6 +628,83 @@ static bool feishu_extract_text_from_content(const char *content_json, char *out
     return false;
 }
 
+static bool feishu_extract_event_unique_id(cJSON *root, char *out_id, size_t out_size)
+{
+    if (!root || !out_id || out_size == 0) {
+        return false;
+    }
+    out_id[0] = '\0';
+
+    cJSON *header = cJSON_GetObjectItem(root, "header");
+    if (cJSON_IsObject(header)) {
+        cJSON *event_id = cJSON_GetObjectItem(header, "event_id");
+        if (cJSON_IsString(event_id) && event_id->valuestring && event_id->valuestring[0]) {
+            snprintf(out_id, out_size, "event:%s", event_id->valuestring);
+            return true;
+        }
+    }
+
+    cJSON *event = cJSON_GetObjectItem(root, "event");
+    if (!cJSON_IsObject(event)) {
+        return false;
+    }
+    cJSON *message = cJSON_GetObjectItem(event, "message");
+    if (!cJSON_IsObject(message)) {
+        return false;
+    }
+    cJSON *message_id = cJSON_GetObjectItem(message, "message_id");
+    if (cJSON_IsString(message_id) && message_id->valuestring && message_id->valuestring[0]) {
+        snprintf(out_id, out_size, "msg:%s", message_id->valuestring);
+        return true;
+    }
+    return false;
+}
+
+static bool feishu_is_duplicate_event(const char *event_id)
+{
+    if (!event_id || !event_id[0]) {
+        return false;
+    }
+
+    const int64_t now_us = esp_timer_get_time();
+    const int64_t ttl_us = (int64_t)MIMI_FEISHU_EVENT_DEDUP_TTL_MS * 1000LL;
+    bool is_duplicate = false;
+    int replace_idx = -1;
+    int64_t oldest_seen_at = LLONG_MAX;
+
+    portENTER_CRITICAL(&s_event_dedup_lock);
+    for (int i = 0; i < MIMI_FEISHU_EVENT_DEDUP_SIZE; i++) {
+        feishu_event_dedup_entry_t *entry = &s_event_dedup[i];
+        bool expired = entry->seen_at_us <= 0 || (now_us - entry->seen_at_us) > ttl_us;
+
+        if (!expired && strcmp(entry->event_id, event_id) == 0) {
+            entry->seen_at_us = now_us;
+            is_duplicate = true;
+            break;
+        }
+
+        if (replace_idx < 0 && (entry->event_id[0] == '\0' || expired)) {
+            replace_idx = i;
+        }
+        if (entry->seen_at_us < oldest_seen_at) {
+            oldest_seen_at = entry->seen_at_us;
+            if (replace_idx < 0) {
+                replace_idx = i;
+            }
+        }
+    }
+
+    if (!is_duplicate && replace_idx >= 0) {
+        safe_copy(s_event_dedup[replace_idx].event_id,
+                  sizeof(s_event_dedup[replace_idx].event_id),
+                  event_id);
+        s_event_dedup[replace_idx].seen_at_us = now_us;
+    }
+    portEXIT_CRITICAL(&s_event_dedup_lock);
+
+    return is_duplicate;
+}
+
 static void feishu_push_inbound(const char *chat_id, const char *content)
 {
     if (!chat_id || !chat_id[0] || !content || !content[0]) {
@@ -733,6 +819,14 @@ static esp_err_t feishu_events_handler(httpd_req_t *req)
     cJSON *event_type = header ? cJSON_GetObjectItem(header, "event_type") : NULL;
     if (!cJSON_IsString(event_type) || strcmp(event_type->valuestring, "im.message.receive_v1") != 0 ||
         !cJSON_IsObject(event)) {
+        cJSON_Delete(root);
+        return feishu_send_http_json(req, NULL, "{\"code\":0}");
+    }
+
+    char event_unique_id[MIMI_FEISHU_EVENT_ID_MAX_LEN] = {0};
+    if (feishu_extract_event_unique_id(root, event_unique_id, sizeof(event_unique_id)) &&
+        feishu_is_duplicate_event(event_unique_id)) {
+        ESP_LOGI(TAG, "Skip duplicate Feishu event %s", event_unique_id);
         cJSON_Delete(root);
         return feishu_send_http_json(req, NULL, "{\"code\":0}");
     }

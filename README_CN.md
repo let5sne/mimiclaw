@@ -252,6 +252,7 @@ mimi> clear_proxy                    # 清除代理
 - 只支持**文本消息**
 - 非文本消息会直接 ACK，但不会进入 Agent
 - 飞书出站发送使用 `chat_id`
+- 飞书重复投递会按 `event_id/message_id` 做轻量去重，避免同一条文本被重复送进 Agent
 
 ### 可选：语音/视觉网关启动
 
