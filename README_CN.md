@@ -294,6 +294,21 @@ mimi> clear_proxy                    # 清除代理
 - `duplicate` 场景是否在日志里出现 `Skip duplicate Feishu event`
 - 文本/媒体场景是否在日志里出现对应入站关键字
 
+如果你想把“启动串口 monitor + 回放校验 + 日志保留”一次跑完，可以直接执行：
+
+```bash
+./tools/run_feishu_validate_live.sh \
+  --port /dev/ttyACM0 \
+  --scenario all \
+  --verify-token mimiclaw-feishu
+```
+
+说明：
+
+- 这个脚本会后台启动 `idf.py -p PORT monitor`
+- monitor 输出会自动落到 `logs/feishu-validate-*.log`
+- 校验结束后会自动停掉 monitor，并保留日志供复盘
+
 #### 5. 当前边界
 
 - 文本消息会原样进入 Agent

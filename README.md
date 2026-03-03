@@ -269,6 +269,21 @@ The validator checks:
 - whether `duplicate` produces `Skip duplicate Feishu event` in logs
 - whether text/media scenarios produce the expected ingress log markers
 
+If you want to run serial monitor + replay validation + log capture in one shot:
+
+```bash
+./tools/run_feishu_validate_live.sh \
+  --port /dev/ttyACM0 \
+  --scenario all \
+  --verify-token mimiclaw-feishu
+```
+
+Notes:
+
+- this script starts `idf.py -p PORT monitor` in the background
+- monitor output is written to `logs/feishu-validate-*.log`
+- when validation finishes, the monitor process is stopped and the log file is kept for review
+
 Current limits:
 
 - text messages go to the Agent as-is
