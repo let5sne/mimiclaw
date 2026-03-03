@@ -35,8 +35,6 @@
 #include "audio/audio.h"
 #include "status/status_led.h"
 #include "voice/voice_channel.h"
-#include "buttons/button_driver.h"
-#include "imu/imu_manager.h"
 #include "skills/skill_loader.h"
 
 static const char *TAG = "mimi";

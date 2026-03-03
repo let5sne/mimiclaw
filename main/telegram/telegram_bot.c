@@ -5,7 +5,6 @@
 #include "security/access_control.h"
 #include "display/display.h"
 #include "status/status_led.h"
-#include "ui/config_screen.h"
 
 #include <string.h>
 #include <stdlib.h>
