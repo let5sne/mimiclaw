@@ -133,6 +133,7 @@
 #endif
 #define MIMI_CONTEXT_BUF_SIZE        (16 * 1024)
 #define MIMI_SESSION_MAX_MSGS        20
+#define MIMI_MEMORY_RECENT_DAYS      5
 
 /* Cron / Heartbeat */
 #define MIMI_CRON_MAX_JOBS           16
@@ -217,6 +218,10 @@
 /* Display Configuration */
 #ifndef MIMI_DISPLAY_ENABLED
 #define MIMI_DISPLAY_ENABLED         1  /* Set to 1 to enable display */
+#endif
+
+#ifndef MIMI_DISPLAY_UI_MODE
+#define MIMI_DISPLAY_UI_MODE         1  /* 0=文本调试模式, 1=虚拟形象模式 */
 #endif
 
 #ifndef MIMI_DISPLAY_TYPE
@@ -355,6 +360,18 @@
 
 #ifndef MIMI_VOICE_TTS_RATE
 #define MIMI_VOICE_TTS_RATE          "-5%"
+#endif
+
+#ifndef MIMI_VOICE_MIRROR_TELEGRAM
+#define MIMI_VOICE_MIRROR_TELEGRAM   1   /* 1=Telegram 全文同时播报本地语音摘要 */
+#endif
+
+#ifndef MIMI_VOICE_SUMMARY_MAX_BYTES
+#define MIMI_VOICE_SUMMARY_MAX_BYTES 160 /* 本地语音摘要的 UTF-8 字节上限 */
+#endif
+
+#ifndef MIMI_VOICE_SUMMARY_MAX_SENTENCES
+#define MIMI_VOICE_SUMMARY_MAX_SENTENCES 2
 #endif
 
 #define MIMI_VOICE_TASK_STACK        (8 * 1024)

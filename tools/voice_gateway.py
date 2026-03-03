@@ -49,10 +49,6 @@ import xml.etree.ElementTree as ET
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-import websockets
-from faster_whisper import WhisperModel
-from pydub import AudioSegment
-
 log = logging.getLogger("voice_gw")
 
 whisper_model = None  # initialized in main
@@ -122,6 +118,8 @@ def pcm_to_wav_bytes(pcm_data: bytes, sample_rate=16000, sample_width=2, channel
 
 def normalize_audio(pcm_data: bytes) -> bytes:
     """Normalize audio level before transcription (target -3 dBFS)."""
+    from pydub import AudioSegment
+
     audio_seg = AudioSegment(data=pcm_data, sample_width=2, frame_rate=16000, channels=1)
     peak_dbfs = audio_seg.max_dBFS
     log.info("STT: input peak=%.1f dBFS", peak_dbfs)
@@ -285,6 +283,9 @@ def resolve_music_source(query: str) -> str:
 
 def do_stt(pcm_data: bytes) -> tuple[str, str]:
     """Run whisper on PCM data. Returns (text, language)."""
+    if whisper_model is None:
+        raise RuntimeError("stt model not loaded")
+
     pcm_data = normalize_audio(pcm_data)
     wav_bytes = pcm_to_wav_bytes(pcm_data)
 
@@ -326,6 +327,8 @@ def do_stt(pcm_data: bytes) -> tuple[str, str]:
 
 def do_stt_encoded(audio_data: bytes, audio_format: str) -> tuple[str, str]:
     """Decode compressed audio bytes to PCM16k and run STT."""
+    from pydub import AudioSegment
+
     fmt = (audio_format or "ogg").lower()
     if fmt == "oga":
         fmt = "ogg"
@@ -1297,6 +1300,13 @@ class STTUploadHandler(BaseHTTPRequestHandler):
 
         audio_format = self.headers.get("X-Audio-Format", "ogg")
 
+        if whisper_model is None:
+            self.send_response(503)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b'{"error":"stt model not loaded"}')
+            return
+
         try:
             text, language = do_stt_encoded(body, audio_format)
             resp = json.dumps({
@@ -1322,6 +1332,7 @@ class STTUploadHandler(BaseHTTPRequestHandler):
         if self.path == "/health":
             payload = json.dumps({
                 "status": "ok",
+                "stt_enabled": bool(whisper_model is not None),
                 "vision_enabled": bool(vision_cfg["enabled"]),
                 "vision_model": vision_cfg["model"] if vision_cfg["enabled"] else "",
             }).encode("utf-8")
@@ -1832,6 +1843,8 @@ async def health_handler(path, request_headers):
 
 async def run_server(host: str, port: int):
     """Start the WebSocket server."""
+    import websockets
+
     music_dir = os.environ.get("MIMI_MUSIC_DIR", "").strip()
     if music_dir and os.path.isdir(music_dir):
         build_music_index(music_dir)
@@ -1872,15 +1885,25 @@ def main():
                         help="HTTP/HTTPS proxy URL for vision API (optional)")
     parser.add_argument("--vision-secrets", default="main/mimi_secrets.h",
                         help="Path to mimi_secrets.h for default vision config")
+    parser.add_argument("--skip-stt-model", action="store_true",
+                        help="Do not load Whisper STT model; /stt_upload and websocket STT become unavailable")
+    parser.add_argument("--http-only", action="store_true",
+                        help="Start only the HTTP upload endpoints and skip the WebSocket server")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
     load_music_aliases_from_env()
 
     global whisper_model
-    log.info("Loading whisper model '%s' on %s...", args.model, args.device)
-    whisper_model = WhisperModel(args.model, device=args.device, compute_type="int8")
-    log.info("Whisper model loaded.")
+    whisper_model = None
+    if args.skip_stt_model or args.http_only:
+        log.info("STT model skipped (--skip-stt-model or --http-only)")
+    else:
+        from faster_whisper import WhisperModel
+
+        log.info("Loading whisper model '%s' on %s...", args.model, args.device)
+        whisper_model = WhisperModel(args.model, device=args.device, compute_type="int8")
+        log.info("Whisper model loaded.")
 
     defaults = load_vision_defaults_from_secrets(args.vision_secrets)
     vision_cfg["endpoint"] = args.vision_endpoint or defaults.get("endpoint", "")
@@ -1910,7 +1933,11 @@ def main():
     log.info("HTTP document endpoint: http://%s:%d/doc_upload", args.host, stt_port)
 
     try:
-        asyncio.run(run_server(args.host, args.port))
+        if args.http_only:
+            log.info("HTTP-only mode enabled; WebSocket server not started")
+            http_server.serve_forever()
+        else:
+            asyncio.run(run_server(args.host, args.port))
     finally:
         http_server.shutdown()
 

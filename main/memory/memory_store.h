@@ -26,6 +26,6 @@ esp_err_t memory_append_today(const char *note);
 
 /**
  * Read recent daily memories (last N days) into buffer.
- * @param days  Number of days to look back (default 3)
+ * @param days  Number of days to look back
  */
 esp_err_t memory_read_recent(char *buf, size_t size, int days);

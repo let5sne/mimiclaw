@@ -1,4 +1,5 @@
 #include "display.h"
+#include "mimi_config.h"
 #include "status/status_led.h"
 #include "ssd1306.h"
 #include "st7789.h"
@@ -29,6 +30,8 @@ static size_t s_message_page_index = 0;
 static size_t s_message_visible_pages = 0;
 static bool s_message_pages_truncated = false;
 static bool s_notification_active = false;
+static bool s_avatar_base_drawn = false;
+static display_status_t s_avatar_rendered_status = DISPLAY_STATUS_ERROR;
 
 #define DISPLAY_ST7789_MESSAGE_X            4
 #define DISPLAY_ST7789_ROLE_Y               40
@@ -55,6 +58,10 @@ static void display_sanitize_text(const char *src, char *dst, size_t dst_size);
 static void message_page_timer_callback(TimerHandle_t timer);
 static void display_stop_message_paging_locked(void);
 static void display_refresh_message_paging_locked(bool reset_page);
+static bool display_use_avatar_mode(void);
+static void display_render_avatar(void);
+static void display_render_avatar_static(void);
+static void display_render_avatar_dynamic(display_status_t status);
 
 esp_err_t display_init(const display_config_t *config)
 {
@@ -162,6 +169,8 @@ esp_err_t display_init(const display_config_t *config)
     s_message_visible_pages = 0;
     s_message_pages_truncated = false;
     s_notification_active = false;
+    s_avatar_base_drawn = false;
+    s_avatar_rendered_status = DISPLAY_STATUS_ERROR;
     strcpy(s_status_text, "MimiClaw");
 
     render_screen();
@@ -207,6 +216,8 @@ void display_deinit(void)
     s_message_visible_pages = 0;
     s_message_pages_truncated = false;
     s_notification_active = false;
+    s_avatar_base_drawn = false;
+    s_avatar_rendered_status = DISPLAY_STATUS_ERROR;
     ESP_LOGI(TAG, "Display deinitialized");
     DISPLAY_UNLOCK();
     vSemaphoreDelete(s_display_mutex);
@@ -228,6 +239,8 @@ void display_clear(void)
             break;
         case DISPLAY_TYPE_ST7789:
             st7789_clear();
+            s_avatar_base_drawn = false;
+            s_avatar_rendered_status = DISPLAY_STATUS_ERROR;
             break;
         default:
             break;
@@ -271,6 +284,11 @@ void display_set_status(const char *status)
     strncpy(s_status_text, status, sizeof(s_status_text) - 1);
     s_status_text[sizeof(s_status_text) - 1] = '\0';
 
+    if (display_use_avatar_mode()) {
+        DISPLAY_UNLOCK();
+        return;
+    }
+
     render_screen();
     display_update();
     DISPLAY_UNLOCK();
@@ -291,6 +309,17 @@ void display_show_notification(const char *text, int duration_ms)
     }
     display_stop_message_paging_locked();
     s_notification_active = true;
+
+    if (display_use_avatar_mode()) {
+        render_screen();
+        display_update();
+        if (s_notification_timer && duration_ms > 0) {
+            xTimerChangePeriod(s_notification_timer, pdMS_TO_TICKS(duration_ms), 0);
+            xTimerStart(s_notification_timer, 0);
+        }
+        DISPLAY_UNLOCK();
+        return;
+    }
 
     /* Show notification */
     display_clear();
@@ -342,6 +371,11 @@ void display_show_message(const char *role, const char *content)
     snprintf(s_message_buffer + used, sizeof(s_message_buffer) - used, "%s", s_message_content);
     display_refresh_message_paging_locked(true);
 
+    if (display_use_avatar_mode()) {
+        DISPLAY_UNLOCK();
+        return;
+    }
+
     render_screen();
     display_update();
     DISPLAY_UNLOCK();
@@ -369,6 +403,11 @@ void display_set_display_status(display_status_t status)
     }
 
     s_status = status;
+    if (display_use_avatar_mode() && s_avatar_base_drawn &&
+        s_avatar_rendered_status == status) {
+        DISPLAY_UNLOCK();
+        return;
+    }
     render_screen();
     display_update();
     DISPLAY_UNLOCK();
@@ -535,7 +574,9 @@ static void display_stop_message_paging_locked(void)
 
 static void display_refresh_message_paging_locked(bool reset_page)
 {
-    if (s_config.type != DISPLAY_TYPE_ST7789 || s_message_content[0] == '\0') {
+    if (display_use_avatar_mode() ||
+        s_config.type != DISPLAY_TYPE_ST7789 ||
+        s_message_content[0] == '\0') {
         s_message_page_index = 0;
         s_message_visible_pages = 0;
         s_message_pages_truncated = false;
@@ -571,6 +612,130 @@ static void display_refresh_message_paging_locked(bool reset_page)
     }
 }
 
+static bool display_use_avatar_mode(void)
+{
+#if MIMI_DISPLAY_UI_MODE == 1
+    return s_config.type == DISPLAY_TYPE_ST7789;
+#else
+    return false;
+#endif
+}
+
+static void display_render_avatar_static(void)
+{
+    const uint16_t bg = 0x0843;
+    const uint16_t panel = 0x18C6;
+    const uint16_t face = 0x2129;
+    const uint16_t screen_bg = 0x18E7;
+    const uint16_t accent = 0x7E9F;
+
+    st7789_fill_rect(0, 0, s_config.width, s_config.height, bg);
+    st7789_fill_rect(18, 18, s_config.width - 36, s_config.height - 36, panel);
+    st7789_fill_rect(26, 26, s_config.width - 52, s_config.height - 52, face);
+    st7789_fill_rect(50, 54, 140, 112, 0x1084);
+    st7789_fill_rect(58, 62, 124, 96, screen_bg);
+    st7789_fill_rect(72, 162, 96, 14, accent);
+    st7789_fill_rect(62, 180, 116, 8, 0x10A5);
+}
+
+static void display_render_avatar_dynamic(display_status_t status)
+{
+    const uint16_t bg = 0x0843;
+    const uint16_t screen_bg = 0x18E7;
+    uint16_t eye = 0x7E9F;
+    uint16_t mouth = 0x7E9F;
+    uint16_t status_dot = 0x07E0;
+
+    switch (status) {
+        case DISPLAY_STATUS_CONNECTING:
+            eye = 0xFD20;
+            mouth = 0xFD20;
+            status_dot = 0xFD20;
+            break;
+        case DISPLAY_STATUS_CONNECTED:
+            eye = 0x87F0;
+            mouth = 0x87F0;
+            status_dot = 0x07E0;
+            break;
+        case DISPLAY_STATUS_THINKING:
+            eye = 0x7D7C;
+            mouth = 0x7D7C;
+            status_dot = 0x001F;
+            break;
+        case DISPLAY_STATUS_SPEAKING:
+            eye = 0xAFE5;
+            mouth = 0xFFE0;
+            status_dot = 0xFFE0;
+            break;
+        case DISPLAY_STATUS_ERROR:
+            eye = 0xF800;
+            mouth = 0xF800;
+            status_dot = 0xF800;
+            break;
+        case DISPLAY_STATUS_IDLE:
+        default:
+            break;
+    }
+
+    /* 只清理动态区域，避免整屏重绘造成可见闪动。 */
+    st7789_fill_rect(72, 84, 28, 28, screen_bg);
+    st7789_fill_rect(140, 84, 28, 28, screen_bg);
+    st7789_fill_rect(84, 124, 72, 28, screen_bg);
+    st7789_fill_rect(s_config.width - 30, 12, 14, 14, bg);
+
+    st7789_fill_rect(72, 84, 28, 28, eye);
+    st7789_fill_rect(140, 84, 28, 28, eye);
+    st7789_fill_rect(78, 90, 16, 16, 0x0000);
+    st7789_fill_rect(146, 90, 16, 16, 0x0000);
+
+    switch (status) {
+        case DISPLAY_STATUS_CONNECTING:
+            st7789_fill_rect(90, 128, 12, 12, mouth);
+            st7789_fill_rect(114, 128, 12, 12, mouth);
+            st7789_fill_rect(138, 128, 12, 12, mouth);
+            break;
+        case DISPLAY_STATUS_THINKING:
+            st7789_fill_rect(92, 128, 8, 8, mouth);
+            st7789_fill_rect(116, 128, 8, 8, mouth);
+            st7789_fill_rect(140, 128, 8, 8, mouth);
+            break;
+        case DISPLAY_STATUS_SPEAKING:
+            st7789_fill_rect(92, 124, 56, 28, mouth);
+            st7789_fill_rect(100, 132, 40, 12, 0x0000);
+            break;
+        case DISPLAY_STATUS_ERROR:
+            st7789_fill_rect(92, 142, 56, 6, mouth);
+            st7789_fill_rect(84, 134, 12, 6, mouth);
+            st7789_fill_rect(144, 134, 12, 6, mouth);
+            break;
+        case DISPLAY_STATUS_CONNECTED:
+        case DISPLAY_STATUS_IDLE:
+        default:
+            st7789_fill_rect(92, 136, 56, 6, mouth);
+            st7789_fill_rect(84, 128, 12, 6, mouth);
+            st7789_fill_rect(144, 128, 12, 6, mouth);
+            break;
+    }
+
+    st7789_fill_rect(s_config.width - 28, 14, 10, 10, status_dot);
+}
+
+static void display_render_avatar(void)
+{
+    if (!s_avatar_base_drawn) {
+        display_render_avatar_static();
+        s_avatar_base_drawn = true;
+        s_avatar_rendered_status = DISPLAY_STATUS_ERROR;
+    }
+
+    if (s_avatar_rendered_status == s_status) {
+        return;
+    }
+
+    display_render_avatar_dynamic(s_status);
+    s_avatar_rendered_status = s_status;
+}
+
 static void render_screen(void)
 {
     if (!s_initialized) return;
@@ -601,6 +766,12 @@ static void render_screen(void)
             break;
         }
         case DISPLAY_TYPE_ST7789: {
+            if (display_use_avatar_mode()) {
+                display_stop_message_paging_locked();
+                display_render_avatar();
+                s_prev_had_message = false;
+                break;
+            }
             const bool has_message = (s_message_content[0] != '\0');
             const int footer_y = s_config.height - DISPLAY_ST7789_FOOTER_H;
             const int body_height = footer_y - DISPLAY_ST7789_BODY_Y - DISPLAY_ST7789_BODY_BOTTOM_PAD;

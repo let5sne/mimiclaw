@@ -67,10 +67,10 @@
 ### [x] ~~Telegram User Allowlist (allow_from)~~
 - Completed in P0 inbound security: allowlist + WS token + CLI/NVS runtime config.
 
-### [ ] Telegram Markdown to HTML Conversion
+### [x] ~~Telegram Markdown to HTML Conversion~~
 - **nanobot**: `channels/telegram.py` L16-76 — `_markdown_to_telegram_html()` full converter: code blocks, inline code, bold, italic, links, strikethrough, lists
-- **MimiClaw**: Uses `parse_mode: Markdown` directly; special characters can cause send failures (has fallback to plain text)
-- **Recommendation**: Implement simplified Markdown-to-HTML converter, or switch to `parse_mode: HTML`
+- **MimiClaw**: Implemented simplified Markdown-to-HTML conversion in `telegram_bot.c`; outgoing chunks now prefer `parse_mode: HTML`, support headings/lists/code blocks/inline code/links/bold/italic/strikethrough, and still keep plain-text fallback on HTML rejection or expansion overflow.
+- **Remaining gap**: 仍是首轮实现，不追求完整 CommonMark；超复杂 markdown、跨 chunk 富文本闭合、UTF-8 边界切块仍可继续优化。
 
 ### [x] ~~Telegram /start Command~~
 - **nanobot**: `telegram.py` L183-192 — handles `/start` command, replies with welcome message
@@ -97,8 +97,9 @@
 
 ### [ ] Longer Memory Lookback
 - **nanobot**: `memory.py` L56-80 — `get_recent_memories(days=7)` defaults to 7 days
-- **MimiClaw**: `context_builder.c` only reads last 3 days
-- **Recommendation**: Make configurable, but mind token budget
+- **MimiClaw**: `context_builder.c` now reads recent daily notes via `MIMI_MEMORY_RECENT_DAYS` (default 5), instead of hardcoding 3 days.
+- **Remaining gap**: 仍是编译期配置，尚未做 CLI/NVS 运行时调节，也没有基于 context budget 的动态裁剪。
+- **Recommendation**: Keep the default conservative and only add runtime tuning when there is a real memory quality issue.
 
 ### [x] ~~System Prompt Tool Guidance~~
 - Implemented: `context_builder.c` includes tool usage guidance in system prompt
@@ -129,8 +130,14 @@
 
 ### [ ] Multi-LLM Provider Support
 - **nanobot**: `providers/litellm_provider.py` — supports OpenRouter, Anthropic, OpenAI, Gemini, DeepSeek, Groq, Zhipu, vLLM via LiteLLM
-- **MimiClaw**: Hardcoded to Anthropic Messages API
-- **Recommendation**: Abstract LLM interface, support OpenAI-compatible API (most providers are compatible)
+- **MimiClaw**: Partially done. Runtime `provider` switch already supports `anthropic` and `openai`, with build-time defaults + NVS override + custom endpoint override, so OpenAI-compatible providers can already be used without code changes.
+- **Remaining gap**: 还没有 LiteLLM 式统一适配层，也未覆盖 Gemini/DeepSeek/Groq/Zhipu 等专用协议能力。
+- **Recommendation**: Keep the current lightweight abstraction and expand only when a provider is not OpenAI-compatible.
+
+### [x] ~~Display Avatar Mode + Voice/Telegram Split~~
+- **Product direction**: Small ST7789 screen should not be a long-text reader; let screen handle identity/status, Telegram handle full text, voice handle short spoken summary.
+- **MimiClaw**: Implemented avatar UI mode on ST7789 with state-driven face rendering (`Idle/Connecting/Thinking/Speaking/Error`), plus Telegram full-text delivery and optional local voice summary mirror.
+- **Remaining optional**: add `Listening` state, replace procedural face with polished pixel assets, and make voice summary asynchronous if outbound latency becomes noticeable.
 
 ### [x] ~~Voice Transcription~~
 - **nanobot**: `providers/transcription.py` — Groq Whisper API
@@ -193,10 +200,12 @@
 - [x] Heartbeat service (periodic HEARTBEAT.md trigger + CLI diagnostics)
 - [x] Cron service (simplified every-N-min schedule + CLI diagnostics)
 - [x] Telegram `/start` command + media summary fallback for non-text messages
+- [x] Telegram Markdown → HTML send path with plain-text fallback
 - [x] Telegram voice transcription path (`getFile` + media download + local STT upload)
 - [x] Telegram voice STT stage diagnostics (`get_file` / `download` / `stt_upload`)
 - [x] Telegram photo/document download path (proxy-aware) + enriched summary
 - [x] Telegram photo vision path (`vision_upload`, structured fields + `file_id` cache + auto fallback)
+- [x] ST7789 avatar mode + Telegram full text / local voice summary split
 
 ---
 
@@ -211,6 +220,6 @@
 6. [done] Memory Governance (path consistency + dedicated memory tools)
 7. [done] Observability (`run_id` + stage latency logs + `agent_stats`)
 8. [done] Bootstrap File Completion (AGENTS.md, TOOLS.md, SKILLS.md, IDENTITY.md)
-9. Telegram Markdown -> HTML
+9. [done] Telegram Markdown -> HTML
 10. Media Handling
 ```

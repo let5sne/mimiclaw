@@ -86,9 +86,10 @@ esp_err_t context_build_system_prompt(char *buf, size_t size)
         off += snprintf(buf + off, size - off, "\n## Long-term Memory\n\n%s\n", mem_buf);
     }
 
-    /* Recent daily notes (last 3 days) */
+    /* Recent daily notes (configurable recent days) */
     char recent_buf[4096];
-    if (memory_read_recent(recent_buf, sizeof(recent_buf), 3) == ESP_OK && recent_buf[0]) {
+    if (memory_read_recent(recent_buf, sizeof(recent_buf), MIMI_MEMORY_RECENT_DAYS) == ESP_OK
+        && recent_buf[0]) {
         off += snprintf(buf + off, size - off, "\n## Recent Notes\n\n%s\n", recent_buf);
     }
 
