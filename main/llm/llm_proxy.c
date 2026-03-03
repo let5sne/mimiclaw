@@ -34,6 +34,8 @@ static char s_api_path[LLM_API_PATH_MAX_LEN] = {0};
 static uint16_t s_api_port = 443;
 static int s_last_http_status = 0;
 static char s_last_error_message[192] = {0};
+static char s_effective_api_url[LLM_API_URL_MAX_LEN + LLM_API_PATH_MAX_LEN] = {0};
+static char s_effective_api_path[LLM_API_PATH_MAX_LEN] = {0};
 
 static void llm_log_payload(const char *label, const char *payload)
 {
@@ -268,10 +270,102 @@ static bool provider_is_openai(void)
     return strcmp(s_provider, "openai") == 0;
 }
 
+static bool str_ends_with(const char *s, const char *suffix)
+{
+    if (!s || !suffix) {
+        return false;
+    }
+    size_t slen = strlen(s);
+    size_t tlen = strlen(suffix);
+    if (tlen > slen) {
+        return false;
+    }
+    return strcmp(s + slen - tlen, suffix) == 0;
+}
+
+static const char *llm_default_request_path(void)
+{
+    return provider_is_openai() ? "/v1/chat/completions" : "/v1/messages";
+}
+
+static void llm_join_path_suffix(char *dst, size_t dst_size,
+                                 const char *base_path, const char *suffix)
+{
+    if (!dst || dst_size == 0) {
+        return;
+    }
+    dst[0] = '\0';
+    if (!base_path || !base_path[0]) {
+        safe_copy(dst, dst_size, suffix ? suffix : "");
+        return;
+    }
+
+    safe_copy(dst, dst_size, base_path);
+    size_t len = strlen(dst);
+    if (len > 0 && dst[len - 1] == '/') {
+        dst[len - 1] = '\0';
+        len--;
+    }
+    if (suffix && suffix[0]) {
+        strncat(dst, "/", dst_size - strlen(dst) - 1);
+        strncat(dst, suffix[0] == '/' ? (suffix + 1) : suffix,
+                dst_size - strlen(dst) - 1);
+    }
+}
+
+static const char *llm_build_effective_api_path(void)
+{
+    const char *default_path = llm_default_request_path();
+    if (!s_api_path[0]) {
+        safe_copy(s_effective_api_path, sizeof(s_effective_api_path), default_path);
+        return s_effective_api_path;
+    }
+
+    if (provider_is_openai()) {
+        if (str_ends_with(s_api_path, "/v1/chat/completions")) {
+            safe_copy(s_effective_api_path, sizeof(s_effective_api_path), s_api_path);
+            return s_effective_api_path;
+        }
+        if (str_ends_with(s_api_path, "/v1")) {
+            llm_join_path_suffix(s_effective_api_path, sizeof(s_effective_api_path),
+                                 s_api_path, "chat/completions");
+            return s_effective_api_path;
+        }
+        llm_join_path_suffix(s_effective_api_path, sizeof(s_effective_api_path),
+                             s_api_path, "v1/chat/completions");
+        return s_effective_api_path;
+    }
+
+    if (str_ends_with(s_api_path, "/v1/messages")) {
+        safe_copy(s_effective_api_path, sizeof(s_effective_api_path), s_api_path);
+        return s_effective_api_path;
+    }
+    llm_join_path_suffix(s_effective_api_path, sizeof(s_effective_api_path),
+                         s_api_path, "v1/messages");
+    return s_effective_api_path;
+}
+
 static const char *llm_api_url(void)
 {
     if (s_api_endpoint[0]) {
-        return s_api_endpoint;
+        const char *effective_path = llm_build_effective_api_path();
+        const char *scheme_sep = strstr(s_api_endpoint, "://");
+        const char *path_start = scheme_sep ? strchr(scheme_sep + 3, '/') : NULL;
+        if (!path_start) {
+            snprintf(s_effective_api_url, sizeof(s_effective_api_url),
+                     "%s%s", s_api_endpoint, effective_path);
+            return s_effective_api_url;
+        }
+
+        size_t base_len = (size_t)(path_start - s_api_endpoint);
+        if (base_len >= sizeof(s_effective_api_url)) {
+            base_len = sizeof(s_effective_api_url) - 1;
+        }
+        memcpy(s_effective_api_url, s_api_endpoint, base_len);
+        s_effective_api_url[base_len] = '\0';
+        strncat(s_effective_api_url, effective_path,
+                sizeof(s_effective_api_url) - strlen(s_effective_api_url) - 1);
+        return s_effective_api_url;
     }
     return provider_is_openai() ? MIMI_OPENAI_API_URL : MIMI_LLM_API_URL;
 }
@@ -286,10 +380,10 @@ static const char *llm_api_host(void)
 
 static const char *llm_api_path(void)
 {
-    if (s_api_path[0]) {
-        return s_api_path;
+    if (s_api_endpoint[0]) {
+        return llm_build_effective_api_path();
     }
-    return provider_is_openai() ? "/v1/chat/completions" : "/v1/messages";
+    return llm_default_request_path();
 }
 
 static uint16_t llm_api_port(void)

@@ -7,6 +7,7 @@
 
 #include <stdbool.h>
 #include <ctype.h>
+#include <inttypes.h>
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
@@ -14,11 +15,14 @@
 #include <stdlib.h>
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "esp_timer.h"
+#include "esp_websocket_client.h"
 #include "mbedtls/aes.h"
 #include "mbedtls/base64.h"
 #include "mbedtls/sha256.h"
@@ -50,16 +54,74 @@ typedef struct {
     char mime_type[96];
 } feishu_media_ref_t;
 
+typedef struct {
+    int reconnect_count;
+    int reconnect_interval_s;
+    int reconnect_nonce_s;
+    int ping_interval_s;
+} feishu_ws_client_config_t;
+
+typedef struct {
+    char key[32];
+    char value[160];
+} feishu_ws_header_t;
+
+typedef struct {
+    uint64_t seq_id;
+    uint64_t log_id;
+    int32_t service;
+    int32_t method;
+    feishu_ws_header_t headers[MIMI_FEISHU_WS_HEADER_MAX];
+    size_t header_count;
+    uint8_t *payload;
+    size_t payload_len;
+} feishu_ws_frame_t;
+
+typedef struct {
+    bool used;
+    char message_id[MIMI_FEISHU_EVENT_ID_MAX_LEN];
+    int sum;
+    size_t total_len;
+    int64_t expire_us;
+    uint8_t *parts[MIMI_FEISHU_WS_ASSEMBLY_PARTS];
+    size_t lens[MIMI_FEISHU_WS_ASSEMBLY_PARTS];
+} feishu_ws_assembly_t;
+
 static char s_app_id[96] = MIMI_SECRET_FEISHU_APP_ID;
 static char s_app_secret[128] = MIMI_SECRET_FEISHU_APP_SECRET;
 static char s_verify_token[128] = MIMI_SECRET_FEISHU_VERIFY_TOKEN;
 static char s_encrypt_key[128] = MIMI_SECRET_FEISHU_ENCRYPT_KEY;
 static char s_open_api_base[160] = MIMI_SECRET_FEISHU_OPEN_API_BASE;
+static char s_receive_mode[16] = MIMI_SECRET_FEISHU_RECEIVE_MODE;
 static char s_tenant_token[256] = {0};
 static int64_t s_tenant_token_expire_us = 0;
 static bool s_started = false;
+static esp_websocket_client_handle_t s_ws_client = NULL;
+static TaskHandle_t s_ws_task_handle = NULL;
+static bool s_ws_connected = false;
+static int64_t s_ws_next_ping_ms = 0;
+static int64_t s_ws_next_reconnect_ms = 0;
+static int64_t s_ws_last_disconnect_ms = 0;
+static int64_t s_ws_connect_started_ms = 0;
+static char s_ws_connect_url[MIMI_FEISHU_WS_URL_MAX_BYTES] = {0};
+static char s_ws_conn_id[96] = {0};
+static int32_t s_ws_service_id = 0;
+static uint8_t *s_ws_frame_buf = NULL;
+static size_t s_ws_frame_len = 0;
+static size_t s_ws_frame_cap = 0;
+static bool s_ws_recv_binary_frag = false;
+static feishu_ws_client_config_t s_ws_cfg = {
+    .reconnect_count = -1,
+    .reconnect_interval_s = MIMI_FEISHU_WS_RECONNECT_INTERVAL_MS / 1000,
+    .reconnect_nonce_s = MIMI_FEISHU_WS_RECONNECT_NONCE_S,
+    .ping_interval_s = MIMI_FEISHU_WS_PING_INTERVAL_S,
+};
+static feishu_ws_assembly_t s_ws_assemblies[MIMI_FEISHU_WS_ASSEMBLY_SLOTS] = {0};
 static feishu_event_dedup_entry_t s_event_dedup[MIMI_FEISHU_EVENT_DEDUP_SIZE] = {0};
 static portMUX_TYPE s_event_dedup_lock = portMUX_INITIALIZER_UNLOCKED;
+
+static esp_err_t feishu_handle_event_root(cJSON *root);
+static esp_err_t feishu_handle_plain_event_json(const char *json);
 
 static void safe_copy(char *dst, size_t dst_size, const char *src)
 {
@@ -82,7 +144,28 @@ static void feishu_copy_base_url(char *dst, size_t dst_size, const char *src)
     }
 }
 
-static esp_err_t feishu_build_open_api_url(const char *path, char *out_url, size_t out_size)
+static void feishu_normalize_receive_mode(char *dst, size_t dst_size, const char *src)
+{
+    if (!dst || dst_size == 0) {
+        return;
+    }
+    dst[0] = '\0';
+    if (!src || !src[0]) {
+        src = MIMI_SECRET_FEISHU_RECEIVE_MODE;
+    }
+    if (src && strcasecmp(src, "webhook") == 0) {
+        safe_copy(dst, dst_size, "webhook");
+        return;
+    }
+    safe_copy(dst, dst_size, "websocket");
+}
+
+static bool feishu_receive_mode_is_websocket(void)
+{
+    return strcasecmp(s_receive_mode, "webhook") != 0;
+}
+
+static esp_err_t feishu_build_base_url(const char *path, char *out_url, size_t out_size)
 {
     if (!path || !path[0] || !out_url || out_size < 16) {
         return ESP_ERR_INVALID_ARG;
@@ -100,6 +183,11 @@ static esp_err_t feishu_build_open_api_url(const char *path, char *out_url, size
              path[0] == '/' ? "" : "/",
              path);
     return ESP_OK;
+}
+
+static esp_err_t feishu_build_open_api_url(const char *path, char *out_url, size_t out_size)
+{
+    return feishu_build_base_url(path, out_url, out_size);
 }
 
 static bool feishu_is_configured(void)
@@ -399,6 +487,594 @@ static esp_err_t feishu_post_json(const char *url, const char *auth_bearer,
 
     *out_body = resp.buf;
     return ESP_OK;
+}
+
+static void feishu_ws_reset_frame_buffer(void)
+{
+    free(s_ws_frame_buf);
+    s_ws_frame_buf = NULL;
+    s_ws_frame_len = 0;
+    s_ws_frame_cap = 0;
+    s_ws_recv_binary_frag = false;
+}
+
+static void feishu_ws_reset_assembly_slot(feishu_ws_assembly_t *slot)
+{
+    if (!slot) {
+        return;
+    }
+    for (int i = 0; i < MIMI_FEISHU_WS_ASSEMBLY_PARTS; i++) {
+        free(slot->parts[i]);
+        slot->parts[i] = NULL;
+        slot->lens[i] = 0;
+    }
+    memset(slot, 0, sizeof(*slot));
+}
+
+static void feishu_ws_reset_assemblies(void)
+{
+    for (int i = 0; i < MIMI_FEISHU_WS_ASSEMBLY_SLOTS; i++) {
+        feishu_ws_reset_assembly_slot(&s_ws_assemblies[i]);
+    }
+}
+
+static void feishu_ws_reset_runtime(void)
+{
+    s_ws_connected = false;
+    s_ws_next_ping_ms = 0;
+    s_ws_last_disconnect_ms = 0;
+    s_ws_connect_started_ms = 0;
+    s_ws_connect_url[0] = '\0';
+    s_ws_conn_id[0] = '\0';
+    s_ws_service_id = 0;
+    s_ws_cfg.reconnect_count = -1;
+    s_ws_cfg.reconnect_interval_s = MIMI_FEISHU_WS_RECONNECT_INTERVAL_MS / 1000;
+    s_ws_cfg.reconnect_nonce_s = MIMI_FEISHU_WS_RECONNECT_NONCE_S;
+    s_ws_cfg.ping_interval_s = MIMI_FEISHU_WS_PING_INTERVAL_S;
+    feishu_ws_reset_frame_buffer();
+    feishu_ws_reset_assemblies();
+}
+
+static void feishu_ws_destroy_client(void)
+{
+    if (!s_ws_client) {
+        return;
+    }
+    esp_websocket_client_stop(s_ws_client);
+    esp_websocket_client_destroy(s_ws_client);
+    s_ws_client = NULL;
+    s_ws_connected = false;
+    feishu_ws_reset_frame_buffer();
+    feishu_ws_reset_assemblies();
+}
+
+static const char *feishu_ws_header_get(const feishu_ws_frame_t *frame, const char *key)
+{
+    if (!frame || !key) {
+        return NULL;
+    }
+    for (size_t i = 0; i < frame->header_count; i++) {
+        if (strcmp(frame->headers[i].key, key) == 0) {
+            return frame->headers[i].value;
+        }
+    }
+    return NULL;
+}
+
+static int feishu_ws_header_get_int(const feishu_ws_frame_t *frame, const char *key, int fallback)
+{
+    const char *value = feishu_ws_header_get(frame, key);
+    if (!value || !value[0]) {
+        return fallback;
+    }
+    return atoi(value);
+}
+
+static void feishu_ws_header_set(feishu_ws_frame_t *frame, const char *key, const char *value)
+{
+    if (!frame || !key || !value) {
+        return;
+    }
+    for (size_t i = 0; i < frame->header_count; i++) {
+        if (strcmp(frame->headers[i].key, key) == 0) {
+            safe_copy(frame->headers[i].value, sizeof(frame->headers[i].value), value);
+            return;
+        }
+    }
+    if (frame->header_count >= MIMI_FEISHU_WS_HEADER_MAX) {
+        return;
+    }
+    safe_copy(frame->headers[frame->header_count].key,
+              sizeof(frame->headers[frame->header_count].key), key);
+    safe_copy(frame->headers[frame->header_count].value,
+              sizeof(frame->headers[frame->header_count].value), value);
+    frame->header_count++;
+}
+
+static bool feishu_pb_read_varint(const uint8_t *buf, size_t len, size_t *offset, uint64_t *out)
+{
+    if (!buf || !offset || !out) {
+        return false;
+    }
+    uint64_t value = 0;
+    int shift = 0;
+    while (*offset < len && shift < 64) {
+        uint8_t byte = buf[*offset];
+        (*offset)++;
+        value |= (uint64_t)(byte & 0x7fU) << shift;
+        if ((byte & 0x80U) == 0) {
+            *out = value;
+            return true;
+        }
+        shift += 7;
+    }
+    return false;
+}
+
+static bool feishu_pb_skip_field(const uint8_t *buf, size_t len, size_t *offset, uint32_t wire_type)
+{
+    uint64_t value = 0;
+    switch (wire_type) {
+    case 0:
+        return feishu_pb_read_varint(buf, len, offset, &value);
+    case 2:
+        if (!feishu_pb_read_varint(buf, len, offset, &value)) {
+            return false;
+        }
+        if (value > len - *offset) {
+            return false;
+        }
+        *offset += (size_t)value;
+        return true;
+    default:
+        return false;
+    }
+}
+
+static esp_err_t feishu_pb_append(uint8_t **buf, size_t *len, size_t *cap,
+                                  const void *data, size_t data_len)
+{
+    if (!buf || !len || !cap || (!data && data_len > 0)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (*len + data_len > *cap) {
+        size_t new_cap = (*cap == 0) ? 128 : *cap;
+        while (*len + data_len > new_cap) {
+            new_cap *= 2;
+        }
+        uint8_t *tmp = realloc(*buf, new_cap);
+        if (!tmp) {
+            return ESP_ERR_NO_MEM;
+        }
+        *buf = tmp;
+        *cap = new_cap;
+    }
+    if (data_len > 0) {
+        memcpy(*buf + *len, data, data_len);
+    }
+    *len += data_len;
+    return ESP_OK;
+}
+
+static esp_err_t feishu_pb_append_varint(uint8_t **buf, size_t *len, size_t *cap, uint64_t value)
+{
+    uint8_t tmp[10];
+    size_t n = 0;
+    do {
+        uint8_t byte = value & 0x7fU;
+        value >>= 7;
+        if (value != 0) {
+            byte |= 0x80U;
+        }
+        tmp[n++] = byte;
+    } while (value != 0 && n < sizeof(tmp));
+    return feishu_pb_append(buf, len, cap, tmp, n);
+}
+
+static esp_err_t feishu_pb_append_field_varint(uint8_t **buf, size_t *len, size_t *cap,
+                                               uint32_t field_no, uint64_t value)
+{
+    esp_err_t err = feishu_pb_append_varint(buf, len, cap, ((uint64_t)field_no << 3) | 0U);
+    if (err != ESP_OK) {
+        return err;
+    }
+    return feishu_pb_append_varint(buf, len, cap, value);
+}
+
+static esp_err_t feishu_pb_append_field_bytes(uint8_t **buf, size_t *len, size_t *cap,
+                                              uint32_t field_no, const void *data, size_t data_len)
+{
+    esp_err_t err = feishu_pb_append_varint(buf, len, cap, ((uint64_t)field_no << 3) | 2U);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = feishu_pb_append_varint(buf, len, cap, data_len);
+    if (err != ESP_OK) {
+        return err;
+    }
+    return feishu_pb_append(buf, len, cap, data, data_len);
+}
+
+static esp_err_t feishu_ws_encode_header(const feishu_ws_header_t *header,
+                                         uint8_t **out, size_t *out_len)
+{
+    if (!header || !out || !out_len) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *out = NULL;
+    *out_len = 0;
+    size_t cap = 0;
+    esp_err_t err = feishu_pb_append_field_bytes(out, out_len, &cap, 1,
+                                                 header->key, strlen(header->key));
+    if (err == ESP_OK) {
+        err = feishu_pb_append_field_bytes(out, out_len, &cap, 2,
+                                           header->value, strlen(header->value));
+    }
+    if (err != ESP_OK) {
+        free(*out);
+        *out = NULL;
+        *out_len = 0;
+    }
+    return err;
+}
+
+static esp_err_t feishu_ws_encode_frame(const feishu_ws_frame_t *frame,
+                                        uint8_t **out, size_t *out_len)
+{
+    if (!frame || !out || !out_len) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *out = NULL;
+    *out_len = 0;
+    size_t cap = 0;
+
+    esp_err_t err = feishu_pb_append_field_varint(out, out_len, &cap, 1, frame->seq_id);
+    if (err == ESP_OK) {
+        err = feishu_pb_append_field_varint(out, out_len, &cap, 2, frame->log_id);
+    }
+    if (err == ESP_OK) {
+        err = feishu_pb_append_field_varint(out, out_len, &cap, 3, (uint64_t)(uint32_t)frame->service);
+    }
+    if (err == ESP_OK) {
+        err = feishu_pb_append_field_varint(out, out_len, &cap, 4, (uint64_t)(uint32_t)frame->method);
+    }
+    for (size_t i = 0; err == ESP_OK && i < frame->header_count; i++) {
+        uint8_t *header_buf = NULL;
+        size_t header_len = 0;
+        err = feishu_ws_encode_header(&frame->headers[i], &header_buf, &header_len);
+        if (err != ESP_OK) {
+            break;
+        }
+        err = feishu_pb_append_field_bytes(out, out_len, &cap, 5, header_buf, header_len);
+        free(header_buf);
+    }
+    if (err == ESP_OK && frame->payload && frame->payload_len > 0) {
+        err = feishu_pb_append_field_bytes(out, out_len, &cap, 8, frame->payload, frame->payload_len);
+    }
+
+    if (err != ESP_OK) {
+        free(*out);
+        *out = NULL;
+        *out_len = 0;
+    }
+    return err;
+}
+
+static bool feishu_ws_decode_header(const uint8_t *buf, size_t len, feishu_ws_header_t *header)
+{
+    if (!buf || !header) {
+        return false;
+    }
+    memset(header, 0, sizeof(*header));
+    size_t offset = 0;
+    while (offset < len) {
+        uint64_t key = 0;
+        if (!feishu_pb_read_varint(buf, len, &offset, &key)) {
+            return false;
+        }
+        uint32_t field_no = (uint32_t)(key >> 3);
+        uint32_t wire_type = (uint32_t)(key & 0x7U);
+        if (wire_type != 2) {
+            if (!feishu_pb_skip_field(buf, len, &offset, wire_type)) {
+                return false;
+            }
+            continue;
+        }
+        uint64_t data_len = 0;
+        if (!feishu_pb_read_varint(buf, len, &offset, &data_len) || data_len > len - offset) {
+            return false;
+        }
+        const uint8_t *data = buf + offset;
+        offset += (size_t)data_len;
+        if (field_no == 1) {
+            size_t copy_len = data_len;
+            if (copy_len >= sizeof(header->key)) {
+                copy_len = sizeof(header->key) - 1;
+            }
+            memcpy(header->key, data, copy_len);
+            header->key[copy_len] = '\0';
+        } else if (field_no == 2) {
+            size_t copy_len = data_len;
+            if (copy_len >= sizeof(header->value)) {
+                copy_len = sizeof(header->value) - 1;
+            }
+            memcpy(header->value, data, copy_len);
+            header->value[copy_len] = '\0';
+        }
+    }
+    return header->key[0] != '\0';
+}
+
+static bool feishu_ws_decode_frame(const uint8_t *buf, size_t len, feishu_ws_frame_t *frame)
+{
+    if (!buf || !frame) {
+        return false;
+    }
+    memset(frame, 0, sizeof(*frame));
+    size_t offset = 0;
+    while (offset < len) {
+        uint64_t key = 0;
+        if (!feishu_pb_read_varint(buf, len, &offset, &key)) {
+            return false;
+        }
+        uint32_t field_no = (uint32_t)(key >> 3);
+        uint32_t wire_type = (uint32_t)(key & 0x7U);
+        if (field_no <= 4) {
+            uint64_t value = 0;
+            if (wire_type != 0 || !feishu_pb_read_varint(buf, len, &offset, &value)) {
+                return false;
+            }
+            switch (field_no) {
+            case 1: frame->seq_id = value; break;
+            case 2: frame->log_id = value; break;
+            case 3: frame->service = (int32_t)value; break;
+            case 4: frame->method = (int32_t)value; break;
+            default: break;
+            }
+            continue;
+        }
+        if (wire_type != 2) {
+            if (!feishu_pb_skip_field(buf, len, &offset, wire_type)) {
+                return false;
+            }
+            continue;
+        }
+        uint64_t data_len = 0;
+        if (!feishu_pb_read_varint(buf, len, &offset, &data_len) || data_len > len - offset) {
+            return false;
+        }
+        const uint8_t *data = buf + offset;
+        offset += (size_t)data_len;
+        if (field_no == 5) {
+            if (frame->header_count >= MIMI_FEISHU_WS_HEADER_MAX) {
+                continue;
+            }
+            if (!feishu_ws_decode_header(data, (size_t)data_len,
+                                         &frame->headers[frame->header_count])) {
+                return false;
+            }
+            frame->header_count++;
+        } else if (field_no == 8) {
+            frame->payload = malloc((size_t)data_len + 1);
+            if (!frame->payload) {
+                return false;
+            }
+            memcpy(frame->payload, data, (size_t)data_len);
+            frame->payload[(size_t)data_len] = '\0';
+            frame->payload_len = (size_t)data_len;
+        }
+    }
+    return true;
+}
+
+static void feishu_ws_free_frame(feishu_ws_frame_t *frame)
+{
+    if (!frame) {
+        return;
+    }
+    free(frame->payload);
+    frame->payload = NULL;
+    frame->payload_len = 0;
+}
+
+static void feishu_ws_apply_client_config_json(cJSON *cfg)
+{
+    if (!cJSON_IsObject(cfg)) {
+        return;
+    }
+    cJSON *item = cJSON_GetObjectItem(cfg, "ReconnectCount");
+    if (cJSON_IsNumber(item)) {
+        s_ws_cfg.reconnect_count = item->valueint;
+    }
+    item = cJSON_GetObjectItem(cfg, "ReconnectInterval");
+    if (cJSON_IsNumber(item) && item->valueint > 0) {
+        s_ws_cfg.reconnect_interval_s = item->valueint;
+    }
+    item = cJSON_GetObjectItem(cfg, "ReconnectNonce");
+    if (cJSON_IsNumber(item) && item->valueint >= 0) {
+        s_ws_cfg.reconnect_nonce_s = item->valueint;
+    }
+    item = cJSON_GetObjectItem(cfg, "PingInterval");
+    if (cJSON_IsNumber(item) && item->valueint > 0) {
+        s_ws_cfg.ping_interval_s = item->valueint;
+    }
+}
+
+static void feishu_ws_extract_query_param(const char *url, const char *key,
+                                          char *out, size_t out_size)
+{
+    if (!out || out_size == 0) {
+        return;
+    }
+    out[0] = '\0';
+    if (!url || !key || !key[0]) {
+        return;
+    }
+    const char *query = strchr(url, '?');
+    if (!query) {
+        return;
+    }
+    query++;
+    size_t key_len = strlen(key);
+    while (*query) {
+        const char *next = strchr(query, '&');
+        size_t segment_len = next ? (size_t)(next - query) : strlen(query);
+        if (segment_len > key_len + 1 &&
+            strncmp(query, key, key_len) == 0 &&
+            query[key_len] == '=') {
+            size_t value_len = segment_len - key_len - 1;
+            if (value_len >= out_size) {
+                value_len = out_size - 1;
+            }
+            memcpy(out, query + key_len + 1, value_len);
+            out[value_len] = '\0';
+            return;
+        }
+        if (!next) {
+            break;
+        }
+        query = next + 1;
+    }
+}
+
+static esp_err_t feishu_fetch_ws_endpoint(char *out_url, size_t out_size)
+{
+    if (!out_url || out_size < 32) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    char url[256] = {0};
+    esp_err_t err = feishu_build_base_url(MIMI_FEISHU_WS_ENDPOINT_PATH, url, sizeof(url));
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    cJSON *body = cJSON_CreateObject();
+    if (!body) {
+        return ESP_ERR_NO_MEM;
+    }
+    cJSON_AddStringToObject(body, "AppID", s_app_id);
+    cJSON_AddStringToObject(body, "AppSecret", s_app_secret);
+    char *post_data = cJSON_PrintUnformatted(body);
+    cJSON_Delete(body);
+    if (!post_data) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    int status = 0;
+    char *resp_body = NULL;
+    err = feishu_post_json(url, NULL, post_data, MIMI_FEISHU_HTTP_TIMEOUT_MS,
+                           &status, &resp_body);
+    free(post_data);
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (status < 200 || status >= 300 || !resp_body) {
+        free(resp_body);
+        return ESP_FAIL;
+    }
+
+    cJSON *root = cJSON_Parse(resp_body);
+    free(resp_body);
+    if (!root) {
+        return ESP_FAIL;
+    }
+
+    cJSON *code = cJSON_GetObjectItem(root, "code");
+    cJSON *msg = cJSON_GetObjectItem(root, "msg");
+    if (!cJSON_IsNumber(code) || code->valueint != 0) {
+        ESP_LOGW(TAG, "Feishu WS endpoint failed: code=%d msg=%s",
+                 cJSON_IsNumber(code) ? code->valueint : -1,
+                 cJSON_IsString(msg) ? msg->valuestring : "(none)");
+        cJSON_Delete(root);
+        return ESP_FAIL;
+    }
+
+    cJSON *data = cJSON_GetObjectItem(root, "data");
+    cJSON *endpoint = cJSON_IsObject(data) ? cJSON_GetObjectItem(data, "URL") : NULL;
+    if (!cJSON_IsString(endpoint) || !endpoint->valuestring || !endpoint->valuestring[0]) {
+        endpoint = cJSON_IsObject(data) ? cJSON_GetObjectItem(data, "url") : NULL;
+    }
+    if (!cJSON_IsString(endpoint) || !endpoint->valuestring || !endpoint->valuestring[0]) {
+        cJSON_Delete(root);
+        return ESP_FAIL;
+    }
+
+    safe_copy(out_url, out_size, endpoint->valuestring);
+    cJSON *client_cfg = cJSON_IsObject(data) ? cJSON_GetObjectItem(data, "ClientConfig") : NULL;
+    feishu_ws_apply_client_config_json(client_cfg);
+    cJSON_Delete(root);
+    return ESP_OK;
+}
+
+static esp_err_t feishu_ws_send_frame(const feishu_ws_frame_t *frame)
+{
+    if (!s_ws_client || !esp_websocket_client_is_connected(s_ws_client) || !frame) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    uint8_t *buf = NULL;
+    size_t len = 0;
+    esp_err_t err = feishu_ws_encode_frame(frame, &buf, &len);
+    if (err != ESP_OK) {
+        return err;
+    }
+    int ret = esp_websocket_client_send_bin(s_ws_client, (const char *)buf, len,
+                                            pdMS_TO_TICKS(MIMI_FEISHU_WS_SEND_TIMEOUT_MS));
+    free(buf);
+    return ret >= 0 ? ESP_OK : ESP_FAIL;
+}
+
+static esp_err_t feishu_ws_send_ping(void)
+{
+    if (s_ws_service_id <= 0) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    feishu_ws_frame_t *frame = calloc(1, sizeof(*frame));
+    if (!frame) {
+        return ESP_ERR_NO_MEM;
+    }
+    frame->seq_id = 0;
+    frame->log_id = 0;
+    frame->service = s_ws_service_id;
+    frame->method = 0;
+    feishu_ws_header_set(frame, "type", "ping");
+    esp_err_t err = feishu_ws_send_frame(frame);
+    free(frame);
+    return err;
+}
+
+static esp_err_t feishu_ws_send_response(const feishu_ws_frame_t *request,
+                                         int status_code, int biz_rt_ms)
+{
+    if (!request) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    feishu_ws_frame_t *resp = calloc(1, sizeof(*resp));
+    if (!resp) {
+        return ESP_ERR_NO_MEM;
+    }
+    char payload[96];
+    snprintf(payload, sizeof(payload), "{\"code\":%d,\"headers\":null,\"data\":null}",
+             status_code);
+    resp->seq_id = request->seq_id;
+    resp->log_id = request->log_id;
+    resp->service = request->service;
+    resp->method = request->method;
+    resp->header_count = request->header_count;
+    if (resp->header_count > MIMI_FEISHU_WS_HEADER_MAX) {
+        resp->header_count = MIMI_FEISHU_WS_HEADER_MAX;
+    }
+    for (size_t i = 0; i < resp->header_count; i++) {
+        resp->headers[i] = request->headers[i];
+    }
+    resp->payload = (uint8_t *)payload;
+    resp->payload_len = strlen(payload);
+    char biz_rt[24];
+    snprintf(biz_rt, sizeof(biz_rt), "%d", biz_rt_ms >= 0 ? biz_rt_ms : 0);
+    feishu_ws_header_set(resp, "biz_rt", biz_rt);
+    esp_err_t err = feishu_ws_send_frame(resp);
+    free(resp);
+    return err;
 }
 
 static esp_err_t feishu_refresh_tenant_token(void)
@@ -1721,6 +2397,501 @@ static void feishu_push_inbound(const char *chat_id,
     }
 }
 
+static esp_err_t feishu_handle_event_root(cJSON *root)
+{
+    if (!cJSON_IsObject(root)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    cJSON *header = cJSON_GetObjectItem(root, "header");
+    cJSON *event = cJSON_GetObjectItem(root, "event");
+    cJSON *event_type = header ? cJSON_GetObjectItem(header, "event_type") : NULL;
+    if (!cJSON_IsString(event_type) || strcmp(event_type->valuestring, "im.message.receive_v1") != 0 ||
+        !cJSON_IsObject(event)) {
+        return ESP_OK;
+    }
+
+    char event_unique_id[MIMI_FEISHU_EVENT_ID_MAX_LEN] = {0};
+    if (feishu_extract_event_unique_id(root, event_unique_id, sizeof(event_unique_id)) &&
+        feishu_is_duplicate_event(event_unique_id)) {
+        ESP_LOGI(TAG, "Skip duplicate Feishu event %s", event_unique_id);
+        return ESP_OK;
+    }
+
+    char sender_id[96] = {0};
+    cJSON *sender = cJSON_GetObjectItem(event, "sender");
+    if (cJSON_IsObject(sender)) {
+        cJSON *sender_id_obj = cJSON_GetObjectItem(sender, "sender_id");
+        if (cJSON_IsObject(sender_id_obj)) {
+            cJSON *open_id = cJSON_GetObjectItem(sender_id_obj, "open_id");
+            cJSON *user_id = cJSON_GetObjectItem(sender_id_obj, "user_id");
+            cJSON *union_id = cJSON_GetObjectItem(sender_id_obj, "union_id");
+            if (cJSON_IsString(open_id) && open_id->valuestring) {
+                safe_copy(sender_id, sizeof(sender_id), open_id->valuestring);
+            } else if (cJSON_IsString(user_id) && user_id->valuestring) {
+                safe_copy(sender_id, sizeof(sender_id), user_id->valuestring);
+            } else if (cJSON_IsString(union_id) && union_id->valuestring) {
+                safe_copy(sender_id, sizeof(sender_id), union_id->valuestring);
+            }
+        }
+    }
+
+    if (!access_control_is_sender_allowed(sender_id)) {
+        ESP_LOGW(TAG, "Blocked Feishu message from sender_id=%s",
+                 sender_id[0] ? sender_id : "(unknown)");
+        return ESP_OK;
+    }
+
+    cJSON *message = cJSON_GetObjectItem(event, "message");
+    char chat_id[MIMI_CHAT_ID_MAX_LEN] = {0};
+    char message_type[16] = {0};
+    char text[1024] = {0};
+    char media_text[1024] = {0};
+    char media_file_id[96] = {0};
+    char media_file_path[128] = {0};
+    char *media_meta_json = NULL;
+    bool media_from_gateway = false;
+    if (cJSON_IsObject(message)) {
+        cJSON *chat_id_item = cJSON_GetObjectItem(message, "chat_id");
+        cJSON *message_type_item = cJSON_GetObjectItem(message, "message_type");
+        cJSON *content_item = cJSON_GetObjectItem(message, "content");
+        if (cJSON_IsString(chat_id_item) && chat_id_item->valuestring) {
+            safe_copy(chat_id, sizeof(chat_id), chat_id_item->valuestring);
+        }
+        if (cJSON_IsString(message_type_item) && message_type_item->valuestring) {
+            safe_copy(message_type, sizeof(message_type), message_type_item->valuestring);
+        }
+        if (cJSON_IsString(content_item) && content_item->valuestring) {
+            feishu_extract_text_from_content(content_item->valuestring, text, sizeof(text));
+        }
+        if (message_type[0] && strcmp(message_type, "text") != 0) {
+            media_from_gateway = feishu_try_build_gateway_media_text(message, message_type,
+                                                                     media_text, sizeof(media_text),
+                                                                     media_file_id, sizeof(media_file_id),
+                                                                     media_file_path, sizeof(media_file_path),
+                                                                     &media_meta_json);
+            if (!media_from_gateway) {
+                feishu_build_media_summary(message, message_type,
+                                           media_text, sizeof(media_text),
+                                           media_file_id, sizeof(media_file_id),
+                                           &media_meta_json);
+            }
+        }
+    }
+
+    if (!chat_id[0]) {
+        free(media_meta_json);
+        return ESP_OK;
+    }
+
+    if (strcmp(message_type, "text") != 0) {
+        if (media_text[0]) {
+            ESP_LOGI(TAG, "Feishu %s %s from %s: %.60s",
+                     message_type[0] ? message_type : "media",
+                     media_from_gateway ? "gateway_parse" : "summary",
+                     chat_id,
+                     media_text);
+            feishu_push_inbound(chat_id,
+                                media_text,
+                                feishu_get_bus_media_type(message_type),
+                                media_file_id,
+                                media_file_path,
+                                media_meta_json);
+        } else {
+            ESP_LOGI(TAG, "Ignore unsupported Feishu message type=%s chat=%s",
+                     message_type[0] ? message_type : "(empty)", chat_id);
+        }
+        free(media_meta_json);
+        return ESP_OK;
+    }
+
+    if (strcmp(text, "/start") == 0) {
+        free(media_meta_json);
+        feishu_send_message(chat_id, FEISHU_START_HELP);
+        return ESP_OK;
+    }
+
+    ESP_LOGI(TAG, "Feishu text from %s: %.60s", chat_id, text);
+    feishu_push_inbound(chat_id, text, "text", NULL, NULL, NULL);
+    free(media_meta_json);
+    return ESP_OK;
+}
+
+static esp_err_t feishu_handle_plain_event_json(const char *json)
+{
+    if (!json || !json[0]) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    cJSON *root = cJSON_Parse(json);
+    if (!root) {
+        return ESP_FAIL;
+    }
+    esp_err_t err = feishu_handle_event_root(root);
+    cJSON_Delete(root);
+    return err;
+}
+
+static uint8_t *feishu_ws_reassemble_payload(const feishu_ws_frame_t *frame, size_t *out_len)
+{
+    if (out_len) {
+        *out_len = 0;
+    }
+    if (!frame || !frame->payload || frame->payload_len == 0) {
+        return NULL;
+    }
+
+    const int sum = feishu_ws_header_get_int(frame, "sum", 1);
+    const int seq = feishu_ws_header_get_int(frame, "seq", 0);
+    const char *message_id = feishu_ws_header_get(frame, "message_id");
+    if (sum <= 1) {
+        uint8_t *copy = malloc(frame->payload_len + 1);
+        if (!copy) {
+            return NULL;
+        }
+        memcpy(copy, frame->payload, frame->payload_len);
+        copy[frame->payload_len] = '\0';
+        if (out_len) {
+            *out_len = frame->payload_len;
+        }
+        return copy;
+    }
+
+    if (!message_id || !message_id[0] || sum > MIMI_FEISHU_WS_ASSEMBLY_PARTS || seq < 0 || seq >= sum) {
+        ESP_LOGW(TAG, "Unsupported Feishu WS split frame: sum=%d seq=%d message_id=%s",
+                 sum, seq, message_id ? message_id : "(none)");
+        return NULL;
+    }
+
+    const int64_t now_us = esp_timer_get_time();
+    for (int i = 0; i < MIMI_FEISHU_WS_ASSEMBLY_SLOTS; i++) {
+        if (s_ws_assemblies[i].used && now_us > s_ws_assemblies[i].expire_us) {
+            feishu_ws_reset_assembly_slot(&s_ws_assemblies[i]);
+        }
+    }
+
+    feishu_ws_assembly_t *slot = NULL;
+    feishu_ws_assembly_t *free_slot = NULL;
+    for (int i = 0; i < MIMI_FEISHU_WS_ASSEMBLY_SLOTS; i++) {
+        if (s_ws_assemblies[i].used &&
+            strcmp(s_ws_assemblies[i].message_id, message_id) == 0) {
+            slot = &s_ws_assemblies[i];
+            break;
+        }
+        if (!free_slot && !s_ws_assemblies[i].used) {
+            free_slot = &s_ws_assemblies[i];
+        }
+    }
+    if (!slot) {
+        slot = free_slot ? free_slot : &s_ws_assemblies[0];
+        if (slot->used) {
+            feishu_ws_reset_assembly_slot(slot);
+        }
+        slot->used = true;
+        slot->sum = sum;
+        slot->expire_us = now_us + (int64_t)MIMI_FEISHU_WS_ASSEMBLY_TTL_MS * 1000LL;
+        safe_copy(slot->message_id, sizeof(slot->message_id), message_id);
+    }
+
+    if (!slot->parts[seq]) {
+        slot->parts[seq] = malloc(frame->payload_len);
+        if (!slot->parts[seq]) {
+            return NULL;
+        }
+        memcpy(slot->parts[seq], frame->payload, frame->payload_len);
+        slot->lens[seq] = frame->payload_len;
+        slot->total_len += frame->payload_len;
+        slot->expire_us = now_us + (int64_t)MIMI_FEISHU_WS_ASSEMBLY_TTL_MS * 1000LL;
+    }
+
+    if (slot->total_len == 0 || slot->total_len > MIMI_FEISHU_WS_FRAME_MAX_BYTES) {
+        feishu_ws_reset_assembly_slot(slot);
+        return NULL;
+    }
+
+    for (int i = 0; i < slot->sum; i++) {
+        if (!slot->parts[i]) {
+            return NULL;
+        }
+    }
+
+    uint8_t *combined = malloc(slot->total_len + 1);
+    if (!combined) {
+        return NULL;
+    }
+    size_t offset = 0;
+    for (int i = 0; i < slot->sum; i++) {
+        memcpy(combined + offset, slot->parts[i], slot->lens[i]);
+        offset += slot->lens[i];
+    }
+    combined[offset] = '\0';
+    feishu_ws_reset_assembly_slot(slot);
+    if (out_len) {
+        *out_len = offset;
+    }
+    return combined;
+}
+
+static void feishu_ws_handle_control_frame(const feishu_ws_frame_t *frame)
+{
+    const char *type = feishu_ws_header_get(frame, "type");
+    if (!type || strcmp(type, "pong") != 0 || !frame->payload || frame->payload_len == 0) {
+        return;
+    }
+    cJSON *root = cJSON_ParseWithLength((const char *)frame->payload, frame->payload_len);
+    if (!root) {
+        return;
+    }
+    feishu_ws_apply_client_config_json(root);
+    cJSON_Delete(root);
+}
+
+static void feishu_ws_handle_data_frame(const feishu_ws_frame_t *frame)
+{
+    const char *type = feishu_ws_header_get(frame, "type");
+    const char *message_id = feishu_ws_header_get(frame, "message_id");
+    const char *trace_id = feishu_ws_header_get(frame, "trace_id");
+    int64_t start_ms = esp_timer_get_time() / 1000;
+    int status_code = 200;
+
+    if (!type || strcmp(type, "event") != 0) {
+        feishu_ws_send_response(frame, status_code, 0);
+        return;
+    }
+
+    size_t payload_len = 0;
+    uint8_t *payload = feishu_ws_reassemble_payload(frame, &payload_len);
+    if (!payload) {
+        return;
+    }
+
+    ESP_LOGD(TAG, "Feishu WS event message_id=%s trace_id=%s payload=%.160s",
+             message_id ? message_id : "(none)",
+             trace_id ? trace_id : "(none)",
+             (const char *)payload);
+
+    if (feishu_handle_plain_event_json((const char *)payload) != ESP_OK) {
+        status_code = 500;
+    }
+    int biz_rt_ms = (int)((esp_timer_get_time() / 1000) - start_ms);
+    feishu_ws_send_response(frame, status_code, biz_rt_ms);
+    free(payload);
+}
+
+static void feishu_ws_handle_frame_bytes(const uint8_t *data, size_t len)
+{
+    feishu_ws_frame_t *frame = calloc(1, sizeof(*frame));
+    if (!frame) {
+        ESP_LOGE(TAG, "Alloc Feishu WS frame failed");
+        return;
+    }
+    if (!feishu_ws_decode_frame(data, len, frame)) {
+        ESP_LOGW(TAG, "Decode Feishu WS frame failed len=%u", (unsigned)len);
+        free(frame);
+        return;
+    }
+
+    if (frame->method == 0) {
+        feishu_ws_handle_control_frame(frame);
+    } else if (frame->method == 1) {
+        feishu_ws_handle_data_frame(frame);
+    }
+    feishu_ws_free_frame(frame);
+    free(frame);
+}
+
+static void feishu_ws_event_handler(void *arg, esp_event_base_t base, int32_t event_id, void *event_data)
+{
+    (void)arg;
+    (void)base;
+    esp_websocket_event_data_t *evt = (esp_websocket_event_data_t *)event_data;
+
+    switch (event_id) {
+    case WEBSOCKET_EVENT_CONNECTED:
+        s_ws_connected = true;
+        s_ws_last_disconnect_ms = 0;
+        s_ws_connect_started_ms = 0;
+        s_ws_next_reconnect_ms = 0;
+        s_ws_next_ping_ms = (esp_timer_get_time() / 1000) + (int64_t)s_ws_cfg.ping_interval_s * 1000LL;
+        feishu_ws_reset_frame_buffer();
+        ESP_LOGI(TAG, "Feishu WS connected conn_id=%s service_id=%" PRId32,
+                 s_ws_conn_id[0] ? s_ws_conn_id : "(none)", s_ws_service_id);
+        break;
+
+    case WEBSOCKET_EVENT_DISCONNECTED:
+        s_ws_connected = false;
+        s_ws_last_disconnect_ms = esp_timer_get_time() / 1000;
+        s_ws_connect_started_ms = 0;
+        s_ws_next_reconnect_ms = s_ws_last_disconnect_ms +
+                                 (int64_t)s_ws_cfg.reconnect_interval_s * 1000LL;
+        feishu_ws_reset_frame_buffer();
+        feishu_ws_reset_assemblies();
+        ESP_LOGW(TAG, "Feishu WS disconnected conn_id=%s", s_ws_conn_id[0] ? s_ws_conn_id : "(none)");
+        break;
+
+    case WEBSOCKET_EVENT_DATA:
+        if (evt->op_code == 0x02) {
+            if (evt->payload_offset == 0) {
+                s_ws_frame_len = 0;
+            }
+            s_ws_recv_binary_frag = true;
+        }
+        if (evt->op_code != 0x02 && !(evt->op_code == 0x00 && s_ws_recv_binary_frag)) {
+            break;
+        }
+        if (evt->payload_len > MIMI_FEISHU_WS_FRAME_MAX_BYTES) {
+            ESP_LOGW(TAG, "Feishu WS payload too large: %u", (unsigned)evt->payload_len);
+            feishu_ws_reset_frame_buffer();
+            break;
+        }
+        size_t needed = s_ws_frame_len + evt->data_len;
+        if (needed > s_ws_frame_cap) {
+            size_t new_cap = needed + 256;
+            uint8_t *tmp = realloc(s_ws_frame_buf, new_cap);
+            if (!tmp) {
+                ESP_LOGE(TAG, "Feishu WS frame alloc failed");
+                feishu_ws_reset_frame_buffer();
+                break;
+            }
+            s_ws_frame_buf = tmp;
+            s_ws_frame_cap = new_cap;
+        }
+        memcpy(s_ws_frame_buf + s_ws_frame_len, evt->data_ptr, evt->data_len);
+        s_ws_frame_len += evt->data_len;
+        if (evt->payload_offset + evt->data_len >= evt->payload_len) {
+            feishu_ws_handle_frame_bytes(s_ws_frame_buf, s_ws_frame_len);
+            s_ws_frame_len = 0;
+            s_ws_recv_binary_frag = false;
+        }
+        break;
+
+    case WEBSOCKET_EVENT_ERROR:
+        ESP_LOGE(TAG, "Feishu WS error: hs=%d errno=%d tls_last=%s(%d)",
+                 evt->error_handle.esp_ws_handshake_status_code,
+                 evt->error_handle.esp_transport_sock_errno,
+                 esp_err_to_name(evt->error_handle.esp_tls_last_esp_err),
+                 (int)evt->error_handle.esp_tls_last_esp_err);
+        break;
+
+    default:
+        break;
+    }
+}
+
+static esp_err_t feishu_ws_connect(const char *connect_url)
+{
+    if (!connect_url || !connect_url[0]) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    feishu_ws_destroy_client();
+    safe_copy(s_ws_connect_url, sizeof(s_ws_connect_url), connect_url);
+    feishu_ws_extract_query_param(connect_url, "device_id", s_ws_conn_id, sizeof(s_ws_conn_id));
+    char service_id[32] = {0};
+    feishu_ws_extract_query_param(connect_url, "service_id", service_id, sizeof(service_id));
+    s_ws_service_id = service_id[0] ? (int32_t)strtol(service_id, NULL, 10) : 0;
+
+    esp_websocket_client_config_t ws_cfg = {
+        .uri = s_ws_connect_url,
+        .buffer_size = MIMI_FEISHU_WS_BUFFER_SIZE,
+        .disable_auto_reconnect = true,
+        .enable_close_reconnect = false,
+        .task_prio = MIMI_FEISHU_WS_TASK_PRIO,
+        .task_name = "feishu_wscli",
+        .task_stack = MIMI_FEISHU_WS_CLIENT_TASK_STACK,
+        .network_timeout_ms = MIMI_FEISHU_HTTP_TIMEOUT_MS,
+        .ping_interval_sec = 30,
+        .pingpong_timeout_sec = 90,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+    };
+
+    s_ws_client = esp_websocket_client_init(&ws_cfg);
+    if (!s_ws_client) {
+        return ESP_FAIL;
+    }
+    esp_websocket_register_events(s_ws_client, WEBSOCKET_EVENT_ANY, feishu_ws_event_handler, NULL);
+    esp_err_t err = esp_websocket_client_start(s_ws_client);
+    if (err != ESP_OK) {
+        esp_websocket_client_destroy(s_ws_client);
+        s_ws_client = NULL;
+        return err;
+    }
+    s_ws_connect_started_ms = esp_timer_get_time() / 1000;
+    return ESP_OK;
+}
+
+static void feishu_ws_task(void *arg)
+{
+    (void)arg;
+    int reconnect_attempts = 0;
+
+    while (1) {
+        if (!feishu_is_configured() || !feishu_receive_mode_is_websocket()) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+
+        int64_t now_ms = esp_timer_get_time() / 1000;
+        if (s_ws_connected) {
+            if (s_ws_cfg.ping_interval_s > 0 && now_ms >= s_ws_next_ping_ms) {
+                if (feishu_ws_send_ping() == ESP_OK) {
+                    s_ws_next_ping_ms = now_ms + (int64_t)s_ws_cfg.ping_interval_s * 1000LL;
+                } else {
+                    ESP_LOGW(TAG, "Feishu WS ping failed");
+                }
+            }
+            vTaskDelay(pdMS_TO_TICKS(250));
+            continue;
+        }
+
+        if (s_ws_client) {
+            const int64_t handshake_timeout_ms = (int64_t)MIMI_FEISHU_HTTP_TIMEOUT_MS + 5000;
+            if (s_ws_connect_started_ms > 0 &&
+                now_ms - s_ws_connect_started_ms >= handshake_timeout_ms) {
+                ESP_LOGW(TAG, "Feishu WS handshake timeout, recreate client");
+                feishu_ws_destroy_client();
+                s_ws_next_reconnect_ms = now_ms;
+            } else {
+                vTaskDelay(pdMS_TO_TICKS(200));
+                continue;
+            }
+        }
+
+        if (s_ws_client && s_ws_last_disconnect_ms > 0 &&
+            now_ms - s_ws_last_disconnect_ms >= 1000) {
+            feishu_ws_destroy_client();
+        }
+
+        if (s_ws_next_reconnect_ms > now_ms) {
+            vTaskDelay(pdMS_TO_TICKS(200));
+            continue;
+        }
+
+        char connect_url[MIMI_FEISHU_WS_URL_MAX_BYTES] = {0};
+        esp_err_t err = feishu_fetch_ws_endpoint(connect_url, sizeof(connect_url));
+        if (err == ESP_OK) {
+            err = feishu_ws_connect(connect_url);
+        }
+        if (err == ESP_OK) {
+            reconnect_attempts = 0;
+            s_ws_next_reconnect_ms = 0;
+            vTaskDelay(pdMS_TO_TICKS(500));
+            continue;
+        }
+
+        reconnect_attempts++;
+        int base_delay_ms = s_ws_cfg.reconnect_interval_s > 0
+            ? s_ws_cfg.reconnect_interval_s * 1000
+            : MIMI_FEISHU_WS_RECONNECT_INTERVAL_MS;
+        int jitter_ms = 0;
+        if (s_ws_cfg.reconnect_nonce_s > 0 && reconnect_attempts == 1) {
+            jitter_ms = esp_random() % (s_ws_cfg.reconnect_nonce_s * 1000);
+        }
+        s_ws_next_reconnect_ms = now_ms + base_delay_ms + jitter_ms;
+        ESP_LOGW(TAG, "Feishu WS connect failed: %s, retry in %d ms",
+                 esp_err_to_name(err), base_delay_ms + jitter_ms);
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+}
+
 static esp_err_t feishu_events_handler(httpd_req_t *req)
 {
     if (!feishu_is_configured()) {
@@ -1809,139 +2980,28 @@ static esp_err_t feishu_events_handler(httpd_req_t *req)
         free(resp_json);
         return send_err;
     }
-
-    cJSON *header = cJSON_GetObjectItem(root, "header");
-    cJSON *event = cJSON_GetObjectItem(root, "event");
-    cJSON *event_type = header ? cJSON_GetObjectItem(header, "event_type") : NULL;
-    if (!cJSON_IsString(event_type) || strcmp(event_type->valuestring, "im.message.receive_v1") != 0 ||
-        !cJSON_IsObject(event)) {
-        cJSON_Delete(root);
-        return feishu_send_http_json(req, NULL, "{\"code\":0}");
-    }
-
-    char event_unique_id[MIMI_FEISHU_EVENT_ID_MAX_LEN] = {0};
-    if (feishu_extract_event_unique_id(root, event_unique_id, sizeof(event_unique_id)) &&
-        feishu_is_duplicate_event(event_unique_id)) {
-        ESP_LOGI(TAG, "Skip duplicate Feishu event %s", event_unique_id);
-        cJSON_Delete(root);
-        return feishu_send_http_json(req, NULL, "{\"code\":0}");
-    }
-
-    char sender_id[96] = {0};
-    cJSON *sender = cJSON_GetObjectItem(event, "sender");
-    if (cJSON_IsObject(sender)) {
-        cJSON *sender_id_obj = cJSON_GetObjectItem(sender, "sender_id");
-        if (cJSON_IsObject(sender_id_obj)) {
-            cJSON *open_id = cJSON_GetObjectItem(sender_id_obj, "open_id");
-            cJSON *user_id = cJSON_GetObjectItem(sender_id_obj, "user_id");
-            cJSON *union_id = cJSON_GetObjectItem(sender_id_obj, "union_id");
-            if (cJSON_IsString(open_id) && open_id->valuestring) {
-                safe_copy(sender_id, sizeof(sender_id), open_id->valuestring);
-            } else if (cJSON_IsString(user_id) && user_id->valuestring) {
-                safe_copy(sender_id, sizeof(sender_id), user_id->valuestring);
-            } else if (cJSON_IsString(union_id) && union_id->valuestring) {
-                safe_copy(sender_id, sizeof(sender_id), union_id->valuestring);
-            }
-        }
-    }
-
-    if (!access_control_is_sender_allowed(sender_id)) {
-        ESP_LOGW(TAG, "Blocked Feishu message from sender_id=%s",
-                 sender_id[0] ? sender_id : "(unknown)");
-        cJSON_Delete(root);
-        return feishu_send_http_json(req, NULL, "{\"code\":0}");
-    }
-
-    cJSON *message = cJSON_GetObjectItem(event, "message");
-    char chat_id[MIMI_CHAT_ID_MAX_LEN] = {0};
-    char message_type[16] = {0};
-    char text[1024] = {0};
-    char media_text[1024] = {0};
-    char media_file_id[96] = {0};
-    char media_file_path[128] = {0};
-    char *media_meta_json = NULL;
-    bool media_from_gateway = false;
-    if (cJSON_IsObject(message)) {
-        cJSON *chat_id_item = cJSON_GetObjectItem(message, "chat_id");
-        cJSON *message_type_item = cJSON_GetObjectItem(message, "message_type");
-        cJSON *content_item = cJSON_GetObjectItem(message, "content");
-        if (cJSON_IsString(chat_id_item) && chat_id_item->valuestring) {
-            safe_copy(chat_id, sizeof(chat_id), chat_id_item->valuestring);
-        }
-        if (cJSON_IsString(message_type_item) && message_type_item->valuestring) {
-            safe_copy(message_type, sizeof(message_type), message_type_item->valuestring);
-        }
-        if (cJSON_IsString(content_item) && content_item->valuestring) {
-            feishu_extract_text_from_content(content_item->valuestring, text, sizeof(text));
-        }
-        if (message_type[0] && strcmp(message_type, "text") != 0) {
-            media_from_gateway = feishu_try_build_gateway_media_text(message, message_type,
-                                                                     media_text, sizeof(media_text),
-                                                                     media_file_id, sizeof(media_file_id),
-                                                                     media_file_path, sizeof(media_file_path),
-                                                                     &media_meta_json);
-            if (!media_from_gateway) {
-                feishu_build_media_summary(message, message_type,
-                                           media_text, sizeof(media_text),
-                                           media_file_id, sizeof(media_file_id),
-                                           &media_meta_json);
-            }
-        }
-    }
-
+    (void)feishu_handle_event_root(root);
     cJSON_Delete(root);
-
-    if (!chat_id[0]) {
-        free(media_meta_json);
-        return feishu_send_http_json(req, NULL, "{\"code\":0}");
-    }
-
-    if (strcmp(message_type, "text") != 0) {
-        if (media_text[0]) {
-            ESP_LOGI(TAG, "Feishu %s %s from %s: %.60s",
-                     message_type[0] ? message_type : "media",
-                     media_from_gateway ? "gateway_parse" : "summary",
-                     chat_id,
-                     media_text);
-            feishu_push_inbound(chat_id,
-                                media_text,
-                                feishu_get_bus_media_type(message_type),
-                                media_file_id,
-                                media_file_path,
-                                media_meta_json);
-        } else {
-            ESP_LOGI(TAG, "Ignore unsupported Feishu message type=%s chat=%s",
-                     message_type[0] ? message_type : "(empty)", chat_id);
-        }
-        free(media_meta_json);
-        return feishu_send_http_json(req, NULL, "{\"code\":0}");
-    }
-
-    if (strcmp(text, "/start") == 0) {
-        free(media_meta_json);
-        feishu_send_message(chat_id, FEISHU_START_HELP);
-        return feishu_send_http_json(req, NULL, "{\"code\":0}");
-    }
-
-    ESP_LOGI(TAG, "Feishu text from %s: %.60s", chat_id, text);
-    feishu_push_inbound(chat_id, text, "text", NULL, NULL, NULL);
-    free(media_meta_json);
     return feishu_send_http_json(req, NULL, "{\"code\":0}");
 }
 
 esp_err_t feishu_bot_init(void)
 {
+    feishu_ws_reset_runtime();
     safe_copy(s_app_id, sizeof(s_app_id), MIMI_SECRET_FEISHU_APP_ID);
     safe_copy(s_app_secret, sizeof(s_app_secret), MIMI_SECRET_FEISHU_APP_SECRET);
     safe_copy(s_verify_token, sizeof(s_verify_token), MIMI_SECRET_FEISHU_VERIFY_TOKEN);
     safe_copy(s_encrypt_key, sizeof(s_encrypt_key), MIMI_SECRET_FEISHU_ENCRYPT_KEY);
     feishu_copy_base_url(s_open_api_base, sizeof(s_open_api_base), MIMI_SECRET_FEISHU_OPEN_API_BASE);
+    feishu_normalize_receive_mode(s_receive_mode, sizeof(s_receive_mode), MIMI_SECRET_FEISHU_RECEIVE_MODE);
     feishu_load_str_from_nvs(MIMI_NVS_KEY_FEISHU_APP_ID, s_app_id, sizeof(s_app_id));
     feishu_load_str_from_nvs(MIMI_NVS_KEY_FEISHU_SECRET, s_app_secret, sizeof(s_app_secret));
     feishu_load_str_from_nvs(MIMI_NVS_KEY_FEISHU_VERIFY, s_verify_token, sizeof(s_verify_token));
     feishu_load_str_from_nvs(MIMI_NVS_KEY_FEISHU_ENCRYPT, s_encrypt_key, sizeof(s_encrypt_key));
     feishu_load_str_from_nvs(MIMI_NVS_KEY_FEISHU_OPENAPI, s_open_api_base, sizeof(s_open_api_base));
+    feishu_load_str_from_nvs(MIMI_NVS_KEY_FEISHU_MODE, s_receive_mode, sizeof(s_receive_mode));
     feishu_copy_base_url(s_open_api_base, sizeof(s_open_api_base), s_open_api_base);
+    feishu_normalize_receive_mode(s_receive_mode, sizeof(s_receive_mode), s_receive_mode);
     feishu_invalidate_tenant_token();
 
     if (!feishu_is_configured()) {
@@ -1949,7 +3009,8 @@ esp_err_t feishu_bot_init(void)
         return ESP_OK;
     }
 
-    ESP_LOGI(TAG, "Feishu bot configured (verify_token=%s, encrypt_key=%s, open_api_base=%s)",
+    ESP_LOGI(TAG, "Feishu bot configured (mode=%s, verify_token=%s, encrypt_key=%s, open_api_base=%s)",
+             s_receive_mode,
              s_verify_token[0] ? "configured" : "open",
              s_encrypt_key[0] ? "configured" : "open",
              s_open_api_base[0] ? s_open_api_base : "https://open.feishu.cn");
@@ -1966,20 +3027,35 @@ esp_err_t feishu_bot_start(void)
         return ESP_OK;
     }
 
-    httpd_uri_t uri = {
-        .uri = MIMI_FEISHU_EVENTS_PATH,
-        .method = HTTP_POST,
-        .handler = feishu_events_handler,
-        .user_ctx = NULL,
-    };
-    esp_err_t err = ws_server_register_uri(&uri);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Register Feishu callback failed: %s", esp_err_to_name(err));
-        return err;
+    esp_err_t err = ESP_OK;
+    if (feishu_receive_mode_is_websocket()) {
+        if (!s_ws_task_handle) {
+            BaseType_t ok = xTaskCreate(feishu_ws_task, "feishu_ws",
+                                        MIMI_FEISHU_WS_TASK_STACK, NULL,
+                                        MIMI_FEISHU_WS_TASK_PRIO, &s_ws_task_handle);
+            if (ok != pdPASS) {
+                ESP_LOGE(TAG, "Create Feishu WS task failed");
+                return ESP_ERR_NO_MEM;
+            }
+        }
+        s_ws_next_reconnect_ms = 0;
+        ESP_LOGI(TAG, "Feishu WebSocket long connection enabled");
+    } else {
+        httpd_uri_t uri = {
+            .uri = MIMI_FEISHU_EVENTS_PATH,
+            .method = HTTP_POST,
+            .handler = feishu_events_handler,
+            .user_ctx = NULL,
+        };
+        err = ws_server_register_uri(&uri);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Register Feishu callback failed: %s", esp_err_to_name(err));
+            return err;
+        }
+        ESP_LOGI(TAG, "Feishu callback registered at %s", MIMI_FEISHU_EVENTS_PATH);
     }
 
     s_started = true;
-    ESP_LOGI(TAG, "Feishu callback registered at %s", MIMI_FEISHU_EVENTS_PATH);
     return ESP_OK;
 #endif
 }
@@ -2035,6 +3111,10 @@ esp_err_t feishu_set_app_credentials(const char *app_id, const char *app_secret)
     safe_copy(s_app_id, sizeof(s_app_id), app_id);
     safe_copy(s_app_secret, sizeof(s_app_secret), app_secret);
     feishu_invalidate_tenant_token();
+    if (s_ws_task_handle) {
+        feishu_ws_destroy_client();
+        s_ws_next_reconnect_ms = 0;
+    }
 
     err = feishu_bot_start();
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
@@ -2059,6 +3139,10 @@ esp_err_t feishu_clear_app_credentials(void)
     safe_copy(s_app_id, sizeof(s_app_id), MIMI_SECRET_FEISHU_APP_ID);
     safe_copy(s_app_secret, sizeof(s_app_secret), MIMI_SECRET_FEISHU_APP_SECRET);
     feishu_invalidate_tenant_token();
+    if (s_ws_task_handle) {
+        feishu_ws_destroy_client();
+        s_ws_next_reconnect_ms = 0;
+    }
     if (feishu_is_configured()) {
         err = feishu_bot_start();
         if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
@@ -2139,6 +3223,10 @@ esp_err_t feishu_set_open_api_base(const char *base_url)
     }
     feishu_copy_base_url(s_open_api_base, sizeof(s_open_api_base), normalized);
     feishu_invalidate_tenant_token();
+    if (s_ws_task_handle) {
+        feishu_ws_destroy_client();
+        s_ws_next_reconnect_ms = 0;
+    }
     ESP_LOGI(TAG, "Feishu OpenAPI base updated: %s", s_open_api_base);
     return ESP_OK;
 }
@@ -2151,6 +3239,58 @@ esp_err_t feishu_clear_open_api_base(void)
     }
     feishu_copy_base_url(s_open_api_base, sizeof(s_open_api_base), MIMI_SECRET_FEISHU_OPEN_API_BASE);
     feishu_invalidate_tenant_token();
+    if (s_ws_task_handle) {
+        feishu_ws_destroy_client();
+        s_ws_next_reconnect_ms = 0;
+    }
     ESP_LOGI(TAG, "Feishu OpenAPI base cleared");
+    return ESP_OK;
+}
+
+esp_err_t feishu_set_receive_mode(const char *mode)
+{
+    char normalized[16] = {0};
+    feishu_normalize_receive_mode(normalized, sizeof(normalized), mode);
+    if (normalized[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    esp_err_t err = feishu_nvs_write_str(MIMI_NVS_KEY_FEISHU_MODE, normalized);
+    if (err != ESP_OK) {
+        return err;
+    }
+    safe_copy(s_receive_mode, sizeof(s_receive_mode), normalized);
+    if (s_ws_task_handle) {
+        feishu_ws_destroy_client();
+        s_ws_next_reconnect_ms = 0;
+    }
+    if (s_started) {
+        ESP_LOGW(TAG, "Feishu receive mode updated to %s; reboot may be required to fully apply",
+                 s_receive_mode);
+        return ESP_OK;
+    }
+    if (feishu_is_configured()) {
+        err = feishu_bot_start();
+        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+            return err;
+        }
+    }
+    ESP_LOGI(TAG, "Feishu receive mode updated to %s", s_receive_mode);
+    return ESP_OK;
+}
+
+esp_err_t feishu_clear_receive_mode(void)
+{
+    esp_err_t err = feishu_nvs_erase_key(MIMI_NVS_KEY_FEISHU_MODE);
+    if (err != ESP_OK) {
+        return err;
+    }
+    feishu_normalize_receive_mode(s_receive_mode, sizeof(s_receive_mode),
+                                  MIMI_SECRET_FEISHU_RECEIVE_MODE);
+    if (s_ws_task_handle) {
+        feishu_ws_destroy_client();
+        s_ws_next_reconnect_ms = 0;
+    }
+    ESP_LOGI(TAG, "Feishu receive mode cleared to build default: %s", s_receive_mode);
     return ESP_OK;
 }

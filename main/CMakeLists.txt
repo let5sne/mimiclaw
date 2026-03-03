@@ -33,6 +33,7 @@ idf_component_register(
         "tools/tool_cron.c"
         "tools/tool_web_search.c"
         "tools/tool_get_time.c"
+        "tools/tool_device_info.c"
         "tools/tool_files.c"
         "tools/tool_memory.c"
         "tools/tool_audio.c"
@@ -43,7 +44,7 @@ idf_component_register(
     REQUIRES
         nvs_flash esp_wifi esp_netif esp_http_client esp_http_server
         esp_https_ota esp_event json spiffs console vfs app_update esp-tls driver
-        esp_websocket_client esp_lcd esp_timer led_strip qrcode
+        esp_websocket_client esp_lcd esp_timer led_strip qrcode spi_flash esp_psram
 )
 
 # 将 spiffs_data 打包到 spiffs 分区，并在 `idf.py flash` 时自动烧录

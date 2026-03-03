@@ -28,6 +28,9 @@ static bool validate_path(const char *path)
 static bool path_in_dir(const char *path, const char *dir)
 {
     size_t dir_len = strlen(dir);
+    while (dir_len > 1 && dir[dir_len - 1] == '/') {
+        dir_len--;
+    }
     if (strncmp(path, dir, dir_len) != 0) return false;
     return path[dir_len] == '\0' || path[dir_len] == '/';
 }
@@ -41,6 +44,11 @@ static bool validate_write_path(const char *path)
     }
 #if MIMI_FILE_WRITE_ALLOW_CONFIG_DIR
     if (path_in_dir(path, MIMI_SPIFFS_CONFIG_DIR)) {
+        return true;
+    }
+#endif
+#if MIMI_FILE_WRITE_ALLOW_SKILLS_DIR
+    if (path_in_dir(path, MIMI_SKILLS_PREFIX)) {
         return true;
     }
 #endif
@@ -60,6 +68,11 @@ static void write_path_reject_message(char *output, size_t output_size)
 #if MIMI_FILE_WRITE_ALLOW_CONFIG_DIR
     if (off < output_size) {
         off += snprintf(output + off, output_size - off, ", %s", MIMI_SPIFFS_CONFIG_DIR);
+    }
+#endif
+#if MIMI_FILE_WRITE_ALLOW_SKILLS_DIR
+    if (off < output_size) {
+        off += snprintf(output + off, output_size - off, ", %s", MIMI_SKILLS_PREFIX);
     }
 #endif
 #if MIMI_FILE_WRITE_ALLOW_SESSION_DIR

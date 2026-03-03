@@ -8,7 +8,7 @@
 esp_err_t feishu_bot_init(void);
 
 /**
- * 注册飞书事件回调 HTTP 入口。
+ * 启动飞书接收端。根据配置走 webhook 或板载 WebSocket 长连接。
  */
 esp_err_t feishu_bot_start(void);
 
@@ -40,3 +40,10 @@ esp_err_t feishu_clear_encrypt_key(void);
  */
 esp_err_t feishu_set_open_api_base(const char *base_url);
 esp_err_t feishu_clear_open_api_base(void);
+
+/**
+ * 运行时更新飞书接收模式（webhook / websocket）。
+ * 已启动后修改通常需要重启才会完全生效。
+ */
+esp_err_t feishu_set_receive_mode(const char *mode);
+esp_err_t feishu_clear_receive_mode(void);

@@ -191,21 +191,26 @@ For a normal Feishu Bot setup, these are the fields that matter:
 
 - Required: `App ID`
 - Required: `App Secret`
-- Strongly recommended: `Verify Token`
-- Optional: `Encrypt Key`
+- Recommended: `Receive Mode`
+- Strongly recommended in `webhook` mode: `Verify Token`
+- Optional in `webhook` mode: `Encrypt Key`
 - Usually leave as-is: `Open API Base`
 
 ```c
 #define MIMI_SECRET_FEISHU_APP_ID        "cli_xxx"              // required: Feishu App ID
 #define MIMI_SECRET_FEISHU_APP_SECRET    "xxx"                  // required: Feishu App Secret
-#define MIMI_SECRET_FEISHU_VERIFY_TOKEN  "mimiclaw-feishu"      // recommended: event subscription Verify Token
-#define MIMI_SECRET_FEISHU_ENCRYPT_KEY   ""                     // optional: only needed for encrypted callbacks
+#define MIMI_SECRET_FEISHU_RECEIVE_MODE  "websocket"            // recommended: board-side long connection; or use webhook
+#define MIMI_SECRET_FEISHU_VERIFY_TOKEN  "mimiclaw-feishu"      // recommended in webhook mode
+#define MIMI_SECRET_FEISHU_ENCRYPT_KEY   ""                     // only needed for encrypted webhook callbacks
 #define MIMI_SECRET_FEISHU_OPEN_API_BASE "https://open.feishu.cn" // usually keep default; override only for local stub validation
 ```
 
 - `App ID` and `App Secret` are mandatory for the bot to work
-- `Verify Token` is not strictly required by Feishu, but this project strongly recommends setting it
-- leave `Encrypt Key` empty until plaintext callbacks are working
+- `MIMI_SECRET_FEISHU_RECEIVE_MODE` supports `websocket` and `webhook`
+- `websocket` is the recommended default: the board opens the long connection itself, so you do **not** need a public callback URL
+- only `webhook` mode needs `Verify Token`, `Encrypt Key`, `/feishu/events`, and a public callback path
+- `Verify Token` is not strictly required by Feishu, but this project strongly recommends setting it in webhook mode
+- leave `Encrypt Key` empty until plaintext webhook callbacks are working
 
 2. In the Feishu Open Platform:
 
@@ -214,34 +219,46 @@ At minimum, fill in these items:
 - create a **self-built app**
 - enable **bot capability**
 - subscribe to event `im.message.receive_v1`
-- set request URL to `https://<public-address>/feishu/events`
-- set `Verify Token` to the same value as `MIMI_SECRET_FEISHU_VERIFY_TOKEN`
-- leave `Encrypt Key` empty for plaintext callbacks, or set it to match `MIMI_SECRET_FEISHU_ENCRYPT_KEY`
+- if receive mode is `websocket`:
+  - no `Request URL` is required
+  - no public callback address is required
+- if receive mode is `webhook`:
+  - set request URL to `https://<public-address>/feishu/events`
+  - set `Verify Token` to the same value as `MIMI_SECRET_FEISHU_VERIFY_TOKEN`
+  - leave `Encrypt Key` empty for plaintext callbacks, or set it to match `MIMI_SECRET_FEISHU_ENCRYPT_KEY`
 - keep `MIMI_SECRET_FEISHU_OPEN_API_BASE` on the official host unless you are using the local OpenAPI stub for validation
 
 This firmware now supports **encrypted Feishu event payloads**:
 
+- this applies only to `webhook`
 - if `Encrypt Key` is empty, callbacks are handled as plaintext events
 - if `Encrypt Key` is configured, the firmware validates `X-Lark-Signature` and decrypts the `encrypt` field
 - keeping `Verify Token` enabled is still recommended for an extra source check on URL verification and normal events
 
 Recommended minimum setup:
 
-1. Start with `App ID`, `App Secret`, and `Verify Token`
-2. Leave `Encrypt Key` empty
-3. Get plaintext text callbacks working first
-4. Enable encrypted callbacks only after the text path is stable
+1. Start with `App ID` and `App Secret`
+2. Set `Receive Mode` to `websocket`
+3. Only switch to `webhook` if you explicitly need callback mode
+4. Enable `Encrypt Key` only after webhook text ingress is stable
 
-3. Make the device reachable from Feishu:
+3. Choose the ingress mode you want:
 
-- callback path is fixed at `/feishu/events`
-- the shared HTTP service listens on port `18789`
-- if your board is not public, add reverse proxy / port forwarding / tunnel to `http://<device-lan-ip>:18789/feishu/events`
+- `websocket`:
+  - the device opens a long connection to Feishu itself
+  - no public callback is required
+  - the truly required fields are just `App ID` and `App Secret`
+- `webhook`:
+  - callback path is fixed at `/feishu/events`
+  - the shared HTTP service listens on port `18789`
+  - if your board is not public, add reverse proxy / port forwarding / tunnel to `http://<device-lan-ip>:18789/feishu/events`
 
 4. Smoke test after flashing:
 
-- check serial logs for `Feishu callback registered at /feishu/events`
-- if `Encrypt Key` is enabled, confirm both URL verification and event delivery succeed in the Feishu console
+- watch serial logs
+- in `websocket` mode, look for `Feishu WebSocket long connection enabled` and `Feishu WS connected`
+- in `webhook` mode, look for `Feishu callback registered at /feishu/events`
+- if `Encrypt Key` is enabled in webhook mode, confirm both URL verification and event delivery succeed in the Feishu console
 - send `hello` to the bot in Feishu
 - expect a text reply from MimiClaw
 
@@ -410,6 +427,7 @@ Connect via serial to configure or debug. **Config commands** let you change set
 mimi> wifi_set MySSID MyPassword   # change WiFi network
 mimi> set_tg_token 123456:ABC...   # change Telegram bot token
 mimi> set_feishu_app cli_xxx secret_xxx   # set Feishu app_id / app_secret
+mimi> set_feishu_receive_mode websocket   # switch to board-side long connection
 mimi> set_feishu_verify_token token_xxx   # set Feishu Verify Token
 mimi> set_feishu_encrypt_key key_xxx      # set Feishu Encrypt Key
 mimi> set_feishu_open_api_base http://127.0.0.1:19091  # override Feishu OpenAPI base (useful for local validation)
@@ -425,7 +443,7 @@ mimi> config_reset                 # clear NVS, revert to build-time defaults
 
 Note:
 
-- Feishu `app_id/app_secret/verify_token/encrypt_key/open_api_base` can now be updated via CLI
+- Feishu `app_id/app_secret/receive_mode/verify_token/encrypt_key/open_api_base` can now be updated via CLI
 - NVS-stored Feishu config overrides build-time defaults
 
 **Debug & maintenance:**
@@ -478,9 +496,10 @@ MimiClaw supports tool calling for both Anthropic and OpenAI — the LLM can cal
 |------|-------------|
 | `web_search` | Search the web via Brave Search API for current information |
 | `get_current_time` | Fetch current date/time via HTTP and set the system clock |
+| `get_device_info` | Read real runtime hardware information, including chip / CPU / flash / PSRAM / GPIO |
 | `read_file` | Read a SPIFFS file (path must start with `/spiffs/`) |
-| `write_file` | Write or overwrite a SPIFFS file (default allowlist: `/spiffs/memory/`) |
-| `edit_file` | Find-and-replace in a SPIFFS file (default allowlist: `/spiffs/memory/`) |
+| `write_file` | Write or overwrite a SPIFFS file (default allowlist: `/spiffs/memory/`, `/spiffs/skills/`) |
+| `edit_file` | Find-and-replace in a SPIFFS file (default allowlist: `/spiffs/memory/`, `/spiffs/skills/`) |
 | `list_dir` | List SPIFFS files, optionally filtered by prefix |
 | `memory_write_long_term` | Overwrite long-term memory (`/spiffs/memory/MEMORY.md`) |
 | `memory_append_today` | Append one note to today's daily memory |
@@ -505,7 +524,7 @@ This turns MimiClaw into a proactive assistant — write tasks to `HEARTBEAT.md`
 ## Also Included
 
 - **WebSocket gateway** on port 18789 — connect from your LAN with any WebSocket client
-- **Feishu Bot** — callback endpoint at `/feishu/events`, with text passthrough and summary fallback by default; optional real gateway parsing for `image/file`
+- **Feishu Bot** — supports both board-side WebSocket long connection and `/feishu/events` webhook ingress; text passthrough and summary fallback by default, with optional real gateway parsing for `image/file`
 - **OTA updates** — flash new firmware over WiFi, no USB needed
 - **Dual-core** — network I/O and AI processing run on separate CPU cores
 - **HTTP proxy** — CONNECT tunnel support for restricted networks

@@ -92,6 +92,11 @@ static struct {
     struct arg_end *end;
 } feishu_openapi_args;
 
+static struct {
+    struct arg_str *mode;
+    struct arg_end *end;
+} feishu_mode_args;
+
 static int cmd_set_tg_token(int argc, char **argv)
 {
     int nerrors = arg_parse(argc, argv, (void **)&tg_token_args);
@@ -222,6 +227,36 @@ static int cmd_clear_feishu_open_api_base(int argc, char **argv)
     }
 
     printf("Feishu OpenAPI base cleared.\n");
+    return 0;
+}
+
+static int cmd_set_feishu_receive_mode(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&feishu_mode_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, feishu_mode_args.end, argv[0]);
+        return 1;
+    }
+
+    esp_err_t err = feishu_set_receive_mode(feishu_mode_args.mode->sval[0]);
+    if (err != ESP_OK) {
+        printf("Failed to save Feishu receive mode: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("Feishu receive mode saved. If services are already running, reboot to fully apply.\n");
+    return 0;
+}
+
+static int cmd_clear_feishu_receive_mode(int argc, char **argv)
+{
+    esp_err_t err = feishu_clear_receive_mode();
+    if (err != ESP_OK) {
+        printf("Failed to clear Feishu receive mode: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("Feishu receive mode cleared. Reboot if you need to switch active ingress mode.\n");
     return 0;
 }
 
@@ -1056,6 +1091,7 @@ static int cmd_config_show(int argc, char **argv)
     print_config("Feishu Vfy", MIMI_NVS_FEISHU, MIMI_NVS_KEY_FEISHU_VERIFY, MIMI_SECRET_FEISHU_VERIFY_TOKEN, true);
     print_config("Feishu Enc", MIMI_NVS_FEISHU, MIMI_NVS_KEY_FEISHU_ENCRYPT, MIMI_SECRET_FEISHU_ENCRYPT_KEY, true);
     print_config("Feishu API", MIMI_NVS_FEISHU, MIMI_NVS_KEY_FEISHU_OPENAPI, MIMI_SECRET_FEISHU_OPEN_API_BASE, false);
+    print_config("Feishu Rx",  MIMI_NVS_FEISHU, MIMI_NVS_KEY_FEISHU_MODE, MIMI_SECRET_FEISHU_RECEIVE_MODE, false);
     print_config("API Key",    MIMI_NVS_LLM,    MIMI_NVS_KEY_API_KEY,  MIMI_SECRET_API_KEY,    true);
     print_config("Model",      MIMI_NVS_LLM,    MIMI_NVS_KEY_MODEL,    MIMI_SECRET_MODEL,      false);
     print_config("Provider",   MIMI_NVS_LLM,    MIMI_NVS_KEY_PROVIDER, MIMI_SECRET_MODEL_PROVIDER, false);
@@ -1579,6 +1615,25 @@ esp_err_t serial_cli_init(void)
         .func = &cmd_clear_feishu_open_api_base,
     };
     esp_console_cmd_register(&clear_feishu_openapi_cmd);
+
+    /* set_feishu_receive_mode */
+    feishu_mode_args.mode = arg_str1(NULL, NULL, "<webhook|websocket>", "Feishu receive mode");
+    feishu_mode_args.end = arg_end(1);
+    esp_console_cmd_t feishu_mode_cmd = {
+        .command = "set_feishu_receive_mode",
+        .help = "Set Feishu receive mode: webhook or websocket",
+        .func = &cmd_set_feishu_receive_mode,
+        .argtable = &feishu_mode_args,
+    };
+    esp_console_cmd_register(&feishu_mode_cmd);
+
+    /* clear_feishu_receive_mode */
+    esp_console_cmd_t clear_feishu_mode_cmd = {
+        .command = "clear_feishu_receive_mode",
+        .help = "Clear Feishu receive mode and use build-time default",
+        .func = &cmd_clear_feishu_receive_mode,
+    };
+    esp_console_cmd_register(&clear_feishu_mode_cmd);
 
     /* set_api_key */
     api_key_args.key = arg_str1(NULL, NULL, "<key>", "LLM API key");

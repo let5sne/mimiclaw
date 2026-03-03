@@ -202,12 +202,13 @@ mimi> clear_proxy                    # 清除代理
 
 #### 1. 填写飞书配置
 
-正常接入飞书 Bot 时，你真正需要关心的是这 5 项：
+正常接入飞书 Bot 时，你真正需要关心的是这 6 项：
 
 - **必填**：`App ID`
 - **必填**：`App Secret`
-- **强烈建议填写**：`Verify Token`
-- **可选**：`Encrypt Key`
+- **推荐**：`Receive Mode`
+- **webhook 模式强烈建议填写**：`Verify Token`
+- **webhook 模式可选**：`Encrypt Key`
 - **通常不用改**：`Open API Base`
 
 在 `main/mimi_secrets.h` 中填写：
@@ -215,33 +216,42 @@ mimi> clear_proxy                    # 清除代理
 ```c
 #define MIMI_SECRET_FEISHU_APP_ID        "cli_xxx"              // 必填：飞书应用 App ID
 #define MIMI_SECRET_FEISHU_APP_SECRET    "xxx"                  // 必填：飞书应用 App Secret
-#define MIMI_SECRET_FEISHU_VERIFY_TOKEN  "mimiclaw-feishu"      // 建议填写：事件订阅 Verify Token
-#define MIMI_SECRET_FEISHU_ENCRYPT_KEY   ""                     // 可选：启用加密回调时填写
+#define MIMI_SECRET_FEISHU_RECEIVE_MODE  "websocket"            // 推荐：板载长连接；可改为 webhook
+#define MIMI_SECRET_FEISHU_VERIFY_TOKEN  "mimiclaw-feishu"      // webhook 模式建议填写
+#define MIMI_SECRET_FEISHU_ENCRYPT_KEY   ""                     // 仅 webhook 加密回调时填写
 #define MIMI_SECRET_FEISHU_OPEN_API_BASE "https://open.feishu.cn" // 一般不要改；仅本地 stub 联调时覆盖
 ```
 
 说明：
 
 - `App ID` 和 `App Secret` 是飞书 Bot 正常收发消息的**必填项**
-- `Verify Token` 不是飞书开放平台强制项，但这个项目里**建议一定填写**，这样 URL 校验和普通事件都能做来源校验
-- `Encrypt Key` 可以先留空；如果你暂时只想先跑通文本回调，建议先不要开加密
+- `MIMI_SECRET_FEISHU_RECEIVE_MODE` 支持 `websocket` 和 `webhook`
+- 推荐优先使用 `websocket`：设备主动连飞书，**不需要公网回调地址**
+- 只有 `webhook` 模式才需要 `Verify Token`、`Encrypt Key`、`/feishu/events` 和公网回调
+- `Verify Token` 不是飞书开放平台强制项，但 webhook 模式下这个项目**建议一定填写**
+- `Encrypt Key` 可以先留空；如果你暂时只想先跑通 webhook 文本回调，建议先不要开加密
 - 飞书配置既可写在编译时默认值里，也可通过 CLI 在运行时覆盖
 - 如果你在飞书开放平台配置了 `Verify Token` / `Encrypt Key`，这里必须保持一致
 - `MIMI_SECRET_FEISHU_OPEN_API_BASE` 默认保持官方地址；只有本地 stub 联调时才需要覆盖
 
 #### 2. 在飞书开放平台配置应用
 
-你在飞书后台至少要填这些内容：
+你在飞书后台至少要做这些配置：
 
 - 创建**自建应用**
 - 开启**机器人能力**
 - 订阅事件 `im.message.receive_v1`
-- 请求地址填 `https://<你的公网地址>/feishu/events`
-- `Verify Token` 填成和 `MIMI_SECRET_FEISHU_VERIFY_TOKEN` 一样
-- `Encrypt Key` 可留空；如果启用，就填成和 `MIMI_SECRET_FEISHU_ENCRYPT_KEY` 一样
+- 如果接收模式是 `websocket`：
+  - 不需要配置 `Request URL`
+  - 不需要公网地址
+- 如果接收模式是 `webhook`：
+  - 请求地址填 `https://<你的公网地址>/feishu/events`
+  - `Verify Token` 填成和 `MIMI_SECRET_FEISHU_VERIFY_TOKEN` 一样
+  - `Encrypt Key` 可留空；如果启用，就填成和 `MIMI_SECRET_FEISHU_ENCRYPT_KEY` 一样
 
 当前固件已经支持**飞书加密事件体**：
 
+- 这部分只针对 `webhook`
 - 未配置 `Encrypt Key` 时，按明文事件体处理
 - 配置了 `Encrypt Key` 时，会校验 `X-Lark-Signature`，再解密 `encrypt` 字段
 - 仍建议保留 `Verify Token`，这样 URL 校验和普通事件都能多一道来源校验
@@ -249,23 +259,31 @@ mimi> clear_proxy                    # 清除代理
 最小可用配置建议：
 
 1. 先只填 `App ID`、`App Secret`、`Verify Token`
-2. `Encrypt Key` 先留空
-3. 先把文本消息跑通
-4. 确认文本回调稳定后，再决定要不要开启加密回调
+2. `Receive Mode` 先用 `websocket`
+3. 如果你必须走回调，再切 `webhook`
+4. `Encrypt Key` 只在 webhook 稳定后再开启
 
-#### 3. 保证设备可被飞书回调
+#### 3. 接入模式差异
 
-- 回调路径固定为 `/feishu/events`
-- HTTP 服务默认监听端口 `18789`
-- 如果设备不在公网，需要自己做反向代理、端口映射或内网穿透，把外部请求转到 `http://<设备局域网IP>:18789/feishu/events`
+- `websocket`：
+  - 设备主动建立飞书长连接
+  - 不需要公网回调
+  - 真实必填只有 `App ID` / `App Secret`
+- `webhook`：
+  - 回调路径固定为 `/feishu/events`
+  - HTTP 服务默认监听端口 `18789`
+  - 如果设备不在公网，需要自己做反向代理、端口映射或内网穿透，把外部请求转到 `http://<设备局域网IP>:18789/feishu/events`
 
 #### 4. 烧录后的联调步骤
 
-- 打开串口监控，确认日志里出现 `Feishu callback registered at /feishu/events`
-- 如果启用了 `Encrypt Key`，额外确认 URL 校验和事件推送都返回成功
+- 打开串口监控
+- 如果是 `websocket` 模式，确认日志里出现 `Feishu WebSocket long connection enabled` 以及 `Feishu WS connected`
+- 如果是 `webhook` 模式，确认日志里出现 `Feishu callback registered at /feishu/events`
+- 如果 webhook 启用了 `Encrypt Key`，额外确认 URL 校验和事件推送都返回成功
 - 在飞书里给机器人发送 `hello`
 - 预期现象：
-  - 飞书开放平台事件订阅页显示回调成功
+  - websocket 模式下，设备日志出现 `Feishu WS connected`
+  - webhook 模式下，飞书开放平台事件订阅页显示回调成功
   - 设备日志出现 `Feishu text from ...`
   - Bot 返回一条文本回复
 
@@ -434,6 +452,7 @@ python3 tools/doc_regression.py \
 mimi> wifi_set MySSID MyPassword   # 换 WiFi
 mimi> set_tg_token 123456:ABC...   # 换 Telegram Bot Token
 mimi> set_feishu_app cli_xxx secret_xxx   # 设置飞书 app_id / app_secret
+mimi> set_feishu_receive_mode websocket   # 切到板载长连接（推荐）
 mimi> set_feishu_verify_token token_xxx   # 设置飞书 Verify Token
 mimi> set_feishu_encrypt_key key_xxx      # 设置飞书 Encrypt Key
 mimi> set_feishu_open_api_base http://127.0.0.1:19091  # 覆盖飞书 OpenAPI 基地址（联调用）
@@ -449,8 +468,7 @@ mimi> config_reset                 # 清除 NVS，恢复编译时默认值
 
 说明：
 
-- 现在支持通过 CLI 更新飞书 `app_id/app_secret/verify_token/encrypt_key`
-- 现在支持通过 CLI 更新飞书 `app_id/app_secret/verify_token/encrypt_key/open_api_base`
+- 现在支持通过 CLI 更新飞书 `app_id/app_secret/receive_mode/verify_token/encrypt_key/open_api_base`
 - 已保存到 NVS 的飞书配置会覆盖编译时默认值
 
 **调试与运维：**
@@ -503,9 +521,10 @@ MimiClaw 同时支持 Anthropic 和 OpenAI 的工具调用 — LLM 在对话中�
 |------|------|
 | `web_search` | 通过 Brave Search API 搜索网页，获取实时信息 |
 | `get_current_time` | 通过 HTTP 获取当前日期和时间，并设置系统时钟 |
+| `get_device_info` | 读取设备真实运行时硬件信息，包括芯片 / CPU / Flash / PSRAM / GPIO |
 | `read_file` | 读取 SPIFFS 文件（路径需以 `/spiffs/` 开头） |
-| `write_file` | 写入或覆盖 SPIFFS 文件（默认白名单：`/spiffs/memory/`） |
-| `edit_file` | 对 SPIFFS 文件执行查找替换（默认白名单：`/spiffs/memory/`） |
+| `write_file` | 写入或覆盖 SPIFFS 文件（默认白名单：`/spiffs/memory/`、`/spiffs/skills/`） |
+| `edit_file` | 对 SPIFFS 文件执行查找替换（默认白名单：`/spiffs/memory/`、`/spiffs/skills/`） |
 | `list_dir` | 列出 SPIFFS 文件，可按前缀过滤 |
 | `memory_write_long_term` | 覆盖长期记忆（`/spiffs/memory/MEMORY.md`） |
 | `memory_append_today` | 追加一条今天的 daily 记忆 |
@@ -530,7 +549,7 @@ MimiClaw 内置 cron 调度器，让 AI 可以自主安排任务。LLM 可以通
 ## 其他功能
 
 - **WebSocket 网关** — 端口 18789，局域网内用任意 WebSocket 客户端连接
-- **飞书 Bot** — 回调入口 `/feishu/events`，默认文本直通、媒体摘要；可选为 `image/file` 开启真实 gateway 解析
+- **飞书 Bot** — 同时支持板载 WebSocket 长连接和 `/feishu/events` webhook 回调；默认文本直通、媒体摘要，可选为 `image/file` 开启真实 gateway 解析
 - **OTA 更新** — WiFi 远程刷固件，无需 USB
 - **双核** — 网络 I/O 和 AI 处理分别跑在不同 CPU 核心
 - **HTTP 代理** — CONNECT 隧道，适配受限网络
