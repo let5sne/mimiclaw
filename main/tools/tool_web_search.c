@@ -63,7 +63,7 @@ esp_err_t tool_web_search_init(void)
     if (s_search_key[0]) {
         ESP_LOGI(TAG, "Web search initialized (key configured)");
     } else {
-        ESP_LOGW(TAG, "No search API key. Use CLI: set_search_key <KEY>");
+        ESP_LOGI(TAG, "No search API key configured. Use CLI: set_search_key <KEY>");
     }
     return ESP_OK;
 }

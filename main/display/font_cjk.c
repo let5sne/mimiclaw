@@ -62,7 +62,7 @@ esp_err_t font_cjk_init(const char *path)
 
     FILE *fp = fopen(path, "rb");
     if (!fp) {
-        ESP_LOGW(TAG, "Font file not found: %s (CJK disabled)", path);
+        ESP_LOGI(TAG, "Font file not found: %s (CJK disabled)", path);
         return ESP_ERR_NOT_FOUND;
     }
 

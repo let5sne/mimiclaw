@@ -319,6 +319,10 @@ esp_err_t audio_start_listening(void)
     return ESP_ERR_NOT_SUPPORTED;
 #else
     esp_err_t ret = audio_wakenet_init();
+    if (ret == ESP_ERR_NOT_FOUND) {
+        ESP_LOGI(TAG, "WakeNet model unavailable, skip wake-word listening");
+        return ESP_ERR_NOT_SUPPORTED;
+    }
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "WakeNet init failed");
         return ret;
@@ -627,10 +631,10 @@ static esp_err_t audio_wakenet_init(void)
     }
 
     s_sr_models = esp_srmodel_init("model");
-    if (!s_sr_models || s_sr_models->num <= 0) {
-        ESP_LOGE(TAG, "No WakeNet model found in \"model\" partition");
+    if (!s_sr_models) {
+        ESP_LOGI(TAG, "No WakeNet model found in \"model\" partition");
         audio_wakenet_deinit();
-        return ESP_FAIL;
+        return ESP_ERR_NOT_FOUND;
     }
 
     char keyword_buf[64] = {0};

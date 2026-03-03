@@ -15,12 +15,17 @@ static const char *TAG = "tool_files";
 #define MAX_FILE_SIZE (32 * 1024)
 
 /**
- * Validate that a path starts with /spiffs/ and contains no ".." traversal.
+ * Validate that a path starts with MIMI_SPIFFS_BASE and contains no ".." traversal.
  */
 static bool validate_path(const char *path)
 {
     if (!path) return false;
-    if (strncmp(path, "/spiffs/", 8) != 0) return false;
+    size_t base_len = strlen(MIMI_SPIFFS_BASE);
+    if (strncmp(path, MIMI_SPIFFS_BASE, base_len) != 0) return false;
+    /* Require a path separator after the base (unless base ends with '/') */
+    if (base_len > 0 && MIMI_SPIFFS_BASE[base_len - 1] != '/') {
+        if (path[base_len] != '/') return false;
+    }
     if (strstr(path, "..") != NULL) return false;
     return true;
 }
@@ -97,7 +102,7 @@ esp_err_t tool_read_file_execute(const char *input_json, char *output, size_t ou
 
     const char *path = cJSON_GetStringValue(cJSON_GetObjectItem(root, "path"));
     if (!validate_path(path)) {
-        snprintf(output, output_size, "Error: path must start with /spiffs/ and must not contain '..'");
+        snprintf(output, output_size, "Error: path must start with %s/ and must not contain '..'", MIMI_SPIFFS_BASE);
         cJSON_Delete(root);
         return ESP_ERR_INVALID_ARG;
     }
@@ -135,7 +140,7 @@ esp_err_t tool_write_file_execute(const char *input_json, char *output, size_t o
     const char *content = cJSON_GetStringValue(cJSON_GetObjectItem(root, "content"));
 
     if (!validate_path(path)) {
-        snprintf(output, output_size, "Error: path must start with /spiffs/ and must not contain '..'");
+        snprintf(output, output_size, "Error: path must start with %s/ and must not contain '..'", MIMI_SPIFFS_BASE);
         cJSON_Delete(root);
         return ESP_ERR_INVALID_ARG;
     }
@@ -188,7 +193,7 @@ esp_err_t tool_edit_file_execute(const char *input_json, char *output, size_t ou
     const char *new_str = cJSON_GetStringValue(cJSON_GetObjectItem(root, "new_string"));
 
     if (!validate_path(path)) {
-        snprintf(output, output_size, "Error: path must start with /spiffs/ and must not contain '..'");
+        snprintf(output, output_size, "Error: path must start with %s/ and must not contain '..'", MIMI_SPIFFS_BASE);
         cJSON_Delete(root);
         return ESP_ERR_INVALID_ARG;
     }
@@ -296,7 +301,7 @@ esp_err_t tool_list_dir_execute(const char *input_json, char *output, size_t out
 
     DIR *dir = opendir(MIMI_SPIFFS_BASE);
     if (!dir) {
-        snprintf(output, output_size, "Error: cannot open /spiffs directory");
+        snprintf(output, output_size, "Error: cannot open %s directory", MIMI_SPIFFS_BASE);
         cJSON_Delete(root);
         return ESP_FAIL;
     }

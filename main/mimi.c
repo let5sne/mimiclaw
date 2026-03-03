@@ -1,5 +1,7 @@
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
+#include <time.h>
 #include <inttypes.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -9,6 +11,7 @@
 #include "esp_heap_caps.h"
 #include "esp_spiffs.h"
 #include "nvs_flash.h"
+#include "nvs.h"
 
 #include "mimi_config.h"
 #include "bus/message_bus.h"
@@ -32,6 +35,9 @@
 #include "audio/audio.h"
 #include "status/status_led.h"
 #include "voice/voice_channel.h"
+#include "buttons/button_driver.h"
+#include "imu/imu_manager.h"
+#include "skills/skill_loader.h"
 
 static const char *TAG = "mimi";
 
@@ -405,6 +411,7 @@ void app_main(void)
 {
     /* Silence noisy components */
     esp_log_level_set("esp-x509-crt-bundle", ESP_LOG_WARN);
+    esp_log_level_set("i2c", ESP_LOG_ERROR);
     esp_log_level_set("QRCODE", ESP_LOG_WARN);
 
     ESP_LOGI(TAG, "========================================");
@@ -419,6 +426,22 @@ void app_main(void)
 
     /* Phase 1: Core infrastructure */
     ESP_ERROR_CHECK(init_nvs());
+
+    /* Load timezone from NVS (falls back to MIMI_TIMEZONE default) */
+    {
+        nvs_handle_t nvs;
+        char tz_buf[64] = MIMI_TIMEZONE;
+        if (nvs_open(MIMI_NVS_NAMESPACE, NVS_READONLY, &nvs) == ESP_OK) {
+            size_t tz_len = sizeof(tz_buf);
+            if (nvs_get_str(nvs, MIMI_NVS_KEY_TIMEZONE, tz_buf, &tz_len) != ESP_OK) {
+                strncpy(tz_buf, MIMI_TIMEZONE, sizeof(tz_buf) - 1);
+            }
+            nvs_close(nvs);
+        }
+        setenv("TZ", tz_buf, 1);
+        tzset();
+        ESP_LOGI(TAG, "Timezone: %s", tz_buf);
+    }
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     ESP_ERROR_CHECK(init_spiffs());
     {
@@ -462,7 +485,9 @@ void app_main(void)
         } else if (audio_is_wake_word_enabled()) {
             /* Start listening for wake word */
             audio_ret = audio_start_listening();
-            if (audio_ret != ESP_OK) {
+            if (audio_ret == ESP_ERR_NOT_SUPPORTED) {
+                ESP_LOGI(TAG, "Wake word listening disabled: WakeNet model unavailable");
+            } else if (audio_ret != ESP_OK) {
                 ESP_LOGW(TAG, "Audio start listening failed: %s", esp_err_to_name(audio_ret));
             }
         }
@@ -539,10 +564,11 @@ void app_main(void)
 #endif
 
             /* Outbound dispatch task */
-            xTaskCreatePinnedToCore(
+            ESP_ERROR_CHECK((xTaskCreatePinnedToCore(
                 outbound_dispatch_task, "outbound",
                 MIMI_OUTBOUND_STACK, NULL,
-                MIMI_OUTBOUND_PRIO, NULL, MIMI_OUTBOUND_CORE);
+                MIMI_OUTBOUND_PRIO, NULL, MIMI_OUTBOUND_CORE) == pdPASS)
+                ? ESP_OK : ESP_FAIL);
 
             display_set_status("MimiClaw Ready");
             display_set_display_status(DISPLAY_STATUS_IDLE);
@@ -576,7 +602,7 @@ void app_main(void)
             display_set_display_status(DISPLAY_STATUS_ERROR);
         }
     } else {
-        ESP_LOGW(TAG, "No WiFi credentials. Set MIMI_SECRET_WIFI_SSID in mimi_secrets.h");
+        ESP_LOGI(TAG, "No WiFi credentials configured. Set MIMI_SECRET_WIFI_SSID in mimi_secrets.h");
         display_set_status("No WiFi Config");
         display_set_display_status(DISPLAY_STATUS_ERROR);
     }

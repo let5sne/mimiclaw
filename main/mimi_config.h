@@ -52,6 +52,9 @@
 #ifndef MIMI_SECRET_PROXY_PORT
 #define MIMI_SECRET_PROXY_PORT      ""
 #endif
+#ifndef MIMI_SECRET_PROXY_TYPE
+#define MIMI_SECRET_PROXY_TYPE      ""
+#endif
 #ifndef MIMI_SECRET_SEARCH_KEY
 #define MIMI_SECRET_SEARCH_KEY      ""
 #endif
@@ -118,6 +121,7 @@
 #define MIMI_AGENT_MAX_HISTORY       20
 #define MIMI_AGENT_MAX_TOOL_ITER     10
 #define MIMI_MAX_TOOL_CALLS          4
+#define MIMI_TOOL_REGISTRY_MAX       16
 #define MIMI_AGENT_TURN_TIMEOUT_MS   45000
 #define MIMI_AGENT_MAX_CONTEXT_BYTES (24 * 1024)
 #define MIMI_AGENT_TOOL_RESULT_MAX_BYTES   2048
@@ -134,11 +138,19 @@
 #define MIMI_CONTROL_TEMP_RULE_COOLDOWN_MS 10000
 #define MIMI_AGENT_SEND_WORKING_STATUS 1
 
-/* Timezone (POSIX TZ format) */
-#define MIMI_TIMEZONE                "PST8PDT,M3.2.0,M11.1.0"
+/* Timezone (POSIX TZ format).
+ * Default is UTC so daily memory filenames are consistent for all users.
+ * Override at runtime with the `set_timezone` CLI command, e.g.:
+ *   set_timezone CST-8          (China Standard Time)
+ *   set_timezone EST5EDT,...    (US Eastern with DST)
+ * The value is persisted in NVS and applied on every boot.
+ */
+#define MIMI_TIMEZONE                "UTC0"
+#define MIMI_NVS_NAMESPACE           "mimi_cfg"
+#define MIMI_NVS_KEY_TIMEZONE        "timezone"
 
 /* LLM */
-#define MIMI_LLM_DEFAULT_MODEL       "claude-opus-4-5"
+#define MIMI_LLM_DEFAULT_MODEL       "claude-3-5-haiku-20241022"
 #define MIMI_LLM_PROVIDER_DEFAULT    "anthropic"
 #define MIMI_LLM_MAX_TOKENS          4096
 #define MIMI_LLM_API_URL             "https://api.anthropic.com/v1/messages"
@@ -165,16 +177,16 @@
 
 /* Memory / SPIFFS */
 #define MIMI_SPIFFS_BASE             "/spiffs"
-#define MIMI_SPIFFS_CONFIG_DIR       "/spiffs/config"
-#define MIMI_SPIFFS_MEMORY_DIR       "/spiffs/memory"
-#define MIMI_SPIFFS_SESSION_DIR      "/spiffs/sessions"
-#define MIMI_MEMORY_FILE             "/spiffs/memory/MEMORY.md"
-#define MIMI_SOUL_FILE               "/spiffs/config/SOUL.md"
-#define MIMI_USER_FILE               "/spiffs/config/USER.md"
-#define MIMI_AGENTS_FILE             "/spiffs/config/AGENTS.md"
-#define MIMI_TOOLS_FILE              "/spiffs/config/TOOLS.md"
-#define MIMI_SKILLS_FILE             "/spiffs/config/SKILLS.md"
-#define MIMI_IDENTITY_FILE           "/spiffs/config/IDENTITY.md"
+#define MIMI_SPIFFS_CONFIG_DIR       MIMI_SPIFFS_BASE "/config"
+#define MIMI_SPIFFS_MEMORY_DIR       MIMI_SPIFFS_BASE "/memory"
+#define MIMI_SPIFFS_SESSION_DIR      MIMI_SPIFFS_BASE "/sessions"
+#define MIMI_MEMORY_FILE             MIMI_SPIFFS_MEMORY_DIR "/MEMORY.md"
+#define MIMI_SOUL_FILE               MIMI_SPIFFS_CONFIG_DIR "/SOUL.md"
+#define MIMI_USER_FILE               MIMI_SPIFFS_CONFIG_DIR "/USER.md"
+#define MIMI_AGENTS_FILE             MIMI_SPIFFS_CONFIG_DIR "/AGENTS.md"
+#define MIMI_TOOLS_FILE              MIMI_SPIFFS_CONFIG_DIR "/TOOLS.md"
+#define MIMI_SKILLS_FILE             MIMI_SPIFFS_CONFIG_DIR "/SKILLS.md"
+#define MIMI_IDENTITY_FILE           MIMI_SPIFFS_CONFIG_DIR "/IDENTITY.md"
 #ifndef MIMI_FILE_WRITE_ALLOW_CONFIG_DIR
 #define MIMI_FILE_WRITE_ALLOW_CONFIG_DIR 0
 #endif
@@ -189,12 +201,15 @@
 #define MIMI_MEMORY_RECENT_DAYS      5
 
 /* Cron / Heartbeat */
+#define MIMI_CRON_FILE               MIMI_SPIFFS_CONFIG_DIR "/cron.json"
 #define MIMI_CRON_MAX_JOBS           16
 #define MIMI_CRON_CHECK_INTERVAL_MS  (60 * 1000)
+#define MIMI_HEARTBEAT_FILE          MIMI_SPIFFS_CONFIG_DIR "/HEARTBEAT.md"
 #define MIMI_HEARTBEAT_INTERVAL_MS   (30 * 60 * 1000)
+#define MIMI_CRON_TEMPLATE_FILE      MIMI_SPIFFS_CONFIG_DIR "/CRON.md"
 
 /* Skills */
-#define MIMI_SKILLS_PREFIX           "/spiffs/skills/"
+#define MIMI_SKILLS_PREFIX           MIMI_SPIFFS_BASE "/skills/"
 
 /* WebSocket Gateway */
 #define MIMI_WS_PORT                 18789
@@ -205,7 +220,6 @@
 #define MIMI_HEARTBEAT_ENABLED       1
 #endif
 #define MIMI_HEARTBEAT_INTERVAL_S    1800
-#define MIMI_HEARTBEAT_FILE          "/spiffs/config/HEARTBEAT.md"
 #define MIMI_HEARTBEAT_MAX_BYTES     1024
 #define MIMI_HEARTBEAT_STACK         3072
 #define MIMI_HEARTBEAT_PRIO          2
@@ -214,7 +228,6 @@
 #ifndef MIMI_CRON_ENABLED
 #define MIMI_CRON_ENABLED            1
 #endif
-#define MIMI_CRON_FILE               "/spiffs/config/CRON.md"
 #define MIMI_CRON_FILE_MAX_BYTES     1024
 #define MIMI_CRON_TASK_MAX_BYTES     768
 #define MIMI_CRON_DEFAULT_INTERVAL_MIN 0

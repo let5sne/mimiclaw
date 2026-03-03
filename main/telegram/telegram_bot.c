@@ -583,6 +583,10 @@ static char *tg_api_call(const char *method, const char *post_data)
 static int tg_response_is_ok(const char *resp, int *out_error_code,
                              char *out_desc, size_t out_desc_size)
 {
+    if (out_desc && out_desc_size > 0) {
+        out_desc[0] = '\0';
+    }
+
     if (!resp) return 0;
     cJSON *root = cJSON_Parse(resp);
     if (!root) {
@@ -602,8 +606,6 @@ static int tg_response_is_ok(const char *resp, int *out_error_code,
             cJSON *desc = cJSON_GetObjectItem(root, "description");
             tg_safe_copy(out_desc, out_desc_size,
                          cJSON_IsString(desc) ? desc->valuestring : "telegram api error");
-        } else {
-            out_desc[0] = '\0';
         }
     }
     cJSON_Delete(root);
@@ -1936,6 +1938,7 @@ esp_err_t telegram_bot_start(void)
 
     return (ret == pdPASS) ? ESP_OK : ESP_FAIL;
 }
+
 
 esp_err_t telegram_send_message(const char *chat_id, const char *text)
 {

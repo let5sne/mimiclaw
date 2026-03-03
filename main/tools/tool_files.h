@@ -5,7 +5,7 @@
 
 /**
  * Read a file from SPIFFS.
- * Input JSON: {"path": "/spiffs/..."}
+ * Input JSON: {"path": "<MIMI_SPIFFS_BASE>/..."}
  */
 esp_err_t tool_read_file_execute(const char *input_json, char *output, size_t output_size);
 
@@ -25,6 +25,6 @@ esp_err_t tool_edit_file_execute(const char *input_json, char *output, size_t ou
 
 /**
  * List files on SPIFFS, optionally filtered by path prefix.
- * Input JSON: {"prefix": "/spiffs/..."} (prefix is optional)
+ * Input JSON: {"prefix": "<MIMI_SPIFFS_BASE>/..."} (prefix is optional)
  */
 esp_err_t tool_list_dir_execute(const char *input_json, char *output, size_t output_size);

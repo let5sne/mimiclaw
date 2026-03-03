@@ -41,7 +41,7 @@ static const char *TAG = "skills";
     "\n" \
     "## How to use\n" \
     "1. Use get_current_time for today's date\n" \
-    "2. Read /spiffs/memory/MEMORY.md for user preferences and context\n" \
+    "2. Read " MIMI_SPIFFS_MEMORY_DIR "/MEMORY.md for user preferences and context\n" \
     "3. Read today's daily note if it exists\n" \
     "4. Use web_search for relevant news based on user interests\n" \
     "5. Compile a concise briefing covering:\n" \
@@ -70,7 +70,7 @@ static const char *TAG = "skills";
     "   - `## When to use` — trigger conditions\n" \
     "   - `## How to use` — step-by-step instructions\n" \
     "   - `## Example` — concrete example (optional but helpful)\n" \
-    "3. Save to `/spiffs/skills/<name>.md` using write_file\n" \
+    "3. Save to `" MIMI_SKILLS_PREFIX "<name>.md` using write_file\n" \
     "4. The skill will be automatically available after the next conversation\n" \
     "\n" \
     "## Best practices\n" \
@@ -81,7 +81,7 @@ static const char *TAG = "skills";
     "\n" \
     "## Example\n" \
     "To create a \"translate\" skill:\n" \
-    "write_file path=\"/spiffs/skills/translate.md\" content=\"# Translate\\n\\nTranslate text between languages.\\n\\n" \
+    "write_file path=\"" MIMI_SKILLS_PREFIX "translate.md\" content=\"# Translate\\n\\nTranslate text between languages.\\n\\n" \
     "## When to use\\nWhen the user asks to translate text.\\n\\n" \
     "## How to use\\n1. Identify source and target languages\\n" \
     "2. Translate directly using your language knowledge\\n" \

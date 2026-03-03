@@ -5,6 +5,7 @@
 #include "feishu/feishu_bot.h"
 #include "llm/llm_proxy.h"
 #include "agent/agent_loop.h"
+#include "bus/message_bus.h"
 #include "memory/memory_store.h"
 #include "memory/session_mgr.h"
 #include "proxy/http_proxy.h"
@@ -27,6 +28,7 @@
 #include <math.h>
 #include <ctype.h>
 #include <dirent.h>
+#include <time.h>
 #include "esp_log.h"
 #include "esp_console.h"
 #include "esp_system.h"
@@ -757,8 +759,14 @@ static int cmd_cron_now(int argc, char **argv)
 static struct {
     struct arg_str *host;
     struct arg_int *port;
+    struct arg_str *type;
     struct arg_end *end;
 } proxy_args;
+
+static struct {
+    struct arg_str *tz;
+    struct arg_end *end;
+} timezone_args;
 
 static int cmd_set_proxy(int argc, char **argv)
 {
@@ -767,7 +775,16 @@ static int cmd_set_proxy(int argc, char **argv)
         arg_print_errors(stderr, proxy_args.end, argv[0]);
         return 1;
     }
-    http_proxy_set(proxy_args.host->sval[0], (uint16_t)proxy_args.port->ival[0]);
+    const char *proxy_type = "http";
+    if (proxy_args.type->count > 0 && proxy_args.type->sval[0] && proxy_args.type->sval[0][0]) {
+        proxy_type = proxy_args.type->sval[0];
+    }
+    if (strcmp(proxy_type, "http") != 0 && strcmp(proxy_type, "socks5") != 0) {
+        printf("Invalid proxy type: %s. Use http or socks5.\n", proxy_type);
+        return 1;
+    }
+
+    http_proxy_set(proxy_args.host->sval[0], (uint16_t)proxy_args.port->ival[0], proxy_type);
     printf("Proxy set. Restart to apply.\n");
     return 0;
 }
@@ -777,6 +794,46 @@ static int cmd_clear_proxy(int argc, char **argv)
 {
     http_proxy_clear();
     printf("Proxy cleared. Restart to apply.\n");
+    return 0;
+}
+
+static int cmd_set_timezone(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&timezone_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, timezone_args.end, argv[0]);
+        return 1;
+    }
+
+    const char *tz = timezone_args.tz->sval[0];
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open(MIMI_NVS_NAMESPACE, NVS_READWRITE, &nvs);
+    if (err != ESP_OK) {
+        printf("NVS open failed: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    err = nvs_set_str(nvs, MIMI_NVS_KEY_TIMEZONE, tz);
+    if (err == ESP_OK) {
+        err = nvs_commit(nvs);
+    }
+    nvs_close(nvs);
+
+    if (err != ESP_OK) {
+        printf("Failed to save timezone: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    setenv("TZ", tz, 1);
+    tzset();
+    printf("Timezone set to: %s (applied immediately)\n", tz);
+    return 0;
+}
+
+static int cmd_get_timezone(int argc, char **argv)
+{
+    const char *current = getenv("TZ");
+    printf("Current timezone: %s\n", current ? current : MIMI_TIMEZONE);
     return 0;
 }
 
@@ -862,6 +919,8 @@ static int cmd_set_ws_token(int argc, char **argv)
 /* --- clear_ws_token command --- */
 static int cmd_clear_ws_token(int argc, char **argv)
 {
+    (void)argc;
+    (void)argv;
     esp_err_t err = access_control_clear_ws_token();
     if (err != ESP_OK) {
         printf("Failed to clear WS token: %s\n", esp_err_to_name(err));
@@ -895,7 +954,7 @@ static int cmd_skill_list(int argc, char **argv)
 
     size_t n = skill_loader_build_summary(buf, 4096);
     if (n == 0) {
-        printf("No skills found under /spiffs/skills/.\n");
+        printf("No skills found under " MIMI_SKILLS_PREFIX ".\n");
     } else {
         printf("=== Skills ===\n%s", buf);
     }
@@ -922,9 +981,9 @@ static bool build_skill_path(const char *name, char *out, size_t out_size)
     if (strchr(name, '/') != NULL || strchr(name, '\\') != NULL) return false;
 
     if (has_md_suffix(name)) {
-        snprintf(out, out_size, "/spiffs/skills/%s", name);
+        snprintf(out, out_size, MIMI_SKILLS_PREFIX "%s", name);
     } else {
-        snprintf(out, out_size, "/spiffs/skills/%s.md", name);
+        snprintf(out, out_size, MIMI_SKILLS_PREFIX "%s.md", name);
     }
     return true;
 }
@@ -990,9 +1049,9 @@ static int cmd_skill_search(int argc, char **argv)
     }
 
     const char *keyword = skill_search_args.keyword->sval[0];
-    DIR *dir = opendir("/spiffs");
+    DIR *dir = opendir(MIMI_SPIFFS_BASE);
     if (!dir) {
-        printf("Cannot open /spiffs.\n");
+        printf("Cannot open " MIMI_SPIFFS_BASE ".\n");
         return 1;
     }
 
@@ -1010,7 +1069,7 @@ static int cmd_skill_search(int argc, char **argv)
         if (strcmp(name + name_len - 3, ".md") != 0) continue;
 
         char full_path[296];
-        snprintf(full_path, sizeof(full_path), "/spiffs/%s", name);
+        snprintf(full_path, sizeof(full_path), MIMI_SPIFFS_BASE "/%s", name);
 
         bool file_matched = contains_nocase(name, keyword);
         int matched_line = 0;
@@ -1099,6 +1158,7 @@ static int cmd_config_show(int argc, char **argv)
     print_config("Proxy Host", MIMI_NVS_PROXY,  MIMI_NVS_KEY_PROXY_HOST, MIMI_SECRET_PROXY_HOST, false);
     print_config("Proxy Port", MIMI_NVS_PROXY,  MIMI_NVS_KEY_PROXY_PORT, MIMI_SECRET_PROXY_PORT, false);
     print_config("Search Key", MIMI_NVS_SEARCH, MIMI_NVS_KEY_API_KEY,  MIMI_SECRET_SEARCH_KEY, true);
+    print_config("Timezone",   MIMI_NVS_NAMESPACE, MIMI_NVS_KEY_TIMEZONE, MIMI_TIMEZONE, false);
     print_config("Allow From", MIMI_NVS_SECURITY, MIMI_NVS_KEY_ALLOW_FROM, MIMI_SECRET_ALLOW_FROM, false);
     print_config("WS Token",  MIMI_NVS_SECURITY, MIMI_NVS_KEY_WS_TOKEN, MIMI_SECRET_WS_TOKEN, true);
     print_config("Voice GW",   MIMI_NVS_VOICE,  MIMI_NVS_KEY_VOICE_GW, MIMI_VOICE_GATEWAY_URL, false);
@@ -1112,7 +1172,8 @@ static int cmd_config_reset(int argc, char **argv)
 {
     const char *namespaces[] = {
         MIMI_NVS_WIFI, MIMI_NVS_TG, MIMI_NVS_LLM, MIMI_NVS_PROXY, MIMI_NVS_SEARCH,
-        MIMI_NVS_VOICE, MIMI_NVS_SECURITY, MIMI_NVS_AUDIO, MIMI_NVS_FEISHU
+        MIMI_NVS_VOICE, MIMI_NVS_SECURITY, MIMI_NVS_AUDIO, MIMI_NVS_FEISHU,
+        MIMI_NVS_NAMESPACE
     };
     int ns_count = sizeof(namespaces) / sizeof(namespaces[0]);
     for (int i = 0; i < ns_count; i++) {
@@ -1130,13 +1191,16 @@ static int cmd_config_reset(int argc, char **argv)
 /* --- heartbeat_trigger command --- */
 static int cmd_heartbeat_trigger(int argc, char **argv)
 {
+    (void)argc;
+    (void)argv;
     printf("Checking HEARTBEAT.md...\n");
-    if (heartbeat_trigger()) {
-        printf("Heartbeat: agent prompted with pending tasks.\n");
-    } else {
-        printf("Heartbeat: no actionable tasks found.\n");
+    esp_err_t err = heartbeat_service_trigger_now();
+    if (err == ESP_OK) {
+        printf("Heartbeat trigger requested.\n");
+        return 0;
     }
-    return 0;
+    printf("Heartbeat trigger failed: %s\n", esp_err_to_name(err));
+    return 1;
 }
 
 /* --- cron_start command --- */
@@ -1690,7 +1754,7 @@ esp_err_t serial_cli_init(void)
     /* skill_list */
     esp_console_cmd_t skill_list_cmd = {
         .command = "skill_list",
-        .help = "List installed skills from /spiffs/skills/",
+        .help = "List installed skills from " MIMI_SKILLS_PREFIX,
         .func = &cmd_skill_list,
     };
     esp_console_cmd_register(&skill_list_cmd);
@@ -1875,10 +1939,11 @@ esp_err_t serial_cli_init(void)
     /* set_proxy */
     proxy_args.host = arg_str1(NULL, NULL, "<host>", "Proxy host/IP");
     proxy_args.port = arg_int1(NULL, NULL, "<port>", "Proxy port");
-    proxy_args.end = arg_end(2);
+    proxy_args.type = arg_str0(NULL, NULL, "<type>", "Proxy type: http|socks5 (default: http)");
+    proxy_args.end = arg_end(3);
     esp_console_cmd_t proxy_cmd = {
         .command = "set_proxy",
-        .help = "Set HTTP proxy (e.g. set_proxy 192.168.1.83 7897)",
+        .help = "Set proxy (e.g. set_proxy 192.168.1.83 7897 [http|socks5])",
         .func = &cmd_set_proxy,
         .argtable = &proxy_args,
     };
@@ -1915,6 +1980,25 @@ esp_err_t serial_cli_init(void)
         .func = &cmd_heartbeat_trigger,
     };
     esp_console_cmd_register(&heartbeat_cmd);
+
+    /* set_timezone */
+    timezone_args.tz = arg_str1(NULL, NULL, "<tz>", "POSIX TZ string, e.g. CST-8 or UTC0");
+    timezone_args.end = arg_end(1);
+    esp_console_cmd_t tz_set_cmd = {
+        .command = "set_timezone",
+        .help = "Set timezone (POSIX TZ format, e.g. CST-8, EST5EDT). Persisted in NVS.",
+        .func = &cmd_set_timezone,
+        .argtable = &timezone_args,
+    };
+    esp_console_cmd_register(&tz_set_cmd);
+
+    /* get_timezone */
+    esp_console_cmd_t tz_get_cmd = {
+        .command = "get_timezone",
+        .help = "Show current timezone setting",
+        .func = &cmd_get_timezone,
+    };
+    esp_console_cmd_register(&tz_get_cmd);
 
     /* cron_start */
     esp_console_cmd_t cron_start_cmd = {
