@@ -628,6 +628,197 @@ static bool feishu_extract_text_from_content(const char *content_json, char *out
     return false;
 }
 
+static const char *feishu_json_get_string(cJSON *root, const char *key)
+{
+    if (!root || !key) {
+        return NULL;
+    }
+    cJSON *item = cJSON_GetObjectItem(root, key);
+    if (cJSON_IsString(item) && item->valuestring && item->valuestring[0]) {
+        return item->valuestring;
+    }
+    return NULL;
+}
+
+static bool feishu_json_get_int(cJSON *root, const char *key, int *out_value)
+{
+    if (!root || !key || !out_value) {
+        return false;
+    }
+    cJSON *item = cJSON_GetObjectItem(root, key);
+    if (!cJSON_IsNumber(item)) {
+        return false;
+    }
+    *out_value = item->valueint;
+    return true;
+}
+
+static const char *feishu_get_bus_media_type(const char *message_type)
+{
+    if (!message_type || !message_type[0]) {
+        return "media";
+    }
+    if (strcmp(message_type, "image") == 0 || strcmp(message_type, "sticker") == 0) {
+        return "photo";
+    }
+    if (strcmp(message_type, "file") == 0) {
+        return "document";
+    }
+    if (strcmp(message_type, "audio") == 0) {
+        return "voice";
+    }
+    if (strcmp(message_type, "media") == 0) {
+        return "media";
+    }
+    return "media";
+}
+
+static bool feishu_build_media_summary(cJSON *message,
+                                       const char *message_type,
+                                       char *summary,
+                                       size_t summary_size,
+                                       char *out_file_id,
+                                       size_t file_id_size,
+                                       char **out_meta_json)
+{
+    if (!message || !message_type || !summary || summary_size < 2) {
+        return false;
+    }
+    summary[0] = '\0';
+    if (out_file_id && file_id_size > 0) {
+        out_file_id[0] = '\0';
+    }
+    if (out_meta_json) {
+        *out_meta_json = NULL;
+    }
+
+    const char *message_id = "";
+    cJSON *message_id_item = cJSON_GetObjectItem(message, "message_id");
+    if (cJSON_IsString(message_id_item) && message_id_item->valuestring) {
+        message_id = message_id_item->valuestring;
+    }
+
+    const char *content_json = NULL;
+    cJSON *content_item = cJSON_GetObjectItem(message, "content");
+    if (cJSON_IsString(content_item) && content_item->valuestring) {
+        content_json = content_item->valuestring;
+    }
+
+    cJSON *content_root = NULL;
+    if (content_json && content_json[0]) {
+        content_root = cJSON_Parse(content_json);
+    }
+
+    const char *key = NULL;
+    const char *name = NULL;
+    const char *mime = NULL;
+    int duration = 0;
+    int file_size = 0;
+    bool has_duration = false;
+    bool has_file_size = false;
+
+    if (content_root) {
+        key = feishu_json_get_string(content_root, "file_key");
+        if (!key) key = feishu_json_get_string(content_root, "image_key");
+        if (!key) key = feishu_json_get_string(content_root, "media_key");
+        if (!key) key = feishu_json_get_string(content_root, "audio_key");
+        name = feishu_json_get_string(content_root, "file_name");
+        if (!name) name = feishu_json_get_string(content_root, "title");
+        mime = feishu_json_get_string(content_root, "mime_type");
+        has_duration = feishu_json_get_int(content_root, "duration", &duration);
+        has_file_size = feishu_json_get_int(content_root, "file_size", &file_size);
+    }
+
+    if (out_file_id && file_id_size > 0 && key && key[0]) {
+        safe_copy(out_file_id, file_id_size, key);
+    }
+
+    if (strcmp(message_type, "image") == 0) {
+        snprintf(summary, summary_size,
+                 "[飞书图片消息]\n"
+                 "image_key: %.96s\n"
+                 "message_id: %.96s",
+                 key ? key : "",
+                 message_id);
+    } else if (strcmp(message_type, "file") == 0) {
+        snprintf(summary, summary_size,
+                 "[飞书文件消息]\n"
+                 "文件名: %.96s\n"
+                 "大小: %d 字节\n"
+                 "file_key: %.96s\n"
+                 "message_id: %.96s",
+                 name ? name : "",
+                 has_file_size ? file_size : 0,
+                 key ? key : "",
+                 message_id);
+    } else if (strcmp(message_type, "audio") == 0) {
+        snprintf(summary, summary_size,
+                 "[飞书语音消息]\n"
+                 "时长: %d\n"
+                 "file_key: %.96s\n"
+                 "message_id: %.96s",
+                 has_duration ? duration : 0,
+                 key ? key : "",
+                 message_id);
+    } else if (strcmp(message_type, "media") == 0) {
+        snprintf(summary, summary_size,
+                 "[飞书媒体消息]\n"
+                 "标题: %.96s\n"
+                 "时长: %d\n"
+                 "file_key: %.96s\n"
+                 "message_id: %.96s",
+                 name ? name : "",
+                 has_duration ? duration : 0,
+                 key ? key : "",
+                 message_id);
+    } else if (strcmp(message_type, "sticker") == 0) {
+        snprintf(summary, summary_size,
+                 "[飞书表情消息]\n"
+                 "file_key: %.96s\n"
+                 "message_id: %.96s",
+                 key ? key : "",
+                 message_id);
+    } else {
+        snprintf(summary, summary_size,
+                 "[飞书%s消息]\n"
+                 "message_id: %.96s\n"
+                 "content: %.320s",
+                 message_type,
+                 message_id,
+                 content_json ? content_json : "{}");
+    }
+
+    if (out_meta_json) {
+        cJSON *meta = cJSON_CreateObject();
+        if (meta) {
+            cJSON_AddStringToObject(meta, "source_type", message_type);
+            if (message_id[0]) {
+                cJSON_AddStringToObject(meta, "message_id", message_id);
+            }
+            if (key && key[0]) {
+                cJSON_AddStringToObject(meta, "file_key", key);
+            }
+            if (name && name[0]) {
+                cJSON_AddStringToObject(meta, "name", name);
+            }
+            if (mime && mime[0]) {
+                cJSON_AddStringToObject(meta, "mime_type", mime);
+            }
+            if (has_duration) {
+                cJSON_AddNumberToObject(meta, "duration", duration);
+            }
+            if (has_file_size) {
+                cJSON_AddNumberToObject(meta, "file_size", file_size);
+            }
+            *out_meta_json = cJSON_PrintUnformatted(meta);
+            cJSON_Delete(meta);
+        }
+    }
+
+    cJSON_Delete(content_root);
+    return summary[0] != '\0';
+}
+
 static bool feishu_extract_event_unique_id(cJSON *root, char *out_id, size_t out_size)
 {
     if (!root || !out_id || out_size == 0) {
@@ -705,7 +896,11 @@ static bool feishu_is_duplicate_event(const char *event_id)
     return is_duplicate;
 }
 
-static void feishu_push_inbound(const char *chat_id, const char *content)
+static void feishu_push_inbound(const char *chat_id,
+                                const char *content,
+                                const char *media_type,
+                                const char *file_id,
+                                const char *meta_json)
 {
     if (!chat_id || !chat_id[0] || !content || !content[0]) {
         return;
@@ -714,10 +909,22 @@ static void feishu_push_inbound(const char *chat_id, const char *content)
     mimi_msg_t msg = {0};
     strncpy(msg.channel, MIMI_CHAN_FEISHU, sizeof(msg.channel) - 1);
     strncpy(msg.chat_id, chat_id, sizeof(msg.chat_id) - 1);
-    strncpy(msg.media_type, "text", sizeof(msg.media_type) - 1);
+    strncpy(msg.media_type,
+            (media_type && media_type[0]) ? media_type : "text",
+            sizeof(msg.media_type) - 1);
+    if (file_id && file_id[0]) {
+        strncpy(msg.file_id, file_id, sizeof(msg.file_id) - 1);
+    }
     msg.content = strdup(content);
     if (!msg.content) {
         return;
+    }
+    if (meta_json && meta_json[0]) {
+        msg.meta_json = strdup(meta_json);
+        if (!msg.meta_json) {
+            message_bus_msg_free(&msg);
+            return;
+        }
     }
 
     if (message_bus_push_inbound(&msg) != ESP_OK) {
@@ -860,6 +1067,9 @@ static esp_err_t feishu_events_handler(httpd_req_t *req)
     char chat_id[MIMI_CHAT_ID_MAX_LEN] = {0};
     char message_type[16] = {0};
     char text[1024] = {0};
+    char media_summary[1024] = {0};
+    char media_file_id[96] = {0};
+    char *media_meta_json = NULL;
     if (cJSON_IsObject(message)) {
         cJSON *chat_id_item = cJSON_GetObjectItem(message, "chat_id");
         cJSON *message_type_item = cJSON_GetObjectItem(message, "message_type");
@@ -873,27 +1083,49 @@ static esp_err_t feishu_events_handler(httpd_req_t *req)
         if (cJSON_IsString(content_item) && content_item->valuestring) {
             feishu_extract_text_from_content(content_item->valuestring, text, sizeof(text));
         }
+        if (message_type[0] && strcmp(message_type, "text") != 0) {
+            feishu_build_media_summary(message, message_type,
+                                       media_summary, sizeof(media_summary),
+                                       media_file_id, sizeof(media_file_id),
+                                       &media_meta_json);
+        }
     }
 
     cJSON_Delete(root);
 
     if (!chat_id[0]) {
+        free(media_meta_json);
         return feishu_send_http_json(req, NULL, "{\"code\":0}");
     }
 
     if (strcmp(message_type, "text") != 0) {
-        ESP_LOGI(TAG, "Ignore unsupported Feishu message type=%s chat=%s",
-                 message_type[0] ? message_type : "(empty)", chat_id);
+        if (media_summary[0]) {
+            ESP_LOGI(TAG, "Feishu %s summary from %s: %.60s",
+                     message_type[0] ? message_type : "media",
+                     chat_id,
+                     media_summary);
+            feishu_push_inbound(chat_id,
+                                media_summary,
+                                feishu_get_bus_media_type(message_type),
+                                media_file_id,
+                                media_meta_json);
+        } else {
+            ESP_LOGI(TAG, "Ignore unsupported Feishu message type=%s chat=%s",
+                     message_type[0] ? message_type : "(empty)", chat_id);
+        }
+        free(media_meta_json);
         return feishu_send_http_json(req, NULL, "{\"code\":0}");
     }
 
     if (strcmp(text, "/start") == 0) {
+        free(media_meta_json);
         feishu_send_message(chat_id, FEISHU_START_HELP);
         return feishu_send_http_json(req, NULL, "{\"code\":0}");
     }
 
     ESP_LOGI(TAG, "Feishu text from %s: %.60s", chat_id, text);
-    feishu_push_inbound(chat_id, text);
+    feishu_push_inbound(chat_id, text, "text", NULL, NULL);
+    free(media_meta_json);
     return feishu_send_http_json(req, NULL, "{\"code\":0}");
 }
 

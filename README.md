@@ -224,8 +224,8 @@ This firmware now supports **encrypted Feishu event payloads**:
 
 Current limits:
 
-- text messages only
-- non-text events are ACKed but ignored
+- text messages go to the Agent as-is
+- image / file / audio / sticker / other non-text Feishu messages are downgraded into summary text before entering the Agent
 - outbound Feishu delivery uses `chat_id`
 - repeated Feishu deliveries are lightly deduplicated by `event_id/message_id` before entering the Agent
 
