@@ -231,8 +231,8 @@ esp_err_t tool_edit_file_execute(const char *input_json, char *output, size_t ou
     size_t old_len = strlen(old_str);
     size_t new_len = strlen(new_str);
     size_t max_result = file_size + (new_len > old_len ? new_len - old_len : 0) + 1;
-    char *buf = malloc(file_size + 1);
-    char *result = malloc(max_result);
+    char *buf = heap_caps_malloc(file_size + 1, MALLOC_CAP_SPIRAM);
+    char *result = heap_caps_malloc(max_result, MALLOC_CAP_SPIRAM);
     if (!buf || !result) {
         free(buf);
         free(result);
@@ -260,6 +260,11 @@ esp_err_t tool_edit_file_execute(const char *input_json, char *output, size_t ou
     memcpy(result, buf, prefix_len);
     memcpy(result + prefix_len, new_str, new_len);
     size_t suffix_start = prefix_len + old_len;
+    if (suffix_start > n) {
+        snprintf(output, output_size, "Error: internal read mismatch in %s", path);
+        free(buf); free(result); fclose(f); cJSON_Delete(root);
+        return ESP_FAIL;
+    }
     size_t suffix_len = n - suffix_start;
     memcpy(result + prefix_len + new_len, buf + suffix_start, suffix_len);
     size_t total = prefix_len + new_len + suffix_len;
