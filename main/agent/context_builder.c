@@ -83,17 +83,19 @@ esp_err_t context_build_system_prompt(char *buf, size_t size)
     off = append_file(buf, size, off, MIMI_IDENTITY_FILE, "Identity");
 
     /* Long-term memory */
-    char mem_buf[4096];
-    if (memory_read_long_term(mem_buf, sizeof(mem_buf)) == ESP_OK && mem_buf[0]) {
+    char *mem_buf = heap_caps_malloc(8192, MALLOC_CAP_SPIRAM);
+    if (mem_buf && memory_read_long_term(mem_buf, 8192) == ESP_OK && mem_buf[0]) {
         off += snprintf(buf + off, size - off, "\n## Long-term Memory\n\n%s\n", mem_buf);
     }
+    if (mem_buf) free(mem_buf);
 
     /* Recent daily notes (configurable recent days) */
-    char recent_buf[4096];
-    if (memory_read_recent(recent_buf, sizeof(recent_buf), MIMI_MEMORY_RECENT_DAYS) == ESP_OK
+    char *recent_buf = heap_caps_malloc(8192, MALLOC_CAP_SPIRAM);
+    if (recent_buf && memory_read_recent(recent_buf, 8192, MIMI_MEMORY_RECENT_DAYS) == ESP_OK
         && recent_buf[0]) {
         off += snprintf(buf + off, size - off, "\n## Recent Notes\n\n%s\n", recent_buf);
     }
+    if (recent_buf) free(recent_buf);
 
     /* Skills */
     char skills_buf[2048];
