@@ -14,11 +14,21 @@ static size_t append_file(char *buf, size_t size, size_t offset, const char *pat
     FILE *f = fopen(path, "r");
     if (!f) return offset;
 
+    size_t header_len = header ? strlen(header) + 8 : 0;
+    if (offset + header_len + 64 >= size) {
+        ESP_LOGW(TAG, "append_file: no space for %s (offset=%zu, size=%zu)", path, offset, size);
+        fclose(f);
+        return offset;
+    }
+
     if (header && offset < size - 1) {
         offset += snprintf(buf + offset, size - offset, "\n## %s\n\n", header);
     }
 
     size_t n = fread(buf + offset, 1, size - offset - 1, f);
+    if (n == 0) {
+        ESP_LOGW(TAG, "append_file: read 0 bytes from %s (buffer full?)", path);
+    }
     offset += n;
     buf[offset] = '\0';
     fclose(f);
@@ -96,13 +106,16 @@ esp_err_t context_build_system_prompt(char *buf, size_t size)
     }
 
     /* Skills */
-    char skills_buf[2048];
-    size_t skills_len = skill_loader_build_summary(skills_buf, sizeof(skills_buf));
-    if (skills_len > 0) {
+    char *skills_buf = heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
+    if (skills_buf) {
+        size_t skills_len = skill_loader_build_summary(skills_buf, 4096);
+        if (skills_len > 0) {
         off += snprintf(buf + off, size - off,
             "\n## Available Skills\n\n"
-            "Available skills (use read_file to load full instructions):\n%s\n",
-            skills_buf);
+                "Available skills (use read_file to load full instructions):\n%s\n",
+                skills_buf);
+        }
+        free(skills_buf);
     }
 
     ESP_LOGI(TAG, "System prompt built: %d bytes", (int)off);

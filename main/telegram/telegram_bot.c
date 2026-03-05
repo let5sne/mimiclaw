@@ -469,7 +469,7 @@ static char *tg_api_call_via_proxy(const char *path, const char *post_data)
     int hlen;
     if (post_data) {
         hlen = snprintf(header, sizeof(header),
-            "POST /bot%s/%s HTTP/1.1\r\n"
+            "POST /bot%s/%s HTTP/1.0\r\n"
             "Host: api.telegram.org\r\n"
             "Content-Type: application/json\r\n"
             "Content-Length: %d\r\n"
@@ -477,7 +477,7 @@ static char *tg_api_call_via_proxy(const char *path, const char *post_data)
             s_bot_token, path, (int)strlen(post_data));
     } else {
         hlen = snprintf(header, sizeof(header),
-            "GET /bot%s/%s HTTP/1.1\r\n"
+            "GET /bot%s/%s HTTP/1.0\r\n"
             "Host: api.telegram.org\r\n"
             "Connection: close\r\n\r\n",
             s_bot_token, path);
@@ -845,7 +845,7 @@ static esp_err_t tg_download_file_via_proxy(const char *file_path, uint8_t **out
 
     char header[640];
     int hlen = snprintf(header, sizeof(header),
-                        "GET /file/bot%s/%s HTTP/1.1\r\n"
+                        "GET /file/bot%s/%s HTTP/1.0\r\n"
                         "Host: api.telegram.org\r\n"
                         "Connection: close\r\n\r\n",
                         s_bot_token, file_path);
